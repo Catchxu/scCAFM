@@ -1,2 +1,1 @@
-# Scallop
-Single-cell causal and topological positional encodings
+# Scallop: building a causality-aware foundation model through gene regulation modeling
