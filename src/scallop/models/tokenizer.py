@@ -58,7 +58,7 @@ class ExprQuantizer(nn.Module):
             probs[..., 1:][mask_expr.bool()] = probs_nonzero
             probs[..., 0][mask_expr.bool()] = 0.0  # since we now replaced zeros with nonzeros
 
-        return probs, mask_expr  # (C, G, B), (C, G)
+        return probs, mask_expr.bool()  # (C, G, B), (C, G)
 
 
 class Tokenizer(nn.Module):

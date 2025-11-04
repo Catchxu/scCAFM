@@ -68,6 +68,7 @@ def apply_rope(q: torch.Tensor, k: torch.Tensor) -> tuple[torch.Tensor, torch.Te
     Args:
         q: (C, H, L, D)
         k: (C, H, L, D)
+
     Returns:
         q_rot, k_rot: (C, H, L, D)
     """
@@ -279,6 +280,7 @@ class FastAttention(nn.Module):
         """
         Args:
             x: (C, L, E)
+
         Returns:
             out: (C, L, E)
         """
