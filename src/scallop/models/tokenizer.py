@@ -25,46 +25,52 @@ class ExprQuantizer(nn.Module):
     def forward(self, expr_value: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
-            expr_value: FloatTensor of shape (B, G)
+            expr_value: FloatTensor of shape (C, G)
 
         Returns:
-            probs: (B, G, num_bins) probabilities
-            mask_expr: (B, G) float mask where 1 = nonzero expr, 0 = zero expr
+            probs: (C, G, B) probabilities, where B = num_bins
+            mask_expr: (C, G) float mask where 1 = nonzero expr, 0 = zero expr
+
         Notes:
             - For positions where expr_value == 0, output is [1, 0, 0, ..., 0]
-            - For positions where expr_value != 0, output is [0, softmax(logits)] across bins 1, ..., num_bins-1
+            - For positions where expr_value != 0, output is [0, softmax(logits)] across bins 1, ..., B-1
         """
         if expr_value.dim() != 2:
-            raise ValueError("expr_value must be (B, G)")
+            raise ValueError("expr_value must be (C, G)")
 
-        B, G = expr_value.shape
+        C, G = expr_value.shape
         device = expr_value.device
 
         # mask: 1 for nonzero expr, 0 for zero expr
-        mask_expr = (expr_value != 0).float()  # (B, G)
+        mask_expr = (expr_value != 0).float()  # (C, G)
 
         # initialize all probs as [1, 0, ..., 0]
-        probs = torch.zeros((B, G, self.num_bins), device=device, dtype=torch.float32)
+        probs = torch.zeros((C, G, self.num_bins), device=device, dtype=torch.float32)
         probs[..., 0] = 1.0
 
         # compute only nonzero positions
         if mask_expr.any():
-            x_nonzero = expr_value[mask_expr.bool()].unsqueeze(-1).float()  # (K,1)
-            logits = self.mlp(x_nonzero)                                    # (K,num_bins-1)
-            probs_nonzero = F.softmax(logits, dim=-1)                       # (K,num_bins-1)
+            x_nonzero = expr_value[mask_expr.bool()].unsqueeze(-1).float()  # (CG, 1)
+            logits = self.mlp(x_nonzero)                                    # (CG, B-1)
+            probs_nonzero = F.softmax(logits, dim=-1)                       # (CG, B-1)
 
             # assign these to probs[..., 1:]
             probs[..., 1:][mask_expr.bool()] = probs_nonzero
             probs[..., 0][mask_expr.bool()] = 0.0  # since we now replaced zeros with nonzeros
 
-        return probs, mask_expr  # (B,G,num_bins), (B,G)
+        return probs, mask_expr  # (C, G, B), (C, G)
 
 
 class Tokenizer(nn.Module):
     """
-    Tokenizer for single-cell samples (AnnData).
+    Unified tokenizer for single-cell AnnData samples.
     """
-    def __init__(self, num_genes: int, num_bins: int = 20, embed_dim: int = 256, num_conditions: Optional[int] = None):
+    def __init__(self, 
+        num_genes: int, 
+        num_bins: int = 20, 
+        embed_dim: int = 256, 
+        num_conditions: Optional[int] = None
+    ):
         """
         Args:
             num_genes (int): number of genes
@@ -88,17 +94,17 @@ class Tokenizer(nn.Module):
         self.register_buffer('bin_idx', torch.arange(num_bins, dtype=torch.long))
         self.register_buffer('gene_idx', torch.arange(num_genes, dtype=torch.long))
 
-    def expr_mapping(self, x: torch.Tensor) -> torch.Tensor:
+    def _expr_mapping(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Map expression values x (C, G) to expression embeddings (C, G, E)
+        Map expression values (C, G) to expression embeddings (C, G, E)
         """
         bin_idx = self.bin_idx.to(x.device)       # (B,)
         embed_bank = self.bin_embed(bin_idx)      # (B, E)
-        weights = self.quantizer(x)               # (C, G, B)
+        weights, mask_expr = self.quantizer(x)    # (C, G, B), (C, G)
 
         # weighted sum over bins -> (C, G, E)
         out = torch.einsum('cgb,be->cge', weights, embed_bank)
-        return out
+        return out, mask_expr
 
     def forward(self, cond_idx: torch.Tensor, expr: torch.Tensor):
         """
@@ -107,24 +113,34 @@ class Tokenizer(nn.Module):
             expr: FloatTensor of shape (C, G)
 
         Returns:
-            out: FloatTensor of shape (C, G+1, E) where first token is the condition embedding
+            out: FloatTensor of shape (C, G+1, E)
+            mask_expr: FloatTensor of shape (C, G+1)
+                - mask_expr[:, 0] = 0 (condition token)
+                - mask_expr[:, 1:] = 1 if expr != 0 else 0
         """
         device = expr.device
+        C, _ = expr.shape
 
         # condition embedding -> (C, 1, E)
         cond_idx = cond_idx.to(device).long()
-        cond_emb = self.cond_embed(cond_idx).unsqueeze(1)  # (C, 1, E)
+        cond_emb = self.cond_embed(cond_idx).unsqueeze(1)  # (C,1,E)
 
-        # gene embedding using range indices -> (C, G, E)
-        gene_emb = self.gene_embed(self.gene_idx.to(device))    # (G, E)
-        gene_emb = gene_emb.unsqueeze(0).expand(expr.size(0), -1, -1)  # (C, G, E)
+        # gene embedding -> (C, G, E)
+        gene_emb = self.gene_embed(self.gene_idx.to(device))  # (G,E)
+        gene_emb = gene_emb.unsqueeze(0).expand(C, -1, -1)    # (C,G,E)
 
-        # expression embedding -> (C, G, E)
-        expr_emb = self.expr_mapping(expr.to(device))    # (C, G, E)
+        # expression embedding & mask -> (C, G, E), (C, G)
+        expr_emb, mask_expr = self._expr_mapping(expr.to(device))
 
-        out = gene_emb + expr_emb
-        out = torch.cat([cond_emb, out], dim=1)
-        return out
+        # combine embeddings
+        out = gene_emb + expr_emb  # (C, G, E)
+        out = torch.cat([cond_emb, out], dim=1)  # (C, G+1, E)
+
+        # prepend 0-column to mask_expr -> (C, G+1)
+        zero_col = torch.zeros((C, 1), device=device, dtype=mask_expr.dtype)
+        mask_expr = torch.cat([zero_col, mask_expr], dim=1)
+
+        return out, mask_expr
 
 
 
@@ -149,9 +165,11 @@ if __name__ == '__main__':
     expr = torch.randn(batch_size, num_genes)
     expr[expr.abs() < 0.5] = 0.0
 
-    out = tokenizer(cond_idx, expr)
+    out, mask_expr = tokenizer(cond_idx, expr)
 
     print("Condition indices:", cond_idx)
-    print("Expression matrix:\n", expr)
+    print("Expression tensor:\n", expr)
     print("Output shape:", out.shape)
     print("Output tensor:\n", out)
+    print("Mask shape:", mask_expr.shape)
+    print("Mask tensor:\n", mask_expr)
