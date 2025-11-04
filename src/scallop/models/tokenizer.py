@@ -32,8 +32,8 @@ class ExprQuantizer(nn.Module):
             mask_expr: (C, G) float mask where 1 = nonzero expr, 0 = zero expr
 
         Notes:
-            - For positions where expr_value == 0, output is [1, 0, 0, ..., 0]
-            - For positions where expr_value != 0, output is [0, softmax(logits)] across bins 1, ..., B-1
+            - For positions where expr_value == 0, output is [1, 0, 0, ..., 0].
+            - For positions where expr_value != 0, output is [0, softmax(logits)] across bins 1, ..., B-1.
         """
         if expr_value.dim() != 2:
             raise ValueError("expr_value must be (C, G)")
@@ -96,7 +96,7 @@ class Tokenizer(nn.Module):
 
     def _expr_mapping(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Map expression values (C, G) to expression embeddings (C, G, E)
+        Map expression values (C, G) to expression embeddings (C, G, E).
         """
         bin_idx = self.bin_idx.to(x.device)       # (B,)
         embed_bank = self.bin_embed(bin_idx)      # (B, E)

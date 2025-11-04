@@ -358,9 +358,6 @@ class SwiGLUFFN(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    """
-    One block of Transformer model
-    """
     def __init__(
         self,
         embed_dim: int,
@@ -395,9 +392,6 @@ class TransformerBlock(nn.Module):
 
 
 class Transformer(nn.Module):
-    """
-    Stacked Transformer model
-    """
     def __init__(
         self,
         embed_dim: int,

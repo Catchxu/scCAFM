@@ -153,6 +153,7 @@ class Router(nn.Module):
             gene_idx: LongTensor (S,) specifying which genes to route
             mask_expr: BoolTensor (C, L), True = valid token, False = masked
             temperature: Softmax temperature for logits
+
         Returns:
             probs: FloatTensor (C, S, m)
                 Assignment probabilities over m factors for selected genes
@@ -202,9 +203,10 @@ class InferenceModel(nn.Module):
     """
     Inference model for single-cell gene allocation.
 
-    - Backbone: Transformer over token embeddings
-    - Two Routers: TF-router and TG-router mapping gene tokens to factor assignments
-    - Final allocation: outer product of TF and TG allocations
+    Architecture:
+        - Backbone: Transformer over token embeddings
+        - Two Routers: TF-router and TG-router mapping gene tokens to factor assignments
+        - Final allocation: outer product of TF and TG allocations
     """
     def __init__(
         self,
@@ -239,7 +241,6 @@ class InferenceModel(nn.Module):
 
         Returns:
             allocation: FloatTensor (C, S_TF, S_TG), outer product of TF/TG allocations
-                        Already incorporates TF/TG masks internally; no extra masking needed.
         """
         # Pass through transformer backbone
         tokens = self.backbone(x)  # (C, L, E)
