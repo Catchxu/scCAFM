@@ -1,16 +1,14 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional
+from typing import Optional, Tuple
 
 
-class ExprVQ(nn.Module):
+class ExprQuantizer(nn.Module):
     """
-    Vector quantization for expression value:
-    - expr_value == 0 -> mapped to bin 0
-    - expr_value != 0 -> mapped to bins 1, ..., num_bins-1 via a small MLP
-    
-    Outputs a probability tensor with last dim == num_bins.
+    Quantizes expression values into discrete bins:
+        - expr_value == 0 -> bin 0
+        - expr_value != 0 -> bins 1..num_bins-1 via small MLP
     """
     def __init__(self, num_bins: int = 10, hidden_dim: int = 64):
         super().__init__()
@@ -24,46 +22,42 @@ class ExprVQ(nn.Module):
             nn.Linear(hidden_dim, num_bins-1)
         )
 
-    def forward(self, expr_value: torch.Tensor) -> torch.Tensor:
+    def forward(self, expr_value: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
-            expr_value: FloatTensor of shape (batch_size, num_genes)
+            expr_value: FloatTensor of shape (B, G)
 
         Returns:
-            FloatTensor of shape (batch_size, num_genes, num_bins) with probabilities
-
+            probs: (B, G, num_bins) probabilities
+            mask_expr: (B, G) float mask where 1 = nonzero expr, 0 = zero expr
         Notes:
             - For positions where expr_value == 0, output is [1, 0, 0, ..., 0]
             - For positions where expr_value != 0, output is [0, softmax(logits)] across bins 1, ..., num_bins-1
         """
         if expr_value.dim() != 2:
-            raise ValueError("expr_value must be a 2D tensor with shape (batch_size, num_genes)")
+            raise ValueError("expr_value must be (B, G)")
 
-        batch_size, num_genes = expr_value.shape
+        B, G = expr_value.shape
         device = expr_value.device
-        probs = torch.zeros((batch_size, num_genes, self.num_bins), device=device, dtype=torch.float32)
 
-        # boolean mask of non-zero positions
-        mask_nonzero = (expr_value != 0)
+        # mask: 1 for nonzero expr, 0 for zero expr
+        mask_expr = (expr_value != 0).float()  # (B, G)
 
-        # compute only for non-zero entries -> efficient when many zeros
-        if mask_nonzero.any():
-            # gather non-zero values as (K,1)
-            x_nonzero = expr_value[mask_nonzero].unsqueeze(-1).to(torch.float32)   # (K,1)
-            logits_nonzero = self.mlp(x_nonzero)                                   # (K, num_bins-1)
-            probs_nonzero = F.softmax(logits_nonzero, dim=-1)                      # (K, num_bins-1)
+        # initialize all probs as [1, 0, ..., 0]
+        probs = torch.zeros((B, G, self.num_bins), device=device, dtype=torch.float32)
+        probs[..., 0] = 1.0
 
-            # assign to probs[..., 1:]
-            probs_view = probs[..., 1:]                                            # (batch, num_genes, num_bins-1)
-            probs_view[mask_nonzero] = probs_nonzero                               # broadcast assignment
+        # compute only nonzero positions
+        if mask_expr.any():
+            x_nonzero = expr_value[mask_expr.bool()].unsqueeze(-1).float()  # (K,1)
+            logits = self.mlp(x_nonzero)                                    # (K,num_bins-1)
+            probs_nonzero = F.softmax(logits, dim=-1)                       # (K,num_bins-1)
 
-        # set zero positions to bin 0 = 1
-        mask_zero = ~mask_nonzero
-        if mask_zero.any():
-            idx_row, idx_col = mask_zero.nonzero(as_tuple=True)
-            probs[idx_row, idx_col, 0] = 1.0
+            # assign these to probs[..., 1:]
+            probs[..., 1:][mask_expr.bool()] = probs_nonzero
+            probs[..., 0][mask_expr.bool()] = 0.0  # since we now replaced zeros with nonzeros
 
-        return probs
+        return probs, mask_expr  # (B,G,num_bins), (B,G)
 
 
 class Tokenizer(nn.Module):
@@ -83,7 +77,7 @@ class Tokenizer(nn.Module):
         self.num_conditions = num_conditions
         self.embed_dim = embed_dim
 
-        self.VQ = ExprVQ(num_bins)
+        self.quantizer = ExprQuantizer(num_bins)
 
         # Embedding layers
         self.gene_embed = nn.Embedding(num_genes, embed_dim)
@@ -100,7 +94,7 @@ class Tokenizer(nn.Module):
         """
         bin_idx = self.bin_idx.to(x.device)       # (B,)
         embed_bank = self.bin_embed(bin_idx)      # (B, E)
-        weights = self.VQ(x)                      # (C, G, B)
+        weights = self.quantizer(x)               # (C, G, B)
 
         # weighted sum over bins -> (C, G, E)
         out = torch.einsum('cgb,be->cge', weights, embed_bank)
