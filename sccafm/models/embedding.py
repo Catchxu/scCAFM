@@ -93,7 +93,8 @@ class TomoEmbedding(nn.Module):
         D=256,
         expr_num_bins=32, 
         cond_max_item=1024, 
-        batch_max_item=256
+        batch_max_item=256,
+        **kwargs
     ):
         super().__init__()
         self.D = D

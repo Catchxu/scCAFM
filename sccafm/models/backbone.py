@@ -21,7 +21,7 @@ class TransformerLayer(nn.Module):
         self,
         embed_dim,
         num_heads,
-        ffn_hidden_dim,
+        ffn_hidden_dim=None,
         use_rotary=False,
     ):
         super().__init__()
@@ -34,6 +34,9 @@ class TransformerLayer(nn.Module):
         self.norm1 = nn.RMSNorm(embed_dim)
         self.norm2 = nn.RMSNorm(embed_dim)
 
+        if ffn_hidden_dim is None:
+            ffn_hidden_dim = 4*embed_dim
+
         self.ffn = nn.Sequential(
             SwiGLU(embed_dim, ffn_hidden_dim),
             nn.Linear(ffn_hidden_dim, embed_dim)
@@ -41,7 +44,7 @@ class TransformerLayer(nn.Module):
 
     def forward(self, x, key_padding_mask=None, causal=False):
         """
-        x: (C, L, D)
+        x: (C, L, E)
         key_padding_mask: (C, L)
         """
         # ---- MHA block ----
@@ -62,19 +65,20 @@ class TomoEncoder(nn.Module):
     Stack multiple TransformerLayers.
     
     Input:
-        x: (C, L, D)
+        x: (C, L, E)
         key_padding_mask: (C, L)
     
     Output:
-        x: (C, L, D)
+        x: (C, L, E)
     """
     def __init__(
         self,
         num_layers,
         embed_dim,
         num_heads,
-        ffn_hidden_dim,
-        use_rotary=False
+        ffn_hidden_dim=None,
+        use_rotary=False,
+        **kwargs
     ):
         super().__init__()
         self.layers = nn.ModuleList([
@@ -105,16 +109,16 @@ class TomoEncoder(nn.Module):
 
 
 if __name__ == "__main__":
-    C, L, D = 2, 128, 256
+    C, L, E = 2, 128, 256
 
-    x = torch.randn(C, L, D)
+    x = torch.randn(C, L, E)
     pad = torch.zeros(C, L, dtype=torch.bool)   # no padding
 
     encoder = TomoEncoder(
         num_layers=4,
-        embed_dim=D,
+        embed_dim=E,
         num_heads=8,
-        ffn_hidden_dim=4*D,
+        ffn_hidden_dim=4*E,
         use_rotary=True
     )
 
