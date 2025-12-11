@@ -21,12 +21,20 @@ scCAFM is a causality-aware foundation model designed for large-scale single-cel
 
 
 ## Installation
-scCAFM is developed as a Python package. You will need to install Python, and the recommended version is Python 3.13.9.
+scCAFM is a Python package for causal modeling of single-cell RNA-seq data. It requires Python 3.10–3.14 (Python 3.13.9 recommended).
 
-You can download this repository and install it locally:
+First, you can download this repository and install it locally:
 ```bash
 git clone https://github.com/Catchxu/scCAFM.git
 cd scCAFM
 pip install .
 ```
-where the files in `resources/` and `configs/` have been included.
+where the `resources/` and `configs/` directories are included automatically in the package, so you don’t need to copy them manually.
+
+If you encounter the conflicts of dependencies while using scCAFM, you can report the errors at [Issues]https://github.com/Catchxu/scCAFM/issues. In this case, we strongly recommend that you try installing a strict and reproducible development environment to avoid conflicts:
+```bash
+git clone https://github.com/Catchxu/scCAFM.git
+cd scCAFM
+pip install .[dev]
+```
+where exact versions of dependencies are specified.
