@@ -4,7 +4,7 @@ scCAFM is a causality-aware foundation model designed for large-scale single-cel
 
 <br/>
 <div align=center>
-<img src="/img/Fig1.png" width="70%">
+<img src="/img/framework.png" width="70%">
 </div>
 <br/>
 
@@ -20,5 +20,13 @@ scCAFM is a causality-aware foundation model designed for large-scale single-cel
 * Embeddings are transferable: they improve downstream supervised and unsupervised tasks (drug sensitivity, perturbation response prediction, trajectory/lineage inference).
 
 
+## Installation
+scCAFM is developed as a Python package. You will need to install Python, and the recommended version is Python 3.13.9.
 
-
+You can download this repository and install it locally:
+```bash
+git clone https://github.com/Catchxu/scCAFM.git
+cd scCAFM
+pip install .
+```
+where the files in `resources/` and `configs/` have been included.

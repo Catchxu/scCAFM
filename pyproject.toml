@@ -1,0 +1,40 @@
+[project]
+name = "scCAFM"
+version = "0.1.0"
+description = "Causality-aware single-cell RNA-Seq foundation model with causal gene regulation modeling"
+authors = [
+    { name = "Kaichen Xu", email = "KXU248@emory.edu" }
+]
+readme = "README.md"
+license = "GPL-3.0"
+requires-python = ">=3.10,<3.15"
+keywords = [
+    "single-cell", "causal-inference", "foundation-model", "deep-learning", "scRNAseq"
+]
+
+
+[project.urls]
+repository = "https://github.com/Catchxu/scCAFM"
+
+
+[tool.hatch.build.targets.sdist]
+only-include = [
+    "sccafm",
+    "README.md",
+    "configs",
+    "resources",
+]
+
+
+[tool.hatch.build.targets.wheel]
+only-include = [
+    "sccafm",
+    "README.md",
+    "configs",
+    "resources",
+]
+
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
