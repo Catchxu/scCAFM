@@ -170,8 +170,6 @@ class GeneRouter(nn.Module):
             if gene_subset.dtype != torch.bool or gene_subset.shape != (C, L-1):
                 raise ValueError("gene_subset must be BoolTensor of shape (C, L-1)")
 
-            x = x[gene_subset].view(C, -1, E)     # (C, S, E)
-
         # -------------------------------
         # 2. else use key_padding_mask
         # -------------------------------
@@ -179,13 +177,10 @@ class GeneRouter(nn.Module):
             if key_padding_mask.dtype != torch.bool or key_padding_mask.shape != (C, L):
                 raise ValueError("key_padding_mask must be BoolTensor (C, L)")
 
-            keep = ~key_padding_mask     # True = keep
-            keep = keep[:, 1:]
-            x = x[keep].view(C, -1, E)   # (C, S, E)
-
-        # --------------------------------------------------
-        # Compute logits → gating → probs
-        # --------------------------------------------------
+            gene_subset = ~key_padding_mask     # True = keep
+            gene_subset = gene_subset[:, 1:]
+        
+        x = x[gene_subset].view(C, -1, E)   # (C, S, E)
         logits = self.mlp(x) / temperature  # (C, S, m)
 
         if self.gating is not None:
@@ -193,7 +188,7 @@ class GeneRouter(nn.Module):
         else:
             probs = F.softmax(logits, dim=-1)
 
-        return probs
+        return probs, gene_subset
 
 
 class SFM(nn.Module):
@@ -277,6 +272,7 @@ class SFM(nn.Module):
 
     def _query_gene_subset(self, tokens):
         gene_tokens = tokens["gene"]
+        assert self.tf_idx is not None, "Please first specify tf_list when initialization!"
         self.tf_idx = self.tf_idx.to(gene_tokens.device)
 
         gene_subset = (gene_tokens.unsqueeze(-1) == self.tf_idx.unsqueeze(0).unsqueeze(0)).any(dim=-1)
@@ -295,17 +291,16 @@ class SFM(nn.Module):
         else:
             gene_subset = None
 
-        u = self.tfrouter(x, gene_subset, key_padding_mask, **kwargs)
-        v = self.tgrouter(x, None, key_padding_mask, **kwargs)
+        u, binary_tf = self.tfrouter(x, gene_subset, key_padding_mask, **kwargs)
+        v, binary_tg = self.tgrouter(x, None, key_padding_mask, **kwargs)
 
         grn = torch.einsum('cfm,cgm->cfg', u, v)
-        return grn
+        return grn, binary_tf, binary_tg
 
 
 
 
 if __name__ == "__main__":
-    import time
     import scanpy as sc
     import pandas as pd
     from ..tokenizer import TomeTokenizer
@@ -316,16 +311,12 @@ if __name__ == "__main__":
     tf_list = tf_dict["TF"].tolist()
 
     Ng = 2000
-    Nc = 10000
+    Nc = 100
     tokenizer = TomeTokenizer(token_dict, simplify=True, max_length=Ng+1)
-    tokens = tokenizer(adata[:100, :].copy(), n_top_genes=Ng)
+    tokens = tokenizer(adata[:Nc, :].copy(), n_top_genes=Ng)
 
-    start_time = time.time()
     model = SFM(token_dict, tf_list=tf_list)
-    grn = model(tokens)
-    end_time = time.time()
+    grn, binary_tf, binary_tg = model(tokens)
 
-    elapsed_time = end_time - start_time
-    fold = Nc/100
-    final_time = elapsed_time*fold
-    print(f"Running time: {final_time:.4f} s")
+    print(binary_tf)
+    print(binary_tg)
