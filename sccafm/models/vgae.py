@@ -3,11 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-def reparameterize(mu, sigma):
-    eps = torch.randn_like(sigma)
-    return mu + eps * sigma
-
-
 class VariationalEncoder(nn.Module):
     def __init__(self, hidden_dim=64, dropout=0.1):
         super().__init__()
@@ -56,16 +51,15 @@ class VariationalEncoder(nn.Module):
                 f"expr_tf E={expr_tf.shape[2]}, expr_tg E={expr_tg.shape[2]}"
             )
     
-    def forward(self, tokens, grn, binary_tf, binary_tg):
-        expr = tokens["expr"]
-        expr = expr.unsqueeze(-1)
-        expr = self.expr_proj(expr)
-        C, _, E = expr.shape
+    def forward(self, x, grn, binary_tf, binary_tg):
+        x = x.unsqueeze(-1)
+        x = self.expr_proj(x)
+        C, _, E = x.shape
     
         # Select TF and TG embeddings using boolean masks
         # Assumes a fixed number of TFs / TGs per cell
-        expr_tf = expr[binary_tf].view(C, -1, E)
-        expr_tg = expr[binary_tg].view(C, -1, E)
+        expr_tf = x[binary_tf].view(C, -1, E)
+        expr_tg = x[binary_tg].view(C, -1, E)
 
         self._check_shape(grn, expr_tf, expr_tg)
 
@@ -86,9 +80,7 @@ class VariationalEncoder(nn.Module):
 class ExprModeling(nn.Module):
     def __init__(self, hidden_dim=64, dropout=0.1):
         super().__init__()
-
         self.z_proj = nn.Linear(1, hidden_dim)
-
         self.h_proj = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
@@ -97,24 +89,19 @@ class ExprModeling(nn.Module):
         )
     
     def _expand_grn(self, grn: torch.Tensor, binary_tf, binary_tg):
-        """
-        Expand sparse GRN (TF x TG) into full (TG x TG) matrix for each condition c.
-        """
         C, _, TG = grn.shape
         device = grn.device
         dtype = grn.dtype
 
         grn_full = torch.zeros((C, TG, TG), device=device, dtype=dtype)
 
-        for c in range(C):
-            tf_idx = binary_tf[c]   # indices or boolean mask
-            tg_idx = binary_tg[c]
+        # Since all rows are the same, take the first row as reference
+        tf_pos = binary_tf[0].nonzero(as_tuple=True)[0]
+        tg_pos = binary_tg[0].nonzero(as_tuple=True)[0]
 
-            # Insert TF→TG edges into full TG×TG matrix
-            # Shape alignment:
-            # grn[c]            -> (TF, TG)
-            # grn_full[c][tf_idx][:, tg_idx] -> (TF, TG)
-            grn_full[c][tf_idx][:, tg_idx] = grn[c]
+        # Assign grn[c] into grn_full[c] for each sample
+        for c in range(C):
+            grn_full[c][tf_pos[:, None], tg_pos] = grn[c]
 
         return grn_full
 
@@ -142,7 +129,7 @@ class ExprModeling(nn.Module):
 
         M = I - grn_full
 
-        # Solves: M @ X = Z  →  X = M^{-1} Z
+        # Solves: M @ H = Z  →  H = M^{-1} Z
         out = torch.linalg.solve(M, z)
         out = self.h_proj(out)
 
@@ -153,5 +140,128 @@ class ExprModeling(nn.Module):
 
 
 class DropModeling(nn.Module):
-    def __init__(self):
+    def __init__(self, hidden_dim=64, dropout=0.1):
         super().__init__()
+        self.drop_proj = nn.Sequential(
+            nn.Linear(1, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, 1)
+        )
+    
+    def forward(self, h: torch.Tensor):
+        h = h.unsqueeze(-1)
+        logits = self.drop_proj(h)
+        return torch.sigmoid(logits.squeeze(-1))
+
+
+def reparameterize(mu: torch.Tensor, sigma: torch.Tensor):
+    if mu.shape != sigma.shape:
+        raise ValueError(
+            f"mu and sigma should have the same shape, got {mu.shape} and {sigma.shape}!"
+        )
+    eps = torch.randn_like(sigma)
+    return mu + eps * sigma
+
+
+class VariationalDecoder(nn.Module):
+    def __init__(self, hidden_dim=64, dropout=0.1):
+        super().__init__()
+        self.expr_model = ExprModeling(hidden_dim, dropout)
+        self.dropout_model = DropModeling(hidden_dim, dropout)
+    
+    def forward(
+            self, 
+            mu_z: torch.Tensor, 
+            sigma_z: torch.Tensor,
+            grn: torch.Tensor, 
+            binary_tf, binary_tg
+    ):
+        # Sample latent regulator state z ~ q(z)
+        z = reparameterize(mu_z, sigma_z)   # (C, TG)
+
+        # Predict expression distribution p(h | z)
+        mu_h, sigma_h = self.expr_model(z, grn, binary_tf, binary_tg)
+        # Shapes: (C, TG), (C, TG)
+
+        # Sample true expression before dropout
+        h = reparameterize(mu_h, sigma_h)   # (C, TG)
+
+        # Predict dropout probabilities p(w = 1 | h)
+        p_drop = self.dropout_model(h)      # (C, TG)
+
+        return mu_h, sigma_h, p_drop
+
+
+class ELBOLoss(nn.Module):
+    def __init__(self, hidden_dim=64, dropout=0.1):
+        super().__init__()
+        self.encoder = VariationalEncoder(hidden_dim, dropout)
+        self.decoder = VariationalDecoder(hidden_dim, dropout)
+
+    def zinormal_loglik(self, x, mu, sigma, p_drop, eps=1e-8):
+        """
+        Zero-inflated Gaussian log-likelihood (stable broadcasting)
+        """
+        normal = torch.distributions.Normal(mu, sigma)
+        
+        # Compute log-probability of zero for all genes
+        log_prob_zero = normal.log_prob(torch.zeros_like(mu))  # (C, TG)
+
+        # log-likelihood (broadcast-safe)
+        log_prob = torch.where(
+            x == 0,
+            torch.log(p_drop + (1 - p_drop) * torch.exp(log_prob_zero) + eps),
+            torch.log(1 - p_drop + eps) + normal.log_prob(x)
+        )
+
+        return log_prob.sum(dim=-1)
+
+    def kl_normal(self, mu, sigma):
+        return 0.5 * torch.sum(
+            mu.pow(2) + sigma.pow(2) - 1 - torch.log(sigma.pow(2)),
+            dim=-1
+        )
+    
+    def forward(self, tokens, grn, binary_tf, binary_tg):
+        x = tokens["expr"]
+        mu_z, sigma_z = self.encoder(x, grn, binary_tf, binary_tg)
+        mu_h, sigma_h, p_drop = self.decoder(mu_z, sigma_z, grn, binary_tf, binary_tg)
+
+        # Likelihood term
+        log_px = self.zinormal_loglik(x, mu_h, sigma_h, p_drop).mean()
+
+        # KL term
+        kl_z = self.kl_normal(mu_z, sigma_z).mean()
+
+        # Negative ELBO (for minimization)
+        loss = -log_px + kl_z
+        return loss
+
+
+
+
+if __name__ == "__main__":
+    import scanpy as sc
+    import pandas as pd
+
+    from .sfm import SFM
+    from ..tokenizer import TomeTokenizer
+
+
+    adata = sc.read_h5ad("/data1021/xukaichen/data/CTA/pbmc.h5ad")
+    token_dict = pd.read_csv("./resources/token_dict.csv")
+    tf_dict = pd.read_csv("./resources/human-tfs.csv")
+    tf_list = tf_dict["TF"].tolist()
+
+    Ng = 2000
+    Nc = 100
+    tokenizer = TomeTokenizer(token_dict, simplify=True, max_length=Ng+1)
+    tokens = tokenizer(adata[:Nc, :].copy(), n_top_genes=Ng)
+
+    model = SFM(token_dict, tf_list=tf_list)
+    grn, binary_tf, binary_tg = model(tokens)
+
+    loss_fn = ELBOLoss()
+    loss = loss_fn(tokens, grn, binary_tf, binary_tg)
+    print("ELBO loss:", loss.item())
