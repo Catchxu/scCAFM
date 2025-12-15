@@ -3,6 +3,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def reparameterize(mu, sigma):
+    eps = torch.randn_like(sigma)
+    return mu + eps * sigma
+
+
 class VariationalEncoder(nn.Module):
     def __init__(self, hidden_dim=64, dropout=0.1):
         super().__init__()
@@ -77,3 +82,76 @@ class VariationalEncoder(nn.Module):
 
         return mu_z, sigma_z
 
+
+class ExprModeling(nn.Module):
+    def __init__(self, hidden_dim=64, dropout=0.1):
+        super().__init__()
+
+        self.z_proj = nn.Linear(1, hidden_dim)
+
+        self.h_proj = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, 2)
+        )
+    
+    def _expand_grn(self, grn: torch.Tensor, binary_tf, binary_tg):
+        """
+        Expand sparse GRN (TF x TG) into full (TG x TG) matrix for each condition c.
+        """
+        C, _, TG = grn.shape
+        device = grn.device
+        dtype = grn.dtype
+
+        grn_full = torch.zeros((C, TG, TG), device=device, dtype=dtype)
+
+        for c in range(C):
+            tf_idx = binary_tf[c]   # indices or boolean mask
+            tg_idx = binary_tg[c]
+
+            # Insert TF→TG edges into full TG×TG matrix
+            # Shape alignment:
+            # grn[c]            -> (TF, TG)
+            # grn_full[c][tf_idx][:, tg_idx] -> (TF, TG)
+            grn_full[c][tf_idx][:, tg_idx] = grn[c]
+
+        return grn_full
+
+    def _check_shape(self, z, grn_full):
+        if z.dim() != 2:
+            raise ValueError(f"latent z must be (C, TG), got {z.shape}!")
+        
+        C, TG = z.shape
+
+        if grn_full.shape != (C, TG, TG):
+            raise ValueError(
+                f"grn_full must be a expanded GRN (C, TG, TG), got {grn_full.shape}!"
+            )
+
+    def forward(self, z: torch.Tensor, grn, binary_tf, binary_tg):
+        grn_full = self._expand_grn(grn, binary_tf, binary_tg)
+        self._check_shape(z, grn_full)
+
+        z = z.unsqueeze(-1)
+        z = self.z_proj(z)
+
+        C, TG, _ = grn_full.shape
+        I = torch.eye(TG, device=grn_full.device, dtype=grn_full.dtype)
+        I = I.expand(C, TG, TG)
+
+        M = I - grn_full
+
+        # Solves: M @ X = Z  →  X = M^{-1} Z
+        out = torch.linalg.solve(M, z)
+        out = self.h_proj(out)
+
+        mu_h, log_sigma_h = out.unbind(dim=-1)
+        sigma_h = F.softplus(log_sigma_h) + 1e-6
+
+        return mu_h, sigma_h
+
+
+class DropModeling(nn.Module):
+    def __init__(self):
+        super().__init__()
