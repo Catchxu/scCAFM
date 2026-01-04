@@ -317,3 +317,4 @@ if __name__ == "__main__":
 
     model = SFM(token_dict, tf_list=tf_list)
     grn, binary_tf, binary_tg = model(tokens)
+    print(binary_tf.shape)

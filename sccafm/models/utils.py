@@ -11,6 +11,14 @@ def reparameterize(mu: torch.Tensor, sigma: torch.Tensor):
 
 
 def expand_grn(grn: torch.Tensor, binary_tf: torch.Tensor, binary_tg: torch.Tensor):
+    """
+    Expands the predicted GRN from [C, TF, TG] to [C, TG, TG] based on gate indices.
+    
+    Args:
+        grn: Predicted regulatory logits of shape (C, TF, TG)
+        binary_tf: Binary gate/mask for TFs of shape (C, TG)
+        binary_tg: Binary gate/mask for Target Genes of shape (C, TG)
+    """
     C, _, TG = grn.shape
     device = grn.device
     dtype = grn.dtype
@@ -34,7 +42,7 @@ def expand_u(u: torch.Tensor, binary_tf: torch.Tensor):
     
     Args:
         u: Factor matrix for TFs of shape (C, TF, M)
-        binary_tf: Binary gate/mask for TFs of shape (C, TG, 1)
+        binary_tf: Binary gate/mask for TFs of shape (C, TG)
     """
     C, _, M = u.shape
     TG = binary_tf.shape[1] # The total number of genes in the sequence

@@ -3,7 +3,7 @@ import torch.nn as nn
 import pandas as pd
 
 from .tokenizer import TomeTokenizer
-from .models import expand_grn
+from .models import expand_grn, expand_u
 
 
 class PriorLoss(nn.Module):
@@ -58,8 +58,7 @@ class PriorLoss(nn.Module):
 
     def forward(self, tokens, grn, binary_tf, binary_tg, true_grn_df, tf_idx=None):
         gene_tokens = tokens["gene"]
-        pad_mask = tokens["pad"] 
-        device = gene_tokens.device
+        pad_mask = tokens["pad"]
 
         # 1. Align with model's internal routing: only genes selected as TFs should contribute to loss
         model_tf_mask = binary_tf.squeeze(-1).float() 
@@ -86,6 +85,85 @@ class PriorLoss(nn.Module):
         return total_loss
 
 
+class DAGLoss(nn.Module):
+    def __init__(
+            self, 
+            alpha: float = 0.0, 
+            rho: float = 0.0, 
+            rho_max: float = 1e6, 
+            update_period: int = 100
+    ):
+        """
+        Args:
+            alpha: Initial Lagrange multiplier.
+            rho: Initial penalty parameter.
+            rho_max: Upper bound for rho.
+            update_period: How many steps to wait before updating alpha/rho.
+        """
+        super().__init__()
+        self.alpha = alpha
+        self.rho = rho
+        self.rho_max = rho_max
+        self.prev_h_val = float('inf')
+
+        self.update_period = update_period
+        self.step_counter = 0
+        self.accumulated_h = 0.0
+
+    def _compute_dag_constraint(self, adj):
+        device = adj.device
+        batch_size, M, _ = adj.shape
+        adj_sq = adj * adj
+        eye = torch.eye(M, device=device).unsqueeze(0).repeat(batch_size, 1, 1)
+        
+        # (I + A^2/M)^M approximation
+        matrix_poly = eye + adj_sq / M
+        res = torch.matrix_power(matrix_poly, M)
+        h = torch.diagonal(res, dim1=-2, dim2=-1).sum(-1) - M
+        return h
+
+    def _auto_update_params(self):
+        """
+        Internal logic to update alpha and rho based on accumulated h(A).
+        """
+        avg_h = self.accumulated_h / self.update_period
+        
+        # ALM update rules
+        if avg_h > 0.25 * self.prev_h_val:
+            self.rho = min(self.rho * 10.0, self.rho_max)
+        else:
+            self.alpha += self.rho * avg_h
+            
+        self.prev_h_val = avg_h
+        
+        # Reset accumulators
+        self.accumulated_h = 0.0
+        self.step_counter = 0
+
+    def forward(self, u, binary_tf, v, binary_tg):
+        u_full = expand_u(u, binary_tf)
+        adj_factor = torch.bmm(v.transpose(1, 2), u_full)
+        
+        # Compute current batch acyclicity violation
+        dag_h_batch = self._compute_dag_constraint(adj_factor).mean()
+        
+        # Store for the scheduled update
+        if self.training:
+            self.step_counter += 1
+            self.accumulated_h += dag_h_batch.item()
+            
+            # Trigger update when period is reached
+            if self.step_counter >= self.update_period:
+                self._auto_update_params()
+        
+        # Compute Augmented Lagrangian loss
+        loss = self.alpha * dag_h_batch + (self.rho / 2) * (dag_h_batch ** 2)
+        
+        return loss
+
+
+
+
 class SFMLoss(nn.Module):
     def __init__(self, lamb, num_epochs):
         super().__init__()
@@ -96,9 +174,11 @@ class SFMLoss(nn.Module):
 if __name__ == "__main__":
     import scanpy as sc
     import pandas as pd
+    import torch
     from .tokenizer import TomeTokenizer
     from .models import SFM
 
+    # 1. Setup Data and Tokenizer
     adata = sc.read_h5ad("/data1021/xukaichen/data/CTA/pbmc.h5ad")
     token_dict = pd.read_csv("./resources/token_dict.csv")
     tf_dict = pd.read_csv("./resources/human-tfs.csv")
@@ -109,13 +189,32 @@ if __name__ == "__main__":
     tokenizer = TomeTokenizer(token_dict, simplify=True, max_length=Ng+1)
     tokens = tokenizer(adata[:Nc, :].copy(), n_top_genes=Ng)
 
+    # 2. Model Inference with return_factors=True
     model = SFM(token_dict, tf_list=tf_list)
-    grn, binary_tf, binary_tg = model(tokens)
+    
+    # We now request u and v to compute DAG loss
+    grn, u, binary_tf, v, binary_tg = model(tokens, return_factors=True)
 
-    criterion = PriorLoss(tokenizer)
+    # 3. Verify PriorLoss
+    criterion_prior = PriorLoss(tokenizer)
     true_grn_df = pd.read_csv("./resources/OmniPath.csv")
-    loss = criterion(
-        tokens, grn, binary_tf, binary_tg, true_grn_df, tf_idx=model.tf_idx
+    
+    # Note: expand_grn is passed as a function handle for internal expansion
+    prior_loss = criterion_prior(
+        tokens, grn, binary_tf, binary_tg, true_grn_df
     )
 
-    print("prior loss:", loss.item())
+    # 4. Verify DAGLoss
+    # Initialize with default alpha and rho
+    criterion_dag = DAGLoss()
+    
+    dag_loss = criterion_dag(
+        u,          # [C, TF, M]
+        binary_tf,  # [C, TG] - After squeezing if necessary
+        v,          # [C, TG, M]
+        binary_tg   # [C, TG]
+    )
+
+    # 5. Output Results
+    print(f"Prior Loss: {prior_loss.item():.6f}")
+    print(f"DAG Loss:   {dag_loss.item():.6f}")
