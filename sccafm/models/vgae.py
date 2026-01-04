@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .utils import reparameterize, expand_grn
+
 
 class VariationalEncoder(nn.Module):
     def __init__(self, hidden_dim=64, dropout=0.1):
@@ -87,23 +89,6 @@ class ExprModeling(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, 2)
         )
-    
-    def _expand_grn(self, grn: torch.Tensor, binary_tf, binary_tg):
-        C, _, TG = grn.shape
-        device = grn.device
-        dtype = grn.dtype
-
-        grn_full = torch.zeros((C, TG, TG), device=device, dtype=dtype)
-
-        # Since all rows are the same, take the first row as reference
-        tf_pos = binary_tf[0].nonzero(as_tuple=True)[0]
-        tg_pos = binary_tg[0].nonzero(as_tuple=True)[0]
-
-        # Assign grn[c] into grn_full[c] for each sample
-        for c in range(C):
-            grn_full[c][tf_pos[:, None], tg_pos] = grn[c]
-
-        return grn_full
 
     def _check_shape(self, z, grn_full):
         if z.dim() != 2:
@@ -117,7 +102,7 @@ class ExprModeling(nn.Module):
             )
 
     def forward(self, z: torch.Tensor, grn, binary_tf, binary_tg):
-        grn_full = self._expand_grn(grn, binary_tf, binary_tg)
+        grn_full = expand_grn(grn, binary_tf, binary_tg)
         self._check_shape(z, grn_full)
 
         z = z.unsqueeze(-1)
@@ -153,15 +138,6 @@ class DropModeling(nn.Module):
         h = h.unsqueeze(-1)
         logits = self.drop_proj(h)
         return torch.sigmoid(logits.squeeze(-1))
-
-
-def reparameterize(mu: torch.Tensor, sigma: torch.Tensor):
-    if mu.shape != sigma.shape:
-        raise ValueError(
-            f"mu and sigma should have the same shape, got {mu.shape} and {sigma.shape}!"
-        )
-    eps = torch.randn_like(sigma)
-    return mu + eps * sigma
 
 
 class VariationalDecoder(nn.Module):
