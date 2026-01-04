@@ -293,7 +293,7 @@ class SFM(nn.Module):
         grn = torch.einsum('cfm,cgm->cfg', u, v)
         
         if return_factors:
-            return grn, u, binary_tf, v, binary_tg
+            return grn, binary_tf, binary_tg, u, v
         else:
             return grn, binary_tf, binary_tg
 

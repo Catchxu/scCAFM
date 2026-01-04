@@ -1,9 +1,11 @@
 import torch
 import torch.nn as nn
+import numpy as np
 import pandas as pd
+from typing import Optional
 
 from .tokenizer import TomeTokenizer
-from .models import expand_grn, expand_u
+from .models import ELBOLoss, expand_grn, expand_u
 
 
 class PriorLoss(nn.Module):
@@ -56,7 +58,7 @@ class PriorLoss(nn.Module):
         
         return (gt_matrix > 0).float()
 
-    def forward(self, tokens, grn, binary_tf, binary_tg, true_grn_df, tf_idx=None):
+    def forward(self, tokens, grn, binary_tf, binary_tg, true_grn_df):
         gene_tokens = tokens["gene"]
         pad_mask = tokens["pad"]
 
@@ -89,7 +91,7 @@ class DAGLoss(nn.Module):
     def __init__(
             self, 
             alpha: float = 0.0, 
-            rho: float = 0.0, 
+            rho: float = 0.1, 
             rho_max: float = 1e6, 
             update_period: int = 100
     ):
@@ -140,7 +142,7 @@ class DAGLoss(nn.Module):
         self.accumulated_h = 0.0
         self.step_counter = 0
 
-    def forward(self, u, binary_tf, v, binary_tg):
+    def forward(self, u, v, binary_tf):
         u_full = expand_u(u, binary_tf)
         adj_factor = torch.bmm(v.transpose(1, 2), u_full)
         
@@ -165,8 +167,101 @@ class DAGLoss(nn.Module):
 
 
 class SFMLoss(nn.Module):
-    def __init__(self, lamb, num_epochs):
+    def __init__(
+        self, 
+        use_prior: bool = True, 
+        use_dag: bool = True,
+        tome_tokenizer: Optional[TomeTokenizer] = None, 
+        num_epochs: Optional[int] = None,
+        **kwargs
+    ):
+        """
+        Unified loss for SFM.
+        
+        Args:
+            use_prior: Whether to include PriorLoss.
+            use_dag: Whether to include DAGLoss.
+            tome_tokenizer: Instance of TomeTokenizer.
+            num_epochs: Total training epochs (T).
+            **kwargs: Arguments for sub-losses (e.g., hidden_dim, rho, alpha).
+        """
         super().__init__()
+        self.use_prior = use_prior
+        self.use_dag = use_dag
+        self.T = num_epochs
+        self.current_epoch = 0
+        
+        # 1. ELBO Loss (Core reconstruction)
+        self.elbo_criterion = ELBOLoss(
+            hidden_dim=kwargs.get("hidden_dim", 64),
+            dropout=kwargs.get("dropout", 0.1)
+        )
+        
+        # 2. Prior Loss (Knowledge-based)
+        if self.use_prior:
+            if tome_tokenizer is None:
+                raise ValueError(
+                    "tome_tokenizer should be provided as use_prior=True"
+                )
+            else:
+                self.prior_criterion = PriorLoss(tome_tokenizer)
+            
+        # 3. DAG Loss (Structure constraint)
+        if self.use_dag:
+            self.dag_criterion = DAGLoss(
+                alpha=kwargs.get("alpha", 0.0),
+                rho=kwargs.get("rho", 0.01), # Started at 0.01 to ensure initial gradient
+                rho_max=kwargs.get("rho_max", 1e6),
+                update_period=kwargs.get("update_period", 100)
+            )
+
+    def update_epoch(self, epoch):
+        """Update the internal epoch counter to calculate dynamic weights."""
+        self.current_epoch = epoch
+
+    def get_prior_weight(self):
+        """Calculates 0.5 + 0.5 * cos(pi * t / T)"""
+        if self.T is None:
+            raise ValueError(
+                "num_epochs should be provided as use_prior=True"
+            )      
+        else:
+            return 0.5 + 0.5 * np.cos(np.pi * self.current_epoch / self.T)
+
+    def forward(
+            self, tokens, grn, binary_tf, binary_tg, 
+            u=None, v=None, true_grn_df=None
+    ):
+        """
+        Args:
+            tokens: Dictionary containing "expr", "gene", "pad".
+            grn: Pred GRN [C, TF, TG].
+            binary_tf/tg: Gates from SFM.
+            u, v: Factors from SFM for DAG loss.
+            true_grn_df: pd.DataFrame for PriorLoss.
+        """
+        total_loss = 0.0
+        loss_dict = {}
+
+        # 1. ELBO Loss
+        loss_elbo = self.elbo_criterion(tokens, grn, binary_tf, binary_tg)
+        total_loss += loss_elbo
+        loss_dict["elbo"] = loss_elbo.item()
+
+        # 2. Prior Loss with dynamic weight
+        if self.use_prior and true_grn_df is not None:
+            w_p = self.get_prior_weight()
+            loss_p = self.prior_criterion(tokens, grn, binary_tf, binary_tg, true_grn_df)
+            total_loss += w_p * loss_p
+            loss_dict["prior"] = loss_p.item()
+
+        # 3. DAG Loss
+        if self.use_dag:
+            loss_d = self.dag_criterion(u, v, binary_tf)
+            total_loss += loss_d
+            loss_dict["dag"] = loss_d.item()
+
+        return total_loss, loss_dict
 
 
 
@@ -175,8 +270,7 @@ if __name__ == "__main__":
     import scanpy as sc
     import pandas as pd
     import torch
-    from .tokenizer import TomeTokenizer
-    from .models import SFM
+    from .models import SFM 
 
     # 1. Setup Data and Tokenizer
     adata = sc.read_h5ad("/data1021/xukaichen/data/CTA/pbmc.h5ad")
@@ -189,32 +283,54 @@ if __name__ == "__main__":
     tokenizer = TomeTokenizer(token_dict, simplify=True, max_length=Ng+1)
     tokens = tokenizer(adata[:Nc, :].copy(), n_top_genes=Ng)
 
-    # 2. Model Inference with return_factors=True
+    # 2. Initialize SFM Model
     model = SFM(token_dict, tf_list=tf_list)
     
-    # We now request u and v to compute DAG loss
-    grn, u, binary_tf, v, binary_tg = model(tokens, return_factors=True)
+    # 3. Model Forward Pass
+    # Ensure your SFM.forward returns: grn, binary_tf, binary_tg, u, v
+    grn, binary_tf, binary_tg, u, v = model(tokens, return_factors=True)
 
-    # 3. Verify PriorLoss
-    criterion_prior = PriorLoss(tokenizer)
+    # 4. Setup SFMLoss
+    # Loading the Prior DataFrame
     true_grn_df = pd.read_csv("./resources/OmniPath.csv")
     
-    # Note: expand_grn is passed as a function handle for internal expansion
-    prior_loss = criterion_prior(
-        tokens, grn, binary_tf, binary_tg, true_grn_df
-    )
-
-    # 4. Verify DAGLoss
-    # Initialize with default alpha and rho
-    criterion_dag = DAGLoss()
+    # Define training parameters for the loss integration
+    num_epochs = 100
+    steps_per_epoch = 10 # Usually len(dataloader)
     
-    dag_loss = criterion_dag(
-        u,          # [C, TF, M]
-        binary_tf,  # [C, TG] - After squeezing if necessary
-        v,          # [C, TG, M]
-        binary_tg   # [C, TG]
+    criterion = SFMLoss(
+        use_prior=True,
+        use_dag=True,
+        tome_tokenizer=tokenizer,
+        num_epochs=num_epochs,
     )
 
-    # 5. Output Results
-    print(f"Prior Loss: {prior_loss.item():.6f}")
-    print(f"DAG Loss:   {dag_loss.item():.6f}")
+    # 5. Simulate an Epoch update (e.g., Epoch 25)
+    test_epoch = 25
+    criterion.update_epoch(test_epoch)
+
+    # 6. Compute Integrated Loss
+    total_loss, loss_dict = criterion(
+        tokens=tokens,
+        grn=grn,
+        binary_tf=binary_tf,
+        binary_tg=binary_tg,
+        u=u,
+        v=v,
+        true_grn_df=true_grn_df
+    )
+
+    # 7. Verification Output
+    print(f"--- SFMLoss Verification (Epoch {test_epoch}) ---")
+    print(f"Total Loss: {total_loss.item():.6f}")
+    print(f"Breakdown:")
+    for key, value in loss_dict.items():
+            print(f"  - {key}: {value:.6f}")
+
+    # 8. Check Backpropagation
+    total_loss.backward()
+    print("\nGradient Check:")
+    has_grad_tf = next(model.tfrouter.parameters()).grad is not None
+    has_grad_tg = next(model.tgrouter.parameters()).grad is not None
+    print(f"  - Gradient flow to TF Router: {has_grad_tf}")
+    print(f"  - Gradient flow to TG Router: {has_grad_tg}")
