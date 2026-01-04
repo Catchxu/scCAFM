@@ -3,6 +3,7 @@ import torch.nn as nn
 import pandas as pd
 
 from .tokenizer import TomeTokenizer
+from .models import expand_grn
 
 
 class PriorLoss(nn.Module):
@@ -55,50 +56,31 @@ class PriorLoss(nn.Module):
         
         return (gt_matrix > 0).float()
 
-    def forward(self, pred_grn, true_grn_df, tokens, tf_idx=None):
-        """
-        Args:
-            pred_grn: (B, L_tf, L_tg) from SFM
-            true_grn_df: pd.DataFrame
-            tokens: dict from TomoTokenizer
-            tf_idx: The self.tf_idx tensor from your SFM model
-        """
+    def forward(self, tokens, grn, binary_tf, binary_tg, true_grn_df, tf_idx=None):
         gene_tokens = tokens["gene"]
-        pad_mask = tokens["pad"] # (B, L)
+        pad_mask = tokens["pad"] 
         device = gene_tokens.device
 
-        # 1. Identify which tokens in the current sequence are TFs
-        # This mirrors the SFM._query_gene_subset logic
-        if tf_idx is not None:
-            tf_idx = tf_idx.to(device)
-            # (B, L)
-            gene_is_tf = (gene_tokens.unsqueeze(-1) == tf_idx.unsqueeze(0).unsqueeze(0)).any(dim=-1)
-        else:
-            gene_is_tf = torch.ones_like(gene_tokens, dtype=torch.bool)
+        # 1. Align with model's internal routing: only genes selected as TFs should contribute to loss
+        model_tf_mask = binary_tf.squeeze(-1).float() 
 
-        # 2. Generate target matrix (Full L x L)
+        # 2. Map ground truth to sequence positions
         target = self.get_gt_matrix(true_grn_df, gene_tokens)
         
-        # 3. Slice target to match the dimensions of pred_grn [B, TF, TG]
-        # We take only the rows that correspond to TFs
-        # Note: Since different cells have different TFs in sequence, we use masking 
-        # instead of hard slicing if pred_grn is fixed size (B, L, L)
+        # 3. Expand predicted GRN to full sequence dimensions (B, L, L)
+        grn_full = expand_grn(grn, binary_tf, binary_tg)
         
-        # Create 2D mask: [Valid TF in sequence] x [Valid Gene in sequence]
+        # 4. Construct 2D mask (Source x Target)
+        # Loss is only valid where: 1) Gene is not padding, AND 2) Source is an active TF
         is_not_pad = (~pad_mask).float()
-        tf_multiplier = gene_is_tf.float()
-        
-        # This mask is (B, L, L) - 1.0 only if row is a TF and both are not pad
-        valid_mask = torch.einsum('bi,bj->bij', tf_multiplier * is_not_pad, is_not_pad)
+        valid_mask = torch.einsum('bi,bj->bij', model_tf_mask * is_not_pad, is_not_pad)
 
-        # 4. Calculate Loss
-        # If SFM returns (B, L, L), we apply mask to both.
-        # If SFM returns (B, num_tfs, L), you would slice target here.
-        print(pred_grn.shape)
-        print(target.shape)
-        loss = self.criterion(pred_grn, target)
+        # 5. Compute pixel-wise loss
+        loss = self.criterion(grn_full, target)
+        weight_mask = target * 10.0 + (1.0 - target) * 1.0
+        loss = loss * weight_mask
         
-        # 5. Final masked mean
+        # 6. Normalize by valid entries to prevent loss inflation from padded/inactive regions
         total_loss = (loss * valid_mask).sum() / (valid_mask.sum() + 1e-8)
         
         return total_loss
@@ -128,8 +110,12 @@ if __name__ == "__main__":
     tokens = tokenizer(adata[:Nc, :].copy(), n_top_genes=Ng)
 
     model = SFM(token_dict, tf_list=tf_list)
-    grn, _, _ = model(tokens)
+    grn, binary_tf, binary_tg = model(tokens)
 
     criterion = PriorLoss(tokenizer)
     true_grn_df = pd.read_csv("./resources/OmniPath.csv")
-    loss = criterion(grn, true_grn_df, tokens, tf_idx=model.tf_idx)
+    loss = criterion(
+        tokens, grn, binary_tf, binary_tg, true_grn_df, tf_idx=model.tf_idx
+    )
+
+    print("prior loss:", loss.item())
