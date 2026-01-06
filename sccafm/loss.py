@@ -171,74 +171,60 @@ class SFMLoss(nn.Module):
         self, 
         use_prior: bool = True, 
         use_dag: bool = True,
-        tome_tokenizer: Optional[TomeTokenizer] = None, 
+        tome_tokenizer: Optional[TomeTokenizer] = None, # Mandatory if use_prior
+        true_grn_df: Optional[pd.DataFrame] = None, # Mandatory if use_prior
         num_epochs: Optional[int] = None,
         **kwargs
     ):
-        """
-        Unified loss for SFM.
-        
-        Args:
-            use_prior: Whether to include PriorLoss.
-            use_dag: Whether to include DAGLoss.
-            tome_tokenizer: Instance of TomeTokenizer.
-            num_epochs: Total training epochs (T).
-            **kwargs: Arguments for sub-losses (e.g., hidden_dim, rho, alpha).
-        """
         super().__init__()
         self.use_prior = use_prior
         self.use_dag = use_dag
         self.T = num_epochs
         self.current_epoch = 0
         
-        # 1. ELBO Loss (Core reconstruction)
+        # 1. ELBO Loss
         self.elbo_criterion = ELBOLoss(
             hidden_dim=kwargs.get("hidden_dim", 64),
             dropout=kwargs.get("dropout", 0.1)
         )
         
-        # 2. Prior Loss (Knowledge-based)
+        # 2. Prior Loss Setup
         if self.use_prior:
-            if tome_tokenizer is None:
+            if tome_tokenizer is None or true_grn_df is None:
                 raise ValueError(
-                    "tome_tokenizer should be provided as use_prior=True"
+                    "Both 'tome_tokenizer' and 'true_grn_df' must be provided if use_prior=True"
                 )
             else:
                 self.prior_criterion = PriorLoss(tome_tokenizer)
+                self.true_grn_df = true_grn_df # Store prior knowledge internally
             
-        # 3. DAG Loss (Structure constraint)
+        # 3. DAG Loss Setup
         if self.use_dag:
             self.dag_criterion = DAGLoss(
                 alpha=kwargs.get("alpha", 0.0),
-                rho=kwargs.get("rho", 0.01), # Started at 0.01 to ensure initial gradient
+                rho=kwargs.get("rho", 0.01),
                 rho_max=kwargs.get("rho_max", 1e6),
                 update_period=kwargs.get("update_period", 100)
             )
 
-    def update_epoch(self, epoch):
-        """Update the internal epoch counter to calculate dynamic weights."""
+    def update_epoch(self, epoch: int):
+        """Update the internal epoch counter."""
         self.current_epoch = epoch
 
-    def get_prior_weight(self):
-        """Calculates 0.5 + 0.5 * cos(pi * t / T)"""
-        if self.T is None:
-            raise ValueError(
-                "num_epochs should be provided as use_prior=True"
-            )      
-        else:
-            return 0.5 + 0.5 * np.cos(np.pi * self.current_epoch / self.T)
+    def get_prior_weight(self) -> float:
+        """Calculates 0.5 + 0.5 * cos(pi * current_epoch / T)"""
+        if self.T is None or self.T == 0:
+            return 1.0 # Default to full prior if T not set
+        # Clip current_epoch to T
+        t_eff = min(self.current_epoch, self.T)
+        return 0.5 + 0.5 * np.cos(np.pi * t_eff / self.T)
 
     def forward(
-            self, tokens, grn, binary_tf, binary_tg, 
-            u=None, v=None, true_grn_df=None
+        self, tokens, grn, binary_tf, binary_tg, 
+        u=None, v=None
     ):
         """
-        Args:
-            tokens: Dictionary containing "expr", "gene", "pad".
-            grn: Pred GRN [C, TF, TG].
-            binary_tf/tg: Gates from SFM.
-            u, v: Factors from SFM for DAG loss.
-            true_grn_df: pd.DataFrame for PriorLoss.
+        Calculates total loss based on ELBO, Prior, and DAG constraints.
         """
         total_loss = 0.0
         loss_dict = {}
@@ -248,16 +234,18 @@ class SFMLoss(nn.Module):
         total_loss += loss_elbo
         loss_dict["elbo"] = loss_elbo.item()
 
-        # 2. Prior Loss with dynamic weight
-        if self.use_prior and true_grn_df is not None:
+        # 2. Prior Loss
+        if self.use_prior:
             w_p = self.get_prior_weight()
-            loss_p = self.prior_criterion(tokens, grn, binary_tf, binary_tg, true_grn_df)
+            # Use self.true_grn_df stored during init
+            loss_p = self.prior_criterion(tokens, grn, binary_tf, binary_tg, self.true_grn_df)
             total_loss += w_p * loss_p
             loss_dict["prior"] = loss_p.item()
 
         # 3. DAG Loss
         if self.use_dag:
-            loss_d = self.dag_criterion(u, v, binary_tf)
+            # Note: Ensure u/v are not None if use_dag is True
+            loss_d = self.dag_criterion(u, binary_tf.squeeze(-1), v, binary_tg.squeeze(-1))
             total_loss += loss_d
             loss_dict["dag"] = loss_d.item()
 
