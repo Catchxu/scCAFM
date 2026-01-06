@@ -1,4 +1,5 @@
 import torch
+from torch.utils.data import Dataset
 
 import numpy as np
 import pandas as pd
@@ -336,13 +337,66 @@ class TomeTokenizer:
         }
 
 
+class TomeDataset(Dataset):
+    def __init__(self, tokens_dict):
+        self.tokens = tokens_dict
+        self._check_consistency()
+
+        # Use the first available tensor to define the number of samples
+        self.num_samples = next(iter(tokens_dict.values())).shape[0]
+
+    def _check_consistency(self):
+        """
+        Ensures all tensors in the dictionary have the same first dimension.
+        """
+        it = iter(self.tokens.items())
+        # Get the first item as a reference
+        first_key, first_tensor = next(it)
+        expected_size = first_tensor.shape[0]
+
+        for key, tensor in it:
+            if tensor.shape[0] != expected_size:
+                raise ValueError(
+                    f"Dimension mismatch in tokens_dict! "
+                    f"Key '{first_key}' has size {expected_size}, "
+                    f"but key '{key}' has size {tensor.shape[0]}."
+                )
+
+    def __len__(self):
+        return self.num_samples
+
+    def __getitem__(self, idx):
+        # Return a single cell's tokens as a dict
+        return {k: v[idx].clone() for k, v in self.tokens.items()}
+
+def tome_collate_fn(batch):
+    """
+    Combines individual cell dicts into a batch dict.
+    """
+    keys = batch[0].keys()
+    return {k: torch.stack([item[k] for item in batch]) for k in keys}
+
+
 
 
 if __name__ == "__main__":
-    import scanpy as sc
+    from torch.utils.data import DataLoader
 
     adata = sc.read_h5ad("/data1021/xukaichen/data/DRP/cell_line.h5ad")
     token_dict = pd.read_csv("./resources/token_dict.csv")
 
     tokenizer = TomeTokenizer(token_dict, simplify=True)
     tokens = tokenizer(adata)
+    dataset = TomeDataset(tokens)
+
+    train_loader = DataLoader(
+        dataset=dataset,
+        batch_size=32,              # Number of cells per batch
+        shuffle=True,               # Shuffle cells within this adata
+        collate_fn=tome_collate_fn, # Uses your custom logic to stack dicts
+        num_workers=4,              # Parallel data loading
+        pin_memory=True             # Speed up tensor transfer to GPU
+    )
+
+    for batch in train_loader:
+        print(batch)
