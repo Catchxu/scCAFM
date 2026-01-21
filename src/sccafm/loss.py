@@ -164,8 +164,6 @@ class DAGLoss(nn.Module):
         return loss
 
 
-
-
 class SFMLoss(nn.Module):
     def __init__(
         self, 
