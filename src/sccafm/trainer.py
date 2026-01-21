@@ -19,10 +19,10 @@ def sfm_trainer(
     criterion: SFMLoss,
     learning_rate: float,
     weight_decay: float,
-    device="cuda",
-    checkpoint_dir="./checkpoints",
     epochs_per_file=1,
     batch_size=32,
+    device="cuda",
+    checkpoint_dir="./checkpoints",
     resume=True
 ):
     """
