@@ -5,7 +5,6 @@ from tqdm import tqdm
 from typing import Union, List
 
 import torch
-from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 
 from .models import SFM
@@ -17,8 +16,9 @@ def sfm_trainer(
     model: SFM,
     adata_files: Union[str, List[str]], 
     tokenizer: TomeTokenizer, 
-    criterion: SFMLoss, 
-    optimizer: Optimizer, 
+    criterion: SFMLoss,
+    learning_rate: float,
+    weight_decay: float,
     device="cuda",
     checkpoint_dir="./checkpoints",
     epochs_per_file=1,
@@ -33,6 +33,11 @@ def sfm_trainer(
     checkpoint_path = os.path.join(checkpoint_dir, "sfm_latest.pt")
     
     start_file_idx = 0
+    optimizer = torch.optim.AdamW(
+        list(model.parameters()) + list(criterion.parameters()),
+        lr=learning_rate,
+        weight_decay=weight_decay
+    )
     
     # 1. Resume Logic
     if resume and os.path.exists(checkpoint_path):

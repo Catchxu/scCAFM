@@ -31,9 +31,9 @@ pip install .
 ```
 where the `resources/` and `configs/` directories are included automatically in the package, so you don’t need to copy them manually.
 
-If you encounter the conflicts of dependencies while using scCAFM, you can report the errors at [Issues](https://github.com/Catchxu/scCAFM/issues). In this case, we also strongly recommend that you can try installing a strict and reproducible development environment:
+If you encounter the conflicts of dependencies while using scCAFM, you can report the errors at [Issues](https://github.com/Catchxu/scCAFM/issues). In this case, we also recommend that you can try installing a strict and reproducible environment which is verified that there are no conflicts:
 ```bash
-pip install .[dev]
+pip install .[server]
 ```
 where exact versions of dependencies are specified.
 

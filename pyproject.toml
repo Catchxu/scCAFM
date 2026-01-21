@@ -6,45 +6,65 @@ authors = [
     { name = "Kaichen Xu", email = "KXU248@emory.edu" }
 ]
 readme = "README.md"
-license = "GPL-3.0"
+license = { text = "GPL-3.0" }
 requires-python = ">=3.10,<3.15"
+
 keywords = [
-    "single-cell", "causal-inference", "foundation-model", "deep-learning", "scRNAseq"
+    "single-cell",
+    "causal-inference",
+    "foundation-model",
+    "deep-learning",
+    "scRNAseq"
 ]
+
 dependencies = [
-    "numpy>=1.24.0",
-    "pandas>=2.0.0",
-    "scanpy>=1.11.0",
-    "torch>=2.0.0",
-    "leidenalg>=0.10.0",
+    "numpy>=1.24,<3.0",
+    "pandas>=2.0,<3.0",
+    "scanpy>=1.10,<2.0",
+    "torch>=2.0",
+    "leidenalg>=0.10",
 ]
 
 
 [project.optional-dependencies]
 dev = [
+    "pytest",
+    "black",
+    "ruff",
+    "mypy",
+]
+
+server = [
     "numpy==2.3.5",
     "pandas==2.3.3",
     "scanpy==1.11.5",
-    "torch==2.9.1+cu130"
+    "torch==2.9.1+cu130",
+    "leidenalg==0.10.2",
+]
+
+cuda = [
+    "torch>=2.0",
 ]
 
 
 [project.urls]
 repository = "https://github.com/Catchxu/scCAFM"
+homepage = "https://github.com/Catchxu/scCAFM"
+documentation = "https://github.com/Catchxu/scCAFM#readme"
 
 
-[tool.hatch.build.targets.sdist]
-only-include = [
-    "sccafm",
-    "README.md",
-    "configs",
-    "resources",
-]
+[project.scripts]
+sccafm-train = "sccafm.runner.train:main"
+sccafm-eval  = "sccafm.runner.eval:main"
 
 
 [tool.hatch.build.targets.wheel]
-only-include = [
-    "sccafm",
+packages = ["src/sccafm"]
+
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/sccafm",
     "README.md",
     "configs",
     "resources",
