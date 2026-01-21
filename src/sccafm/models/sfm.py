@@ -307,7 +307,7 @@ if __name__ == "__main__":
 
     adata = sc.read_h5ad("/data1021/xukaichen/data/CTA/pbmc.h5ad")
     token_dict = pd.read_csv("./resources/token_dict.csv")
-    tf_dict = pd.read_csv("./resources/human-tfs.csv")
+    tf_dict = pd.read_csv("./resources/human_tfs.csv")
     tf_list = tf_dict["TF"].tolist()
 
     Ng = 2000

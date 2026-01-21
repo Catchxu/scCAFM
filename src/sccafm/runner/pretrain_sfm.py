@@ -1,6 +1,6 @@
 import argparse
 
-from sccafm.load import load_cfg
+from sccafm.load import load_cfg, load_resources
 from sccafm.builder import build_model, build_loss, build_tokenizer
 from sccafm.trainer import sfm_trainer
 
@@ -39,9 +39,9 @@ def main():
             value = float(value)
         d[keys[-1]] = value
     
-    token_dict = data_cfg["token_dict"]
+    token_dict = load_resources(data_cfg["token_dict"])
     adata_files = data_cfg["adata_files"]
-    
+
     model = build_model(model_cfg, token_dict=token_dict)
     tokenizer = build_tokenizer(tokenizer_cfg, token_dict=token_dict)
     loss = build_loss(loss_cfg)
