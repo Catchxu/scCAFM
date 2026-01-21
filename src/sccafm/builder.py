@@ -6,22 +6,22 @@ from .tokenizer import TomeTokenizer, GeneTokenizer, ExprTokenizer, CondTokenize
 
 # ----------------- Registries -----------------
 MODEL_REGISTRY = {
-    "sfm": SFM
+    "SFM": SFM
 }
 
 TOKENIZER_REGISTRY = {
-    "tome": TomeTokenizer,
-    "gene": GeneTokenizer,
-    "expr": ExprTokenizer,
-    "cond": CondTokenizer,
-    "batch": BatchTokenizer,
+    "Tome": TomeTokenizer,
+    "Gene": GeneTokenizer,
+    "Expr": ExprTokenizer,
+    "Cond": CondTokenizer,
+    "Batch": BatchTokenizer,
 }
 
 LOSS_REGISTRY = {
-    "sfm": SFMLoss,
-    "elbo": ELBOLoss,
-    "dag": DAGLoss,
-    "prior": PriorLoss
+    "SFMLoss": SFMLoss,
+    "ELBOLoss": ELBOLoss,
+    "DAGLoss": DAGLoss,
+    "Prior": PriorLoss
 }
 
 

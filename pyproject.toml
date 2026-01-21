@@ -62,7 +62,11 @@ sccafm-pretrain-sfm = "sccafm.runner.pretrain_sfm:main"
 
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/sccafm"]
+packages = [
+    "src/sccafm",
+    "resources",
+    "configs"
+]
 
 
 [tool.hatch.build.targets.sdist]
