@@ -38,9 +38,11 @@ def main():
         elif isinstance(old_val, float):
             value = float(value)
         d[keys[-1]] = value
-    
+
+    adata_files = data_cfg["adata_files"]   
     token_dict = load_resources(data_cfg["token_dict"])
-    adata_files = data_cfg["adata_files"]
+    human_tfs = load_resources(data_cfg["human_tfs"])
+    mouse_tfs = load_resources(data_cfg["mouse_tfs"])
 
     model = build_model(model_cfg, token_dict=token_dict)
     tokenizer = build_tokenizer(tokenizer_cfg, token_dict=token_dict)
@@ -51,6 +53,8 @@ def main():
         adata_files=adata_files,
         tokenizer=tokenizer,
         criterion=loss,
+        human_tfs=human_tfs,
+        mouse_tfs=mouse_tfs,
         **train_cfg
     )
 

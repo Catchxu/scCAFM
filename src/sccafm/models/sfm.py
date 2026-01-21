@@ -5,6 +5,7 @@ from typing import Optional
 
 from .embedding import TomoEmbedding
 from .backbone import TomoEncoder
+from ..load import load_tf_list
 
 
 class GumbelTopK(nn.Module):
@@ -269,6 +270,10 @@ class SFM(nn.Module):
             raise ValueError("None of the TFs are in token_dict. Please check tf_list!")
 
         return torch.tensor(tf_idx, dtype=torch.long)
+
+    def update_tfs(self, tfs):
+        tf_list = load_tf_list(tfs)
+        self.tf_idx = self._tf2id(tf_list)
 
     def _query_gene_subset(self, tokens):
         gene_tokens = tokens["gene"]

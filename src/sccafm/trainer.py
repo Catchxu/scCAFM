@@ -1,8 +1,9 @@
 import os
 import gc
+import pandas as pd
 import scanpy as sc
 from tqdm import tqdm
-from typing import Union, List
+from typing import Union, List, Optional
 
 import torch
 from torch.utils.data import DataLoader
@@ -17,6 +18,9 @@ def sfm_trainer(
     adata_files: Union[str, List[str]], 
     tokenizer: TomeTokenizer, 
     criterion: SFMLoss,
+    human_tfs: Optional[pd.DataFrame] = None,
+    mouse_tfs: Optional[pd.DataFrame] = None,
+    species_key: str = "species",
     learning_rate: float = 1e-5,
     weight_decay: float = 1e-2,
     epochs_per_file: int = 1,
@@ -59,6 +63,7 @@ def sfm_trainer(
     criterion.T = total_global_epochs
 
     # 3. Main File Loop
+    model.train()
     for file_idx in range(start_file_idx, len(adata_files)):
         file_path = adata_files[file_idx]
         print(f"\n[File {file_idx+1}/{len(adata_files)}] Loading: {file_path}")
@@ -72,8 +77,21 @@ def sfm_trainer(
             dataset, batch_size=batch_size, shuffle=True, 
             collate_fn=tome_collate_fn, num_workers=0, pin_memory=True
         )
+
+        try:
+            species = adata.uns[species_key]
+        except:
+            species = "human"  # default species is human
+
+        if species == "human":
+            model.update_tfs(human_tfs)
+        elif species == "mouse":
+            model.update_tfs(mouse_tfs)
+        else:
+            raise ValueError(
+                f"{species} isn't supported!"
+            )
         
-        model.train()
         for epoch in range(epochs_per_file):
             # Calculate global epoch for cosine schedule
             global_epoch_idx = (file_idx * epochs_per_file) + epoch

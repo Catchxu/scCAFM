@@ -1,6 +1,7 @@
 import yaml
 import pandas as pd
 from importlib import resources
+from typing import Optional
 
 
 def load_resources(filename: str) -> pd.DataFrame:
@@ -53,3 +54,17 @@ def load_cfg(filename: str):
         raise FileNotFoundError(
             f"Config file '{filename}' not found!"
         )    
+
+
+def load_tf_list(tfs: Optional[pd.DataFrame] = None):
+    if tfs is not None:
+        try:
+            tf_list = tfs["TF"].tolist()
+        except:
+            raise ValueError(
+                "tfs doesn't have a column 'TF'!"
+            )
+    else:
+        tf_list = None
+    
+    return tf_list
