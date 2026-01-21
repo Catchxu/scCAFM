@@ -38,4 +38,4 @@ pip install .[server]
 where exact versions of dependencies are specified.
 
 
-## Quick start
+## Quick Start
