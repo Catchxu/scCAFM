@@ -369,6 +369,7 @@ class TomeDataset(Dataset):
         # Return a single cell's tokens as a dict
         return {k: v[idx].clone() for k, v in self.tokens.items()}
 
+
 def tome_collate_fn(batch):
     """
     Combines individual cell dicts into a batch dict.
