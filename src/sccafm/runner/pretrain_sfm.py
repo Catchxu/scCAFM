@@ -43,10 +43,11 @@ def main():
     token_dict = load_resources(data_cfg["token_dict"])
     human_tfs = load_resources(data_cfg["human_tfs"])
     mouse_tfs = load_resources(data_cfg["mouse_tfs"])
+    true_grn_df = load_resources(data_cfg["true_grn"])
 
     model = build_model(model_cfg["SFM"], token_dict=token_dict)
     tokenizer = build_tokenizer(tokenizer_cfg["Tome"], token_dict=token_dict)
-    loss = build_loss(loss_cfg)
+    loss = build_loss(loss_cfg, tome_tokenizer=tokenizer, true_grn_df=true_grn_df)
 
     sfm_trainer(
         model=model,

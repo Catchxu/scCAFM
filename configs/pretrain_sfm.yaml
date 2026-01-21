@@ -1,0 +1,26 @@
+datasets:
+  adata_files: null
+  token_dict: token_dict.csv
+  human_tfs: human_tfs.csv
+  mouse_tfs: mouse_tfs.csv
+  true_grn: OmniPath.csv
+
+loss:
+  name: SFMLoss
+  kwargs:
+    use_prior: True
+    use_dag: True
+    alpha: 0.0
+    rho: 0.01
+    rho_max: 1e6
+    update_period: 100
+
+train:
+  species_key: species
+  learning_rate: 1e-5
+  weight_decay: 1e-2
+  epochs_per_file: 1
+  batch_size: 32
+  device: cuda
+  checkpoint_dir: ./checkpoints
+  resume: True

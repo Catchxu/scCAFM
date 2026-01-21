@@ -200,7 +200,7 @@ class SFMLoss(nn.Module):
         if self.use_dag:
             self.dag_criterion = DAGLoss(
                 alpha=kwargs.get("alpha", 0.0),
-                rho=kwargs.get("rho", 0.01),
+                rho=kwargs.get("0.", 0.01),
                 rho_max=kwargs.get("rho_max", 1e6),
                 update_period=kwargs.get("update_period", 100)
             )
