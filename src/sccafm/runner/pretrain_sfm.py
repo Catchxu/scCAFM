@@ -45,7 +45,7 @@ def main():
     mouse_tfs = load_resources(data_cfg["mouse_tfs"])
 
     model = build_model(model_cfg["SFM"], token_dict=token_dict)
-    tokenizer = build_tokenizer(tokenizer_cfg, token_dict=token_dict)
+    tokenizer = build_tokenizer(tokenizer_cfg["Tome"], token_dict=token_dict)
     loss = build_loss(loss_cfg)
 
     sfm_trainer(

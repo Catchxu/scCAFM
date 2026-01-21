@@ -141,11 +141,11 @@ class GeneRouter(nn.Module):
             self.gating = None
     
     def forward(
-            self,
-            x: torch.Tensor,
-            gene_subset: Optional[torch.Tensor] = None,
-            key_padding_mask: Optional[torch.Tensor] = None,
-            temperature: float = 1.0
+        self,
+        x: torch.Tensor,
+        gene_subset: Optional[torch.Tensor] = None,
+        key_padding_mask: Optional[torch.Tensor] = None,
+        temperature: float = 1.0
     ):
         """
         Args:
@@ -317,8 +317,8 @@ if __name__ == "__main__":
 
     Ng = 2000
     Nc = 100
-    tokenizer = TomeTokenizer(token_dict, simplify=True, max_length=Ng+1)
-    tokens = tokenizer(adata[:Nc, :].copy(), n_top_genes=Ng)
+    tokenizer = TomeTokenizer(token_dict, simplify=True, max_length=Ng+1, n_top_genes=Ng)
+    tokens = tokenizer(adata[:Nc, :].copy())
 
     model = SFM(token_dict, tf_list=tf_list)
     grn, binary_tf, binary_tg = model(tokens)

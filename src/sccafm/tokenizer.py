@@ -168,12 +168,12 @@ class CondTokenizer:
         return new_idx
 
     def __call__(
-            self, 
-            adata, 
-            platform_key=None, 
-            species_key=None,
-            tissue_key=None, 
-            disease_key=None
+        self, 
+        adata, 
+        platform_key=None, 
+        species_key=None,
+        tissue_key=None, 
+        disease_key=None
     ):
         C = adata.n_obs
 
@@ -234,16 +234,25 @@ class TomeTokenizer:
     Internally manages GeneTokenizer, ExprTokenizer, CondTokenizer, BatchTokenizer.
     """
     def __init__(
-            self,
-            token_dict,           # token dictionary DataFrame for GeneTokenizer
-            max_length=4096,      # max length for gene/expression sequences
-            cond_dict=None,       # optional pre-existing cond_dict DataFrame
-            simplify=False        # if True -> cond and batch tokens simplified
+        self,
+        token_dict,           # token dictionary DataFrame for GeneTokenizer
+        max_length=4096,      # max length for gene/expression sequences
+        cond_dict=None,       # optional pre-existing cond_dict DataFrame
+        simplify=False,       # if True -> cond and batch tokens simplified
+        **kwargs
     ):
         self.gene_tokenizer = GeneTokenizer(token_dict, max_length=max_length)
         self.expr_tokenizer = ExprTokenizer(max_length=max_length)
         self.cond_tokenizer = CondTokenizer(cond_dict=cond_dict, simplify=simplify)
         self.batch_tokenizer = BatchTokenizer(simplify=simplify)
+
+        self.prep_cfg = {
+            'min_genes_per_cell': 200,
+            'min_cells_per_gene': 3,
+            'log_norm': True,
+            'n_top_genes': 3000
+        }
+        self.prep_cfg.update(kwargs)
 
     def _check_pad_consistency(self, gene_pad: torch.Tensor, expr_pad: torch.Tensor):
         """
@@ -256,15 +265,13 @@ class TomeTokenizer:
                 f"First differences at indices: {diff_idx[:10]}"
             )
     
-    def _preprocess(
-            self, 
-            adata, 
-            min_genes_per_cell=200, 
-            min_cells_per_gene=3,
-            log_norm=True, 
-            n_top_genes=3000
-    ):
+    def _preprocess(self, adata):
         adata = adata.copy()
+
+        min_genes_per_cell = self.prep_cfg["min_genes_per_cell"]
+        min_cells_per_gene = self.prep_cfg["min_cells_per_gene"]
+        log_norm = self.prep_cfg["log_norm"]
+        n_top_genes = self.prep_cfg["n_top_genes"]
 
         if min_genes_per_cell:
             sc.pp.filter_cells(adata, min_genes=min_genes_per_cell)
@@ -282,16 +289,15 @@ class TomeTokenizer:
         return adata
 
     def __call__(
-            self,
-            adata,
-            gene_key=None,
-            order_matrix=None,
-            platform_key=None,
-            species_key=None,
-            tissue_key=None,
-            disease_key=None,
-            preprocess=True,
-            **kwargs
+        self,
+        adata,
+        gene_key=None,
+        order_matrix=None,
+        platform_key=None,
+        species_key=None,
+        tissue_key=None,
+        disease_key=None,
+        preprocess=True
     ):
         """
         Tokenize adata and return a dict of tensors.
@@ -303,7 +309,7 @@ class TomeTokenizer:
             pad: (C, L-1)
         """
         if preprocess:
-            adata = self._preprocess(adata, **kwargs)
+            adata = self._preprocess(adata)
 
         gene_tokens, gene_pad = self.gene_tokenizer(
             adata,
