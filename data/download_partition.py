@@ -5,6 +5,7 @@ from data_config import VERSION
 from typing import List
 import os
 import argparse
+import warnings
 
 
 parser = argparse.ArgumentParser(
@@ -42,7 +43,11 @@ parser.add_argument("--max-partition-size",
 
 args = parser.parse_args()
 
-# print(args)
+# suppress noisy anndata index coercion warning during Census -> AnnData conversion
+warnings.filterwarnings(
+    "ignore",
+    message=".*Transforming to str index.*",
+)
 
 
 
@@ -79,6 +84,9 @@ def download_partition(partition_idx, query_name, output_dir, index_dir, partiti
                                             organism="Homo sapiens",
                                             obs_coords=id_partition,
                                             )
+    # Ensure h5ad-compatible string indices explicitly.
+    adata.obs_names = adata.obs_names.astype(str)
+    adata.var_names = adata.var_names.astype(str)
     # prepare the query dir if not exist
     query_dir = os.path.join(output_dir, query_name)
     if not os.path.exists(query_dir):

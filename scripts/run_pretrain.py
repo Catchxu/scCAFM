@@ -40,6 +40,18 @@ def _as_list(value):
     raise ValueError("`datasets.adata_files` must be a string path or a list of string paths.")
 
 
+def _expand_adata_entry(raw: str):
+    p = Path(raw).expanduser()
+    if p.is_file():
+        return [p.resolve()]
+    if p.is_dir():
+        files = sorted(p.rglob("*.h5ad"))
+        if not files:
+            raise FileNotFoundError(f"No .h5ad files found in directory: {p}")
+        return [f.resolve() for f in files]
+    raise FileNotFoundError(f"Missing dataset path: {raw}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run scCAFM SFM pretraining with config checks.")
     parser.add_argument(
@@ -78,13 +90,13 @@ def main() -> int:
 
     datasets = pretrain_cfg.get("datasets", {})
     adata_files = _as_list(datasets.get("adata_files"))
+    expanded_adata_files = []
     for adata_file in adata_files:
-        resolved_adata = Path(adata_file).expanduser()
-        if not resolved_adata.is_file():
-            raise FileNotFoundError(
-                f"Missing dataset file: {adata_file}\n"
-                f"Update `datasets.adata_files` in {pretrain_cfg_path}"
-            )
+        expanded_adata_files.extend(_expand_adata_entry(adata_file))
+    if not expanded_adata_files:
+        raise FileNotFoundError(
+            f"No dataset files resolved from `datasets.adata_files` in {pretrain_cfg_path}"
+        )
 
     for key in ("token_dict", "human_tfs", "mouse_tfs", "true_grn"):
         _resolve_resource_path(datasets[key], project_root)
@@ -119,6 +131,7 @@ def main() -> int:
 
     print(f"Meta config: {meta_cfg_path}")
     print(f"Pretrain config: {pretrain_cfg_path}")
+    print(f"Resolved dataset files: {len(expanded_adata_files)}")
     print("Command:", " ".join(cmd))
     print(f"PYTHONPATH={env['PYTHONPATH']}")
 

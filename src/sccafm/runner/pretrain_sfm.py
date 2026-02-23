@@ -1,4 +1,5 @@
 import argparse
+from pathlib import Path
 
 from sccafm.load import load_cfg, load_resources
 from sccafm.builder import build_model, build_loss, build_tokenizer
@@ -61,6 +62,35 @@ def _normalize_pretrain_cfg(train_cfg, loss_cfg):
         loss_kwargs["update_period"] = _as_int(loss_kwargs["update_period"], "loss.kwargs.update_period")
 
 
+def _expand_adata_entry(entry: str):
+    p = Path(entry).expanduser()
+    if p.is_dir():
+        files = sorted(str(f.resolve()) for f in p.rglob("*.h5ad"))
+        if not files:
+            raise FileNotFoundError(f"No .h5ad files found in directory: {p}")
+        return files
+    if p.is_file():
+        return [str(p.resolve())]
+    raise FileNotFoundError(f"`datasets.adata_files` path not found: {entry}")
+
+
+def _resolve_adata_files(raw):
+    if isinstance(raw, str):
+        return _expand_adata_entry(raw)
+    if isinstance(raw, list):
+        out = []
+        for item in raw:
+            if not isinstance(item, str):
+                raise ValueError(
+                    "`datasets.adata_files` list items must be string paths."
+                )
+            out.extend(_expand_adata_entry(item))
+        return out
+    raise ValueError(
+        "`datasets.adata_files` must be a string path or a list of string paths."
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description="Pretrain scCAFM-SFM model")
     parser.add_argument("--config", type=str, default="meta.yaml", help="Meta config YAML path")
@@ -97,7 +127,7 @@ def main():
 
     _normalize_pretrain_cfg(train_cfg, loss_cfg)
 
-    adata_files = data_cfg["adata_files"]   
+    adata_files = _resolve_adata_files(data_cfg["adata_files"])
     token_dict = load_resources(data_cfg["token_dict"])
     human_tfs = load_resources(data_cfg["human_tfs"])
     mouse_tfs = load_resources(data_cfg["mouse_tfs"])
