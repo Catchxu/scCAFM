@@ -39,3 +39,24 @@ where exact versions of dependencies are specified.
 
 
 ## Quick Start
+### Pretrain SFM
+Before training, make sure your dataset path is set in `configs/pretrain_sfm.yaml` (field: `datasets.adata_files`).
+
+Validate config and required files:
+```bash
+python3 scripts/run_pretrain.py --dry-run
+```
+
+Single GPU training:
+```bash
+python3 scripts/run_pretrain.py
+```
+
+Multi-GPU training (DDP):
+```bash
+python3 scripts/run_pretrain.py --nproc-per-node 4
+```
+
+Notes:
+- In DDP, `batch_size` is per GPU process.
+- Checkpoints are saved by rank 0 in `train.checkpoint_dir`.

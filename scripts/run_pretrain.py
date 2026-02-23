@@ -58,6 +58,12 @@ def main() -> int:
         action="store_true",
         help="Validate files and print command without launching training.",
     )
+    parser.add_argument(
+        "--nproc-per-node",
+        type=int,
+        default=1,
+        help="Number of GPU processes for DDP launch via torchrun (default: 1).",
+    )
     args = parser.parse_args()
 
     project_root = Path(__file__).resolve().parent.parent
@@ -90,13 +96,24 @@ def main() -> int:
     else:
         env["PYTHONPATH"] = extra_pythonpath
 
-    cmd = [
-        sys.executable,
-        "-m",
-        "sccafm.runner.pretrain_sfm",
-        "--config",
-        args.meta_config,
-    ]
+    in_torchrun = int(env.get("WORLD_SIZE", "1")) > 1
+    if args.nproc_per_node > 1 and not in_torchrun:
+        cmd = [
+            "torchrun",
+            f"--nproc_per_node={args.nproc_per_node}",
+            "-m",
+            "sccafm.runner.pretrain_sfm",
+            "--config",
+            args.meta_config,
+        ]
+    else:
+        cmd = [
+            sys.executable,
+            "-m",
+            "sccafm.runner.pretrain_sfm",
+            "--config",
+            args.meta_config,
+        ]
     if args.override:
         cmd.extend(["--override", *args.override])
 
