@@ -32,7 +32,11 @@ def sfm_trainer(
     """
     Complete training pipeline for SFM model.
     """
+    if isinstance(adata_files, str):
+        adata_files = [adata_files]
+
     model.to(device)
+    criterion.to(device)
     os.makedirs(checkpoint_dir, exist_ok=True)
     checkpoint_path = os.path.join(checkpoint_dir, "sfm_latest.pt")
     
@@ -51,8 +55,10 @@ def sfm_trainer(
         optimizer.load_state_dict(ckpt['optimizer_state_dict'])
         
         if 'dag_state' in ckpt and hasattr(criterion, 'dag_criterion') and ckpt['dag_state'] is not None:
-            criterion.dag_criterion.alpha = ckpt['dag_state']['alpha'].to(device)
-            criterion.dag_criterion.rho = ckpt['dag_state']['rho'].to(device)
+            alpha = ckpt['dag_state']['alpha']
+            rho = ckpt['dag_state']['rho']
+            criterion.dag_criterion.alpha = alpha.item() if isinstance(alpha, torch.Tensor) else float(alpha)
+            criterion.dag_criterion.rho = rho.item() if isinstance(rho, torch.Tensor) else float(rho)
             criterion.dag_criterion.prev_h_val = ckpt['dag_state']['prev_h_val']
         
         start_file_idx = ckpt['file_idx'] + 1
@@ -115,7 +121,7 @@ def sfm_trainer(
 
                 display_metrics = {"loss": f"{total_loss.item():.3f}"}
                 for k, v in loss_dict.items():
-                    display_metrics[k] = "{v:.3f}"
+                    display_metrics[k] = f"{v:.3f}"
 
                 pbar.set_postfix(display_metrics)
 
@@ -134,6 +140,7 @@ def sfm_trainer(
         # 5. Cleanup
         del adata, tokens_dict, dataset, loader
         gc.collect()
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     print("\nTraining workflow completed.")

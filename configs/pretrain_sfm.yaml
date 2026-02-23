@@ -1,5 +1,5 @@
 datasets:
-  adata_files: null
+  adata_files: /data1021/xukaichen/data/CTA/pbmc.h5ad
   token_dict: token_dict.csv
   human_tfs: human_tfs.csv
   mouse_tfs: mouse_tfs.csv
@@ -20,7 +20,7 @@ train:
   learning_rate: 1e-5
   weight_decay: 1e-2
   epochs_per_file: 1
-  batch_size: 32
+  batch_size: 4
   device: cuda
   checkpoint_dir: ./checkpoints
   resume: True

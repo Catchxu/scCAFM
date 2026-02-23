@@ -60,21 +60,22 @@ class PriorLoss(nn.Module):
 
     def forward(self, tokens, grn, binary_tf, binary_tg, true_grn_df):
         gene_tokens = tokens["gene"]
-        pad_mask = tokens["pad"]
+        C = gene_tokens.shape[0]
 
-        # 1. Align with model's internal routing: only genes selected as TFs should contribute to loss
-        model_tf_mask = binary_tf.squeeze(-1).float() 
+        # 1. Project everything to the same TG-selected space used by GRN prediction.
+        gene_tokens = gene_tokens[binary_tg].view(C, -1)
+        model_tf_mask = binary_tf[binary_tg].view(C, -1).float()
 
-        # 2. Map ground truth to sequence positions
+        # 2. Map ground truth to sequence positions in the selected space.
         target = self.get_gt_matrix(true_grn_df, gene_tokens)
         
-        # 3. Expand predicted GRN to full sequence dimensions (B, L, L)
+        # 3. Expand predicted GRN to selected-space dimensions (B, S, S)
         grn_full = expand_grn(grn, binary_tf, binary_tg)
         
-        # 4. Construct 2D mask (Source x Target)
-        # Loss is only valid where: 1) Gene is not padding, AND 2) Source is an active TF
-        is_not_pad = (~pad_mask).float()
-        valid_mask = torch.einsum('bi,bj->bij', model_tf_mask * is_not_pad, is_not_pad)
+        # 4. Construct 2D mask (Source x Target):
+        # source gene must be an active TF in selected space.
+        all_targets = torch.ones_like(model_tf_mask)
+        valid_mask = torch.einsum('bi,bj->bij', model_tf_mask, all_targets)
 
         # 5. Compute pixel-wise loss
         loss = self.criterion(grn_full, target)
@@ -200,7 +201,7 @@ class SFMLoss(nn.Module):
         if self.use_dag:
             self.dag_criterion = DAGLoss(
                 alpha=kwargs.get("alpha", 0.0),
-                rho=kwargs.get("0.", 0.01),
+                rho=kwargs.get("rho", 0.01),
                 rho_max=kwargs.get("rho_max", 1e6),
                 update_period=kwargs.get("update_period", 100)
             )
@@ -243,7 +244,7 @@ class SFMLoss(nn.Module):
         # 3. DAG Loss
         if self.use_dag:
             # Note: Ensure u/v are not None if use_dag is True
-            loss_d = self.dag_criterion(u, binary_tf.squeeze(-1), v, binary_tg.squeeze(-1))
+            loss_d = self.dag_criterion(u, v, binary_tf)
             total_loss += loss_d
             loss_dict["dag"] = loss_d.item()
 

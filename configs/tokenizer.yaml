@@ -1,10 +1,10 @@
 Tome:
   name: "Tome"
   kwargs:
-    max_length: 4096
+    max_length: 2048
     cond_dict: null
     simplify: False
     min_genes_per_cell: 200
     min_cells_per_gene: 3
     log_norm: True
-    n_top_genes: 4000
+    n_top_genes: 2000

@@ -1,5 +1,9 @@
-from importlib.metadata import version as _version
-__version__ = _version("scCAFM")
+from importlib.metadata import PackageNotFoundError, version as _version
+
+try:
+    __version__ = _version("scCAFM")
+except PackageNotFoundError:
+    __version__ = "0.0.0"
 
 # Founctions
 from .load import load_resources

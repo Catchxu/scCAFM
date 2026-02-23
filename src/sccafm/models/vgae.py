@@ -204,6 +204,11 @@ class ELBOLoss(nn.Module):
         mu_z, sigma_z = self.encoder(x, grn, binary_tf, binary_tg)
         mu_h, sigma_h, p_drop = self.decoder(mu_z, sigma_z, grn, binary_tf, binary_tg)
 
+        # Align expression targets with decoder outputs:
+        # decoder operates on TG-selected (non-pad) genes, not full padded length.
+        C = x.shape[0]
+        x = x[binary_tg].view(C, -1)
+
         # Likelihood term
         log_px = self.zinormal_loglik(x, mu_h, sigma_h, p_drop).mean()
 

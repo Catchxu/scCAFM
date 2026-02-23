@@ -5,6 +5,62 @@ from sccafm.builder import build_model, build_loss, build_tokenizer
 from sccafm.trainer import sfm_trainer
 
 
+def _as_float(v, key):
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str):
+        try:
+            return float(v)
+        except ValueError as e:
+            raise ValueError(f"`{key}` must be a float, got: {v}") from e
+    raise ValueError(f"`{key}` must be a float, got type: {type(v).__name__}")
+
+
+def _as_int(v, key):
+    if isinstance(v, bool):
+        raise ValueError(f"`{key}` must be an int, got bool: {v}")
+    if isinstance(v, int):
+        return v
+    if isinstance(v, float) and v.is_integer():
+        return int(v)
+    if isinstance(v, str):
+        try:
+            return int(v)
+        except ValueError as e:
+            raise ValueError(f"`{key}` must be an int, got: {v}") from e
+    raise ValueError(f"`{key}` must be an int, got type: {type(v).__name__}")
+
+
+def _as_bool(v, key):
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if s in {"true", "1", "yes", "y"}:
+            return True
+        if s in {"false", "0", "no", "n"}:
+            return False
+    raise ValueError(f"`{key}` must be a bool, got: {v}")
+
+
+def _normalize_pretrain_cfg(train_cfg, loss_cfg):
+    train_cfg["learning_rate"] = _as_float(train_cfg.get("learning_rate", 1e-5), "train.learning_rate")
+    train_cfg["weight_decay"] = _as_float(train_cfg.get("weight_decay", 1e-2), "train.weight_decay")
+    train_cfg["epochs_per_file"] = _as_int(train_cfg.get("epochs_per_file", 1), "train.epochs_per_file")
+    train_cfg["batch_size"] = _as_int(train_cfg.get("batch_size", 32), "train.batch_size")
+    train_cfg["resume"] = _as_bool(train_cfg.get("resume", True), "train.resume")
+
+    loss_kwargs = loss_cfg.get("kwargs", {})
+    if "alpha" in loss_kwargs:
+        loss_kwargs["alpha"] = _as_float(loss_kwargs["alpha"], "loss.kwargs.alpha")
+    if "rho" in loss_kwargs:
+        loss_kwargs["rho"] = _as_float(loss_kwargs["rho"], "loss.kwargs.rho")
+    if "rho_max" in loss_kwargs:
+        loss_kwargs["rho_max"] = _as_float(loss_kwargs["rho_max"], "loss.kwargs.rho_max")
+    if "update_period" in loss_kwargs:
+        loss_kwargs["update_period"] = _as_int(loss_kwargs["update_period"], "loss.kwargs.update_period")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Pretrain scCAFM-SFM model")
     parser.add_argument("--config", type=str, default="meta.yaml", help="Meta config YAML path")
@@ -38,6 +94,8 @@ def main():
         elif isinstance(old_val, float):
             value = float(value)
         d[keys[-1]] = value
+
+    _normalize_pretrain_cfg(train_cfg, loss_cfg)
 
     adata_files = data_cfg["adata_files"]   
     token_dict = load_resources(data_cfg["token_dict"])

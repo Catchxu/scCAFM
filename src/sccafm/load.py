@@ -2,6 +2,7 @@ import yaml
 import pandas as pd
 from importlib import resources
 from typing import Optional
+from pathlib import Path
 
 
 def load_resources(filename: str) -> pd.DataFrame:
@@ -17,6 +18,10 @@ def load_resources(filename: str) -> pd.DataFrame:
     Example:
         df = load_resources("token_dict.csv")
     """
+    local_path = Path(filename).expanduser()
+    if local_path.is_file():
+        return pd.read_csv(local_path)
+
     # Use importlib.resources to get the file inside the installed package
     try:
         with resources.as_file(
@@ -43,6 +48,11 @@ def load_cfg(filename: str):
     Example:
         cfg = load_cfg("model.yaml")        
     """
+    local_path = Path(filename).expanduser()
+    if local_path.is_file():
+        with open(local_path, "r") as f:
+            return yaml.safe_load(f)
+
     try:
         with resources.as_file(
             resources.files("configs").joinpath(filename)
