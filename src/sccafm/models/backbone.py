@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .attention import FlashMHA
+from .attention import MaskedMHA
 
 
 class SwiGLU(nn.Module):
@@ -25,7 +25,7 @@ class TransformerLayer(nn.Module):
         use_rotary=False,
     ):
         super().__init__()
-        self.attn = FlashMHA(
+        self.attn = MaskedMHA(
             embed_dim=embed_dim,
             num_heads=num_heads,
             use_rotary=use_rotary

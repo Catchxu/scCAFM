@@ -1,12 +1,11 @@
 import torch
 import torch.nn as nn
 from torch.nn.functional import scaled_dot_product_attention
-from torch.nn.attention import SDPBackend, sdpa_kernel
 
 
-class FlashMHA(nn.Module):
+class MaskedMHA(nn.Module):
     """
-    Multi-head attention with Flash Attention.
+    Multi-head attention with scaled dot-product attention.
 
     Args:
         embed_dim: total embedding dimension (2D)
@@ -90,40 +89,15 @@ class FlashMHA(nn.Module):
 
         # ---- Prepare mask ----
         attn_mask = None
-        if key_padding_mask is not None:
+        if key_padding_mask is not None and key_padding_mask.any():
             # key_padding_mask: (C, L) -> (C, num_heads, L, L)
             kp = key_padding_mask.unsqueeze(1)
             kp = kp.expand(-1, self.num_heads, -1)
             kp = kp.unsqueeze(2).expand(-1, -1, L, -1)
             attn_mask = kp  # bool mask
 
-        # ---- Attention with safe backend fallback ----
-        # Try flash kernel first for speed, then fall back to math kernel.
-        try:
-            with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
-                out = scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, is_causal=causal)
-        except RuntimeError as e:
-            if "No available kernel" not in str(e):
-                raise
-            try:
-                with sdpa_kernel(SDPBackend.MATH):
-                    out = scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, is_causal=causal)
-            except RuntimeError:
-                # Final fallback: explicit attention to avoid backend-specific failures.
-                scale = self.head_dim ** -0.5
-                scores = torch.matmul(q, k.transpose(-2, -1)) * scale
-
-                if causal:
-                    causal_mask = torch.triu(
-                        torch.ones(L, L, device=scores.device, dtype=torch.bool), diagonal=1
-                    )
-                    scores = scores.masked_fill(causal_mask, float("-inf"))
-
-                if attn_mask is not None:
-                    scores = scores.masked_fill(attn_mask, float("-inf"))
-
-                probs = torch.softmax(scores, dim=-1)
-                out = torch.matmul(probs, v)
+        # ---- Attention ----
+        out = scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, is_causal=causal)
 
         # ---- Merge heads ----
         out = out.transpose(1, 2).reshape(C, L, self.embed_dim)  # (C, L, embed_dim)
@@ -150,7 +124,7 @@ if __name__ == "__main__":
     embedding_layer = TomoEmbedding(token_dict, D=D)
     x, key_padding_mask = embedding_layer(tokens)
 
-    model = FlashMHA(embed_dim=2*D)
+    model = MaskedMHA(embed_dim=2*D)
     out = model.forward(x, key_padding_mask)
 
     print(out.shape)

@@ -143,7 +143,10 @@ class DAGLoss(nn.Module):
         self.accumulated_h = 0.0
         self.step_counter = 0
 
-    def forward(self, u, v, binary_tf):
+    def forward(self, u, v, binary_tf, binary_tg=None):
+        if binary_tg is not None:
+            C = binary_tf.shape[0]
+            binary_tf = binary_tf[binary_tg].view(C, -1)
         u_full = expand_u(u, binary_tf)
         adj_factor = torch.bmm(v.transpose(1, 2), u_full)
         
@@ -244,7 +247,7 @@ class SFMLoss(nn.Module):
         # 3. DAG Loss
         if self.use_dag:
             # Note: Ensure u/v are not None if use_dag is True
-            loss_d = self.dag_criterion(u, v, binary_tf)
+            loss_d = self.dag_criterion(u, v, binary_tf, binary_tg)
             total_loss += loss_d
             loss_dict["dag"] = loss_d.item()
 
