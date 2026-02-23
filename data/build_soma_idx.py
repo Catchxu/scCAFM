@@ -33,12 +33,13 @@ def retrieve_soma_idx(query_name) -> List[str]:
 
     with cellxgene_census.open_soma(census_version=VERSION) as census:
         cell_metadata = census["census_data"]["homo_sapiens"].obs.read(
-        value_filter = VALUE_FILTER[query_name],
-        column_names = ["soma_joinid"]
-    )
-    cell_metadata = cell_metadata.concat()
-    cell_metadata = cell_metadata.to_pandas()
-    return cell_metadata["soma_joinid"].to_list()
+            value_filter=VALUE_FILTER[query_name],
+            column_names=["soma_joinid"],
+        )
+        # Consume iterator while census handle is still open.
+        cell_metadata = cell_metadata.concat()
+        cell_metadata = cell_metadata.to_pandas()
+        return cell_metadata["soma_joinid"].to_list()
 
 def convert2file(idx_list: List[str], query_name: str, output_dir: str) -> None:
     """
@@ -67,5 +68,4 @@ def build_soma_idx(query_name, output_dir) -> None:
 #     build_soma_idx("heart")
 
 build_soma_idx(args.query_name, args.output_dir)
-
 
