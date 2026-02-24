@@ -4,7 +4,7 @@ scCAFM is a causality-aware foundation model designed for large-scale single-cel
 
 <br/>
 <div align=center>
-<img src="/img/Fig1.png" width="70%">
+<img src="/resources/Fig1.png" width="70%">
 </div>
 <br/>
 
