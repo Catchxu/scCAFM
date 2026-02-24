@@ -1,4 +1,7 @@
 import argparse
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 from sccafm.load import load_cfg, load_resources
@@ -95,6 +98,13 @@ def main():
     parser = argparse.ArgumentParser(description="Pretrain scCAFM-SFM model")
     parser.add_argument("--config", type=str, default="meta.yaml", help="Meta config YAML path")
     parser.add_argument("--override", nargs="*", default=[], help="Optional overrides: key=value")
+    parser.add_argument("--dry-run", action="store_true", help="Validate config and paths without training.")
+    parser.add_argument(
+        "--nproc-per-node",
+        type=int,
+        default=1,
+        help="Number of processes for DDP launch via torchrun (default: 1).",
+    )
     args = parser.parse_args()
 
     # Load the configs
@@ -128,6 +138,37 @@ def main():
     _normalize_pretrain_cfg(train_cfg, loss_cfg)
 
     adata_files = _resolve_adata_files(data_cfg["adata_files"])
+
+    in_torchrun = int(os.environ.get("WORLD_SIZE", "1")) > 1
+    if args.nproc_per_node > 1 and not in_torchrun:
+        cmd = [
+            "torchrun",
+            f"--nproc_per_node={args.nproc_per_node}",
+            "-m",
+            "sccafm.runner.pretrain_sfm",
+            "--config",
+            args.config,
+        ]
+        if args.override:
+            cmd.extend(["--override", *args.override])
+        print(f"Resolved dataset files: {len(adata_files)}")
+        print("Command:", " ".join(cmd))
+        if args.dry_run:
+            return
+        subprocess.run(cmd, check=True)
+        return
+
+    if args.dry_run:
+        print(f"Resolved dataset files: {len(adata_files)}")
+        print(
+            "Command:",
+            " ".join(
+                [sys.executable, "-m", "sccafm.runner.pretrain_sfm", "--config", args.config]
+                + (["--override", *args.override] if args.override else [])
+            ),
+        )
+        return
+
     token_dict = load_resources(data_cfg["token_dict"])
     human_tfs = load_resources(data_cfg["human_tfs"])
     mouse_tfs = load_resources(data_cfg["mouse_tfs"])
