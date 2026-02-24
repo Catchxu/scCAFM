@@ -73,5 +73,6 @@ python3 scripts/run_pretrain.py --nproc-per-node 4
 
 Notes:
 - Set dataset path in `configs/pretrain_sfm.yaml` (`datasets.adata_files`) first.
+- Set metadata keys in `configs/tokenizer.yaml` if needed (`platform_key`, `species_key`, `tissue_key`, `disease_key`, `batch_key`).
 - In DDP, `batch_size` is per GPU process.
 - Checkpoints are saved by rank 0 in `train.checkpoint_dir`.

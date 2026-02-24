@@ -9,56 +9,95 @@ from .models import ELBOLoss, expand_grn, expand_u
 
 
 class PriorLoss(nn.Module):
-    def __init__(self, tome_tokenizer: TomeTokenizer):
+    def __init__(
+        self,
+        tome_tokenizer: TomeTokenizer,
+        true_grn_df: Optional[pd.DataFrame] = None,
+        pos_weight: float = 20.0,
+        neg_weight: float = 1.0,
+        neg_sample_ratio: Optional[float] = None,
+    ):
         super().__init__()
         gt = tome_tokenizer.gene_tokenizer
         self.symbol2id = gt.symbol2id
         self.id2id = gt.id2id
         self.pad_index = gt.pad_index
+        self.pos_weight = float(pos_weight)
+        self.neg_weight = float(neg_weight)
+        self.neg_sample_ratio = None if neg_sample_ratio is None else float(neg_sample_ratio)
+        self._cached_src_ids = None
+        self._cached_tgt_ids = None
+        self._cached_prior_ref = None
         
         # Using reduction='none' to apply custom masking later
         self.criterion = nn.BCEWithLogitsLoss(reduction='none')
+        if true_grn_df is not None:
+            self._prepare_prior_cache(true_grn_df)
 
-    def get_gt_matrix(self, true_grn: pd.DataFrame, gene_tokens: torch.Tensor):
+    def _map_gene_to_token(self, name: str) -> Optional[int]:
+        """
+        Robust mapping: try ENSG/id map first when applicable, then symbol map fallback.
+        """
+        s = str(name)
+        if s.startswith("ENSG") and s in self.id2id:
+            return int(self.id2id[s])
+        if s in self.symbol2id:
+            return int(self.symbol2id[s])
+        if s in self.id2id:
+            return int(self.id2id[s])
+        return None
+
+    def _prepare_prior_cache(self, true_grn: pd.DataFrame):
+        if not {"Gene1", "Gene2"}.issubset(true_grn.columns):
+            raise ValueError("true_grn_df must contain columns: Gene1, Gene2")
+
+        src_ids = []
+        tgt_ids = []
+        for g1, g2 in zip(true_grn["Gene1"].tolist(), true_grn["Gene2"].tolist()):
+            s = self._map_gene_to_token(g1)
+            t = self._map_gene_to_token(g2)
+            if s is None or t is None:
+                continue
+            src_ids.append(s)
+            tgt_ids.append(t)
+
+        if len(src_ids) == 0:
+            self._cached_src_ids = torch.empty(0, dtype=torch.long)
+            self._cached_tgt_ids = torch.empty(0, dtype=torch.long)
+        else:
+            pairs = torch.tensor(list(zip(src_ids, tgt_ids)), dtype=torch.long)
+            pairs = torch.unique(pairs, dim=0)
+            self._cached_src_ids = pairs[:, 0].contiguous()
+            self._cached_tgt_ids = pairs[:, 1].contiguous()
+
+        self._cached_prior_ref = true_grn
+
+    def _build_gt_matrix(self, gene_tokens: torch.Tensor):
         """
         Args:
-            true_grn: DataFrame with ["Gene1", "Gene2"]
             gene_tokens: (B, L)
         """
+        C, S = gene_tokens.shape
         device = gene_tokens.device
-        
-        # 1. Identify which lookup to use
-        sample_gene = str(true_grn["Gene1"].iloc[0])
-        lookup = self.id2id if sample_gene.startswith("ENSG") else self.symbol2id
-        
-        # 2. Filter DataFrame to ensure BOTH genes exist in our vocabulary
-        # This is the crucial step to keep dimensions P equal
-        valid_prior = true_grn[
-            true_grn["Gene1"].isin(lookup.keys()) & 
-            true_grn["Gene2"].isin(lookup.keys())
-        ].copy()
 
-        if len(valid_prior) == 0:
-            # Return empty matrix if no overlaps found
-            return torch.zeros((gene_tokens.shape[0], gene_tokens.shape[1], gene_tokens.shape[1]), device=device)
+        if self._cached_src_ids is None or self._cached_tgt_ids is None:
+            raise RuntimeError("Prior cache is empty. Call with true_grn_df at least once.")
+        if self._cached_src_ids.numel() == 0:
+            return torch.zeros((C, S, S), device=device)
 
-        # 3. Map to IDs and convert to tensors
-        src_ids = torch.tensor(valid_prior["Gene1"].map(lookup).values, dtype=torch.long, device=device)
-        tgt_ids = torch.tensor(valid_prior["Gene2"].map(lookup).values, dtype=torch.long, device=device)
+        src_ids = self._cached_src_ids.to(device=device)
+        tgt_ids = self._cached_tgt_ids.to(device=device)
+        target = torch.zeros((C, S, S), device=device)
 
-        # 4. Vectorized Position Search
-        # src_matches: (B, L, P), tgt_matches: (B, L, P)
-        # P is now guaranteed to be len(valid_prior)
-        src_matches = (gene_tokens.unsqueeze(-1) == src_ids.view(1, 1, -1))
-        tgt_matches = (gene_tokens.unsqueeze(-1) == tgt_ids.view(1, 1, -1))
+        # Build one sample at a time to avoid allocating (B, S, P) tensors.
+        for b in range(C):
+            src_matches = (gene_tokens[b].unsqueeze(-1) == src_ids.view(1, -1)).float()  # (S, P)
+            tgt_matches = (gene_tokens[b].unsqueeze(-1) == tgt_ids.view(1, -1)).float()  # (S, P)
+            target[b] = (src_matches @ tgt_matches.transpose(0, 1) > 0).float()
 
-        # 5. Construct Matrix (B, L, L)
-        # 'bsp, btp -> bst' (Batch, Source_pos, Target_pos)
-        gt_matrix = torch.einsum('bsp,btp->bst', src_matches.float(), tgt_matches.float())
-        
-        return (gt_matrix > 0).float()
+        return target
 
-    def forward(self, tokens, grn, binary_tf, binary_tg, true_grn_df):
+    def forward(self, tokens, grn, binary_tf, binary_tg, true_grn_df: Optional[pd.DataFrame] = None):
         gene_tokens = tokens["gene"]
         C = gene_tokens.shape[0]
 
@@ -66,8 +105,11 @@ class PriorLoss(nn.Module):
         gene_tokens = gene_tokens[binary_tg].view(C, -1)
         model_tf_mask = binary_tf[binary_tg].view(C, -1).float()
 
+        if true_grn_df is not None and true_grn_df is not self._cached_prior_ref:
+            self._prepare_prior_cache(true_grn_df)
+
         # 2. Map ground truth to sequence positions in the selected space.
-        target = self.get_gt_matrix(true_grn_df, gene_tokens)
+        target = self._build_gt_matrix(gene_tokens)
         
         # 3. Expand predicted GRN to selected-space dimensions (B, S, S)
         grn_full = expand_grn(grn, binary_tf, binary_tg)
@@ -79,11 +121,29 @@ class PriorLoss(nn.Module):
 
         # 5. Compute pixel-wise loss
         loss = self.criterion(grn_full, target)
-        weight_mask = target * 10.0 + (1.0 - target) * 1.0
+        weight_mask = target * self.pos_weight + (1.0 - target) * self.neg_weight
         loss = loss * weight_mask
         
-        # 6. Normalize by valid entries to prevent loss inflation from padded/inactive regions
-        total_loss = (loss * valid_mask).sum() / (valid_mask.sum() + 1e-8)
+        # 6. Optional negative sampling to avoid overwhelming positive supervision.
+        supervise_mask = valid_mask
+        if self.neg_sample_ratio is not None and self.neg_sample_ratio > 0:
+            pos_mask = (target > 0.5) & (valid_mask > 0)
+            neg_mask = (~(target > 0.5)) & (valid_mask > 0)
+            pos_count = int(pos_mask.sum().item())
+            neg_count = int(neg_mask.sum().item())
+
+            if pos_count > 0 and neg_count > 0:
+                sample_k = min(neg_count, int(pos_count * self.neg_sample_ratio))
+                if sample_k > 0:
+                    neg_idx = torch.nonzero(neg_mask, as_tuple=False)
+                    perm = torch.randperm(neg_idx.shape[0], device=neg_idx.device)[:sample_k]
+                    chosen = neg_idx[perm]
+                    sampled_neg = torch.zeros_like(neg_mask)
+                    sampled_neg[chosen[:, 0], chosen[:, 1], chosen[:, 2]] = True
+                    supervise_mask = (pos_mask | sampled_neg).float()
+        
+        # 7. Normalize by supervised entries to prevent loss inflation.
+        total_loss = (loss * supervise_mask).sum() / (supervise_mask.sum() + 1e-8)
         
         return total_loss
 
@@ -197,7 +257,13 @@ class SFMLoss(nn.Module):
                     "Both 'tome_tokenizer' and 'true_grn_df' must be provided if use_prior=True"
                 )
             else:
-                self.prior_criterion = PriorLoss(tome_tokenizer)
+                self.prior_criterion = PriorLoss(
+                    tome_tokenizer,
+                    true_grn_df=true_grn_df,
+                    pos_weight=kwargs.get("prior_pos_weight", 10.0),
+                    neg_weight=kwargs.get("prior_neg_weight", 1.0),
+                    neg_sample_ratio=kwargs.get("prior_neg_sample_ratio", None),
+                )
                 self.true_grn_df = true_grn_df # Store prior knowledge internally
             
         # 3. DAG Loss Setup
@@ -243,6 +309,7 @@ class SFMLoss(nn.Module):
             loss_p = self.prior_criterion(tokens, grn, binary_tf, binary_tg, self.true_grn_df)
             total_loss += w_p * loss_p
             loss_dict["prior"] = loss_p.item()
+            loss_dict["prior_w"] = float(w_p)
 
         # 3. DAG Loss
         if self.use_dag:

@@ -1,5 +1,5 @@
 datasets:
-  adata_files: /data1021/xukaichen/data/Atlas/blood/
+  adata_files: /data1021/xukaichen/data/CTA/myeloid.h5ad
   token_dict: token_dict.csv
   human_tfs: human_tfs.csv
   mouse_tfs: mouse_tfs.csv
@@ -10,6 +10,9 @@ loss:
   kwargs:
     use_prior: True
     use_dag: False
+    prior_pos_weight: 20.0
+    prior_neg_weight: 1.0
+    prior_neg_sample_ratio: 5.0
     alpha: 0.0
     rho: 0.01
     rho_max: 1e6
@@ -23,4 +26,4 @@ train:
   batch_size: 4
   device: cuda
   checkpoint_dir: ./checkpoints
-  resume: True
+  resume: False

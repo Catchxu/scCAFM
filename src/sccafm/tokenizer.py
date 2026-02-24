@@ -121,7 +121,15 @@ class CondTokenizer:
     Inputs: adata + obs keys: platform_key, species_key, tissue_key, disease_key
     Output: (C, 4) tensor (4 condition tokens per cell)
     """
-    def __init__(self, cond_dict=None, simplify=False):
+    def __init__(
+        self,
+        cond_dict=None,
+        simplify=False,
+        platform_key=None,
+        species_key=None,
+        tissue_key=None,
+        disease_key=None,
+    ):
         """
         cond_dict: DataFrame with columns: cond_value, token_index
         simplify: if True -> always return 0 token for all 4 features
@@ -139,6 +147,50 @@ class CondTokenizer:
             raise ValueError("cond_dict must contain '<unk>' as token_index=0")
 
         self.cond_dict = cond_dict
+        self.set_condition_keys(
+            platform_key=platform_key,
+            species_key=species_key,
+            tissue_key=tissue_key,
+            disease_key=disease_key,
+        )
+
+    def set_condition_keys(
+        self,
+        platform_key=None,
+        species_key=None,
+        tissue_key=None,
+        disease_key=None,
+    ):
+        """
+        Set the obs keys used to build condition tokens.
+        """
+        self.condition_keys = [platform_key, species_key, tissue_key, disease_key]
+
+    def set_condition_key_group(self, key_group):
+        """
+        Set condition keys from a sequence/dict.
+
+        Args:
+            key_group:
+                - list/tuple with length 4 in order:
+                  [platform_key, species_key, tissue_key, disease_key]
+                - dict with optional keys:
+                  platform_key, species_key, tissue_key, disease_key
+        """
+        if isinstance(key_group, (list, tuple)):
+            if len(key_group) != 4:
+                raise ValueError("key_group list/tuple must have length 4.")
+            self.condition_keys = list(key_group)
+            return
+        if isinstance(key_group, dict):
+            self.condition_keys = [
+                key_group.get("platform_key"),
+                key_group.get("species_key"),
+                key_group.get("tissue_key"),
+                key_group.get("disease_key"),
+            ]
+            return
+        raise ValueError("key_group must be a list/tuple(length=4) or dict.")
 
     def _get_next_index(self):
         """Return next available token index."""
@@ -167,14 +219,7 @@ class CondTokenizer:
         self.cond_dict = pd.concat([self.cond_dict, new_row], ignore_index=True)
         return new_idx
 
-    def __call__(
-        self, 
-        adata, 
-        platform_key=None, 
-        species_key=None,
-        tissue_key=None, 
-        disease_key=None
-    ):
+    def __call__(self, adata):
         C = adata.n_obs
 
         # If simplify mode: return all zero tokens
@@ -183,7 +228,7 @@ class CondTokenizer:
 
         obs = adata.obs
 
-        keys = [platform_key, species_key, tissue_key, disease_key]
+        keys = self.condition_keys
         cond_values = []
 
         for key in keys:
@@ -206,12 +251,59 @@ class CondTokenizer:
 
 class BatchTokenizer:
     """
-    Assign a unique batch ID (integer counter) per adata input.
-    Output: (C, 1) tensor filled with batch index.
+    Batch tokenizer:
+    Maps batch metadata from adata.obs to stable token IDs.
+    Output: (C, 1) tensor.
     """
-    def __init__(self, simplify=False):
-        self.counter = 0
+    def __init__(self, batch_dict=None, simplify=False, batch_key=None):
         self.simplify = simplify
+        if batch_dict is None:
+            batch_dict = pd.DataFrame(
+                {"batch_value": ["<unk>"], "token_index": [0]}
+            )
+        if "<unk>" not in batch_dict["batch_value"].values:
+            raise ValueError("batch_dict must contain '<unk>' as token_index=0")
+        self.batch_dict = batch_dict
+        self.set_batch_key(batch_key=batch_key)
+
+    def set_batch_key(self, batch_key=None):
+        """
+        Set batch key(s) from adata.obs.
+
+        batch_key can be:
+        - str: single obs column
+        - list/tuple[str]: multiple columns, joined as one batch label
+        - None: all cells mapped to unknown batch token
+        """
+        if batch_key is None:
+            self.batch_keys = None
+        elif isinstance(batch_key, str):
+            self.batch_keys = [batch_key]
+        elif isinstance(batch_key, (list, tuple)):
+            self.batch_keys = list(batch_key)
+        else:
+            raise ValueError("batch_key must be None, str, list, or tuple.")
+
+    def set_batch_key_group(self, key_group):
+        """
+        Alias setter for consistency with CondTokenizer APIs.
+        """
+        self.set_batch_key(batch_key=key_group)
+
+    def _get_next_index(self):
+        return int(self.batch_dict["token_index"].max()) + 1
+
+    def _fetch_or_add(self, value):
+        value = str(value).lower()
+        if value == "nan":
+            return 0
+        hit = self.batch_dict[self.batch_dict["batch_value"] == value]
+        if len(hit) > 0:
+            return int(hit["token_index"].iloc[0])
+        new_idx = self._get_next_index()
+        new_row = pd.DataFrame({"batch_value": [value], "token_index": [new_idx]})
+        self.batch_dict = pd.concat([self.batch_dict, new_row], ignore_index=True)
+        return new_idx
 
     def __call__(self, adata):
         C = adata.n_obs
@@ -220,12 +312,25 @@ class BatchTokenizer:
         if self.simplify:
             return torch.zeros((C, 1), dtype=torch.long)
 
-        # Normal mode: assign increasing batch_id
-        batch_id = self.counter
-        self.counter += 1
+        if self.batch_keys is None:
+            values = ["nan"] * C
+        else:
+            obs = adata.obs
+            cols = []
+            for key in self.batch_keys:
+                if key is None or key not in obs:
+                    cols.append(["nan"] * C)
+                else:
+                    cols.append(obs[key].astype(str).tolist())
+            if len(cols) == 1:
+                values = cols[0]
+            else:
+                values = ["|".join(items) for items in zip(*cols)]
 
-        out = np.full((C, 1), batch_id, dtype=np.int64)
-        return torch.tensor(out)
+        out = np.zeros((C, 1), dtype=np.int64)
+        for i in range(C):
+            out[i, 0] = self._fetch_or_add(values[i])
+        return torch.tensor(out, dtype=torch.long)
 
 
 class TomeTokenizer:
@@ -236,15 +341,32 @@ class TomeTokenizer:
     def __init__(
         self,
         token_dict,           # token dictionary DataFrame for GeneTokenizer
-        max_length=4096,      # max length for gene/expression sequences
+        max_length=2048,      # max length for gene/expression sequences
         cond_dict=None,       # optional pre-existing cond_dict DataFrame
+        batch_dict=None,      # optional pre-existing batch_dict DataFrame
         simplify=False,       # if True -> cond and batch tokens simplified
+        platform_key=None,
+        species_key=None,
+        tissue_key=None,
+        disease_key=None,
+        batch_key=None,
         **kwargs
     ):
         self.gene_tokenizer = GeneTokenizer(token_dict, max_length=max_length)
         self.expr_tokenizer = ExprTokenizer(max_length=max_length)
-        self.cond_tokenizer = CondTokenizer(cond_dict=cond_dict, simplify=simplify)
-        self.batch_tokenizer = BatchTokenizer(simplify=simplify)
+        self.cond_tokenizer = CondTokenizer(
+            cond_dict=cond_dict,
+            simplify=simplify,
+            platform_key=platform_key,
+            species_key=species_key,
+            tissue_key=tissue_key,
+            disease_key=disease_key,
+        )
+        self.batch_tokenizer = BatchTokenizer(
+            batch_dict=batch_dict,
+            simplify=simplify,
+            batch_key=batch_key,
+        )
 
         self.prep_cfg = {
             'min_genes_per_cell': 200,
@@ -253,6 +375,41 @@ class TomeTokenizer:
             'n_top_genes': 3000
         }
         self.prep_cfg.update(kwargs)
+
+    def set_condition_keys(
+        self,
+        platform_key=None,
+        species_key=None,
+        tissue_key=None,
+        disease_key=None,
+    ):
+        """
+        Update condition keys for a new dataset without rebuilding tokenizer.
+        """
+        self.cond_tokenizer.set_condition_keys(
+            platform_key=platform_key,
+            species_key=species_key,
+            tissue_key=tissue_key,
+            disease_key=disease_key,
+        )
+
+    def set_condition_key_group(self, key_group):
+        """
+        Update condition keys from a list/tuple/dict.
+        """
+        self.cond_tokenizer.set_condition_key_group(key_group)
+
+    def set_batch_key(self, batch_key=None):
+        """
+        Update batch key(s) for a new dataset without rebuilding tokenizer.
+        """
+        self.batch_tokenizer.set_batch_key(batch_key=batch_key)
+
+    def set_batch_key_group(self, key_group):
+        """
+        Update batch key(s) from a list/tuple/string.
+        """
+        self.batch_tokenizer.set_batch_key_group(key_group)
 
     def _check_pad_consistency(self, gene_pad: torch.Tensor, expr_pad: torch.Tensor):
         """
@@ -293,10 +450,12 @@ class TomeTokenizer:
         adata,
         gene_key=None,
         order_matrix=None,
+        # backward-compatible override (prefer using set_condition_keys in init/runtime)
         platform_key=None,
         species_key=None,
         tissue_key=None,
         disease_key=None,
+        batch_key=None,
         preprocess=True
     ):
         """
@@ -322,13 +481,17 @@ class TomeTokenizer:
             order_matrix=order_matrix
         )
 
-        cond_tokens = self.cond_tokenizer(
-            adata,
-            platform_key=platform_key,
-            species_key=species_key,
-            tissue_key=tissue_key,
-            disease_key=disease_key,
-        )
+        if any(k is not None for k in [platform_key, species_key, tissue_key, disease_key]):
+            self.set_condition_keys(
+                platform_key=platform_key,
+                species_key=species_key,
+                tissue_key=tissue_key,
+                disease_key=disease_key,
+            )
+        if batch_key is not None:
+            self.set_batch_key(batch_key=batch_key)
+
+        cond_tokens = self.cond_tokenizer(adata)
 
         batch_tokens = self.batch_tokenizer(adata)
 

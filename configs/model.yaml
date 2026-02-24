@@ -1,11 +1,11 @@
 SFM:
   name: "SFM"
   kwargs:
-    embed_dim: 512
+    embed_dim: 768
     expr_num_bins: 32
     cond_max_item: 1024
     batch_max_item: 256
-    num_layers: 4
-    num_heads: 8
+    num_layers: 12
+    num_heads: 12
     num_factors: 256
     topk: 32
