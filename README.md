@@ -38,6 +38,19 @@ pip install .[server]
 where exact versions of dependencies are specified.
 
 
+## Data Download
+You can build and download Cellxgene-based pretraining data with one command:
+
+```bash
+python3 data/run_download_all.py \
+  --query-list data/query_list.txt \
+  --index-dir /path/to/index \
+  --output-dir /path/to/data
+```
+
+For complete data pipeline details (workflow, options, and integrity check), see [Data Download Guide](data/README.md).
+
+
 ## Training Commands
 Detailed end-to-end tutorials will be provided separately. This section lists the core training commands.
 
