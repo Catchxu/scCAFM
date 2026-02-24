@@ -36,6 +36,17 @@ Useful flags:
 * `--max-partition-size 200000`: control partition size.
 
 
+## Integrity check and auto-repair
+Check all expected partitions, delete broken `.h5ad`, and redownload missing/broken files:
+
+```bash
+python3 data/check_and_redownload_h5ad.py \
+  --query-list data/query_list.txt \
+  --index-dir /path/to/index \
+  --output-dir /path/to/data
+```
+
+
 ## (1) Optional: customize query configuration
 Update these files if you want custom data coverage:
 * `data/data_config.py`
