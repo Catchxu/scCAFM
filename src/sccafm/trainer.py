@@ -1,5 +1,7 @@
 import os
 import gc
+import logging
+from contextlib import nullcontext
 import pandas as pd
 import scanpy as sc
 from tqdm import tqdm
@@ -10,6 +12,7 @@ from torch.utils.data import DataLoader
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
+from torch.cuda.amp import GradScaler
 
 from .models import SFM
 from .loss import SFMLoss
@@ -39,6 +42,32 @@ def _setup_distributed(device: str):
     return is_distributed, initialized_here, rank, local_rank, world_size
 
 
+def _setup_logger(rank0: bool, checkpoint_dir: str, log_dir: Optional[str], log_name: str):
+    if not rank0:
+        return None
+    if log_dir is None:
+        log_dir = checkpoint_dir
+    os.makedirs(log_dir, exist_ok=True)
+    log_path = os.path.join(log_dir, log_name)
+
+    logger = logging.getLogger("sccafm.train")
+    logger.setLevel(logging.INFO)
+    logger.handlers.clear()
+    logger.propagate = False
+
+    formatter = logging.Formatter(
+        fmt="%(asctime)s | %(levelname)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    fh = logging.FileHandler(log_path)
+    fh.setFormatter(formatter)
+    sh = logging.StreamHandler()
+    sh.setFormatter(formatter)
+    logger.addHandler(fh)
+    logger.addHandler(sh)
+    return logger
+
+
 def sfm_trainer(
     model: SFM,
     adata_files: Union[str, List[str]], 
@@ -53,7 +82,14 @@ def sfm_trainer(
     batch_size: int = 32,
     device="cuda",
     checkpoint_dir="./checkpoints",
-    resume=True
+    resume=True,
+    log_dir: Optional[str] = None,
+    log_name: str = "pretrain.log",
+    log_interval: int = 100,
+    use_tqdm: bool = True,
+    tqdm_mininterval: float = 1.0,
+    use_amp: bool = False,
+    amp_dtype: str = "bf16",
 ):
     """
     Complete training pipeline for SFM model.
@@ -68,6 +104,17 @@ def sfm_trainer(
 
     model.to(device)
     criterion.to(device)
+    logger = _setup_logger(rank0, checkpoint_dir, log_dir, log_name)
+
+    amp_dtype = amp_dtype.lower()
+    if amp_dtype not in {"bf16", "fp16"}:
+        raise ValueError(f"Unsupported amp_dtype: {amp_dtype}. Use 'bf16' or 'fp16'.")
+    amp_enabled = bool(use_amp and device.startswith("cuda"))
+    if amp_enabled and amp_dtype == "bf16" and not torch.cuda.is_bf16_supported():
+        raise ValueError(
+            "use_amp=True with amp_dtype='bf16' requires CUDA bf16 support on this GPU/runtime."
+        )
+    scaler = GradScaler(enabled=amp_enabled and amp_dtype == "fp16")
 
     if is_distributed:
         ddp_kwargs = {}
@@ -93,6 +140,8 @@ def sfm_trainer(
     if resume and os.path.exists(checkpoint_path):
         if rank0:
             print(f"Loading checkpoint from {checkpoint_path}...")
+            if logger:
+                logger.info("Loading checkpoint from %s", checkpoint_path)
         ckpt = torch.load(checkpoint_path, map_location=device)
         model_core.load_state_dict(ckpt['model_state_dict'])
         if 'criterion_state_dict' in ckpt:
@@ -109,6 +158,8 @@ def sfm_trainer(
         start_file_idx = ckpt['file_idx'] + 1
         if rank0:
             print(f"Resuming from File Index: {start_file_idx}")
+            if logger:
+                logger.info("Resuming from file index %d", start_file_idx)
 
     # 2. Global T Setup
     total_global_epochs = len(adata_files) * epochs_per_file
@@ -117,10 +168,18 @@ def sfm_trainer(
     # 3. Main File Loop
     model.train()
     criterion.train()
+    global_step = 0
+    if rank0 and logger:
+        logger.info(
+            "Training start | files=%d | epochs_per_file=%d | batch_size=%d | device=%s | ddp=%s | amp=%s | amp_dtype=%s",
+            len(adata_files), epochs_per_file, batch_size, device, is_distributed, amp_enabled, amp_dtype
+        )
     for file_idx in range(start_file_idx, len(adata_files)):
         file_path = adata_files[file_idx]
         if rank0:
             print(f"\n[File {file_idx+1}/{len(adata_files)}] Loading: {file_path}")
+            if logger:
+                logger.info("[File %d/%d] Loading: %s", file_idx + 1, len(adata_files), file_path)
 
         adata = sc.read_h5ad(file_path)
         with torch.no_grad():
@@ -167,27 +226,65 @@ def sfm_trainer(
             if sampler is not None:
                 sampler.set_epoch(global_epoch_idx)
 
-            iterator = tqdm(loader, desc=f"Epoch {epoch+1}/{epochs_per_file}") if rank0 else loader
+            if rank0 and logger:
+                logger.info(
+                    "[File %d/%d] Epoch %d/%d start",
+                    file_idx + 1,
+                    len(adata_files),
+                    epoch + 1,
+                    epochs_per_file,
+                )
+
+            if rank0 and use_tqdm:
+                iterator = tqdm(
+                    loader,
+                    desc=f"Epoch {epoch+1}/{epochs_per_file}",
+                    mininterval=tqdm_mininterval,
+                )
+            else:
+                iterator = loader
             for batch in iterator:
                 batch = {k: v.to(device) for k, v in batch.items()}
 
                 # Model Forward
-                grn, b_tf, b_tg, u, v = model(batch, return_factors=True)
-
-                # Loss Forward (true_grn_df is now internal to criterion)
-                total_loss, loss_dict = criterion(
-                    tokens=batch, grn=grn, binary_tf=b_tf, binary_tg=b_tg, u=u, v=v
-                )
-
                 optimizer.zero_grad()
-                total_loss.backward()
-                optimizer.step()
+                autocast_ctx = (
+                    torch.autocast(
+                        device_type="cuda",
+                        dtype=torch.bfloat16 if amp_dtype == "bf16" else torch.float16,
+                    )
+                    if amp_enabled
+                    else nullcontext()
+                )
+                with autocast_ctx:
+                    grn, b_tf, b_tg, u, v = model(batch, return_factors=True)
+
+                    # Loss Forward (true_grn_df is now internal to criterion)
+                    total_loss, loss_dict = criterion(
+                        tokens=batch, grn=grn, binary_tf=b_tf, binary_tg=b_tg, u=u, v=v
+                    )
+
+                if scaler.is_enabled():
+                    scaler.scale(total_loss).backward()
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    total_loss.backward()
+                    optimizer.step()
+                global_step += 1
 
                 if rank0:
                     display_metrics = {"loss": f"{total_loss.item():.3f}"}
                     for k, v in loss_dict.items():
                         display_metrics[k] = f"{v:.3f}"
-                    iterator.set_postfix(display_metrics)
+                    if use_tqdm:
+                        iterator.set_postfix(display_metrics)
+                    if logger and log_interval > 0 and global_step % log_interval == 0:
+                        metric_text = " ".join([f"{k}={v:.6f}" for k, v in loss_dict.items()])
+                        logger.info(
+                            "step=%d file=%d epoch=%d loss=%.6f %s",
+                            global_step, file_idx + 1, epoch + 1, total_loss.item(), metric_text
+                        )
 
         # 4. Save Checkpoint after each file (rank 0 only)
         if rank0:
@@ -202,6 +299,8 @@ def sfm_trainer(
                     'prev_h_val': criterion_core.dag_criterion.prev_h_val
                 } if hasattr(criterion_core, 'dag_criterion') else None,
             }, checkpoint_path)
+            if logger:
+                logger.info("Checkpoint saved: %s", checkpoint_path)
         if is_distributed:
             dist.barrier()
 
@@ -213,5 +312,7 @@ def sfm_trainer(
 
     if rank0:
         print("\nTraining workflow completed.")
+        if logger:
+            logger.info("Training workflow completed.")
     if initialized_here:
         dist.destroy_process_group()

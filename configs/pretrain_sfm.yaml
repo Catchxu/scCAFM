@@ -27,3 +27,10 @@ train:
   device: cuda
   checkpoint_dir: ./checkpoints
   resume: False
+  log_dir: ./logs
+  log_name: pretrain.log
+  log_interval: 100
+  use_tqdm: True
+  tqdm_mininterval: 1.0
+  use_amp: True
+  amp_dtype: bf16

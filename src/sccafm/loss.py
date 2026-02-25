@@ -309,7 +309,6 @@ class SFMLoss(nn.Module):
             loss_p = self.prior_criterion(tokens, grn, binary_tf, binary_tg, self.true_grn_df)
             total_loss += w_p * loss_p
             loss_dict["prior"] = loss_p.item()
-            loss_dict["prior_w"] = float(w_p)
 
         # 3. DAG Loss
         if self.use_dag:

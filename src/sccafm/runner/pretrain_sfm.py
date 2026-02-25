@@ -47,12 +47,23 @@ def _as_bool(v, key):
     raise ValueError(f"`{key}` must be a bool, got: {v}")
 
 
+def _as_str(v, key):
+    if isinstance(v, str):
+        return v
+    raise ValueError(f"`{key}` must be a string, got: {v}")
+
+
 def _normalize_pretrain_cfg(train_cfg, loss_cfg):
     train_cfg["learning_rate"] = _as_float(train_cfg.get("learning_rate", 1e-5), "train.learning_rate")
     train_cfg["weight_decay"] = _as_float(train_cfg.get("weight_decay", 1e-2), "train.weight_decay")
     train_cfg["epochs_per_file"] = _as_int(train_cfg.get("epochs_per_file", 1), "train.epochs_per_file")
     train_cfg["batch_size"] = _as_int(train_cfg.get("batch_size", 32), "train.batch_size")
     train_cfg["resume"] = _as_bool(train_cfg.get("resume", True), "train.resume")
+    train_cfg["log_interval"] = _as_int(train_cfg.get("log_interval", 100), "train.log_interval")
+    train_cfg["use_tqdm"] = _as_bool(train_cfg.get("use_tqdm", True), "train.use_tqdm")
+    train_cfg["tqdm_mininterval"] = _as_float(train_cfg.get("tqdm_mininterval", 1.0), "train.tqdm_mininterval")
+    train_cfg["use_amp"] = _as_bool(train_cfg.get("use_amp", False), "train.use_amp")
+    train_cfg["amp_dtype"] = _as_str(train_cfg.get("amp_dtype", "bf16"), "train.amp_dtype").lower()
 
     loss_kwargs = loss_cfg.get("kwargs", {})
     if "alpha" in loss_kwargs:
