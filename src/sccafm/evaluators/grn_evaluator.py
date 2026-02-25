@@ -12,8 +12,8 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
-from .models import SFM
-from .tokenizer import TomeDataset, TomeTokenizer, tome_collate_fn
+from ..models import SFM
+from ..tokenizer import TomeDataset, TomeTokenizer, tome_collate_fn
 
 
 def _setup_logger(
