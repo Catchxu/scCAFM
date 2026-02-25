@@ -6,7 +6,7 @@ from .utils import reparameterize, expand_grn, expand_u
 
 
 class VariationalEncoder(nn.Module):
-    def __init__(self, hidden_dim=64, dropout=0.1):
+    def __init__(self, hidden_dim=128, dropout=0.1):
         super().__init__()
 
         # Project scalar gene expression into an E-dimensional embedding
@@ -113,7 +113,7 @@ class VariationalEncoder(nn.Module):
 
 
 class ExprModeling(nn.Module):
-    def __init__(self, hidden_dim=64, dropout=0.1, fp_steps: int = 3, fp_damping: float = 0.5):
+    def __init__(self, hidden_dim=128, dropout=0.1, fp_steps: int = 3, fp_damping: float = 0.5):
         super().__init__()
         self.z_proj = nn.Linear(1, hidden_dim)
         self.fp_steps = fp_steps
@@ -206,7 +206,7 @@ class ExprModeling(nn.Module):
 
 
 class DropModeling(nn.Module):
-    def __init__(self, hidden_dim=64, dropout=0.1):
+    def __init__(self, hidden_dim=128, dropout=0.1):
         super().__init__()
         self.drop_proj = nn.Sequential(
             nn.Linear(1, hidden_dim),
@@ -222,7 +222,7 @@ class DropModeling(nn.Module):
 
 
 class VariationalDecoder(nn.Module):
-    def __init__(self, hidden_dim=64, dropout=0.1):
+    def __init__(self, hidden_dim=128, dropout=0.1):
         super().__init__()
         self.expr_model = ExprModeling(hidden_dim, dropout)
         self.dropout_model = DropModeling(hidden_dim, dropout)
@@ -252,7 +252,7 @@ class VariationalDecoder(nn.Module):
 
 
 class ELBOLoss(nn.Module):
-    def __init__(self, hidden_dim=64, dropout=0.1):
+    def __init__(self, hidden_dim=128, dropout=0.1):
         super().__init__()
         self.encoder = VariationalEncoder(hidden_dim, dropout)
         self.decoder = VariationalDecoder(hidden_dim, dropout)
