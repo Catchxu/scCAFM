@@ -14,3 +14,4 @@ nohup python3 scripts/run_pretrain.py --nproc-per-node 4 > /dev/null 2>&1 &
 
 # evaluation
 python3 scripts/run_eval_grn.py --nproc-per-node 4
+nohup python3 scripts/run_eval_grn.py --nproc-per-node 4 > /dev/null 2>&1 &

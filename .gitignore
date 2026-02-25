@@ -178,3 +178,4 @@ cython_debug/
 checkpoints/
 logs/
 results/
+scripts/*.sh

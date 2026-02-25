@@ -7,7 +7,7 @@ from pathlib import Path
 import torch
 
 from sccafm.builder import build_model, build_tokenizer
-from sccafm.evaluator import evaluate_grn
+from sccafm.evaluators import evaluate_grn
 from sccafm.load import load_cfg, load_resources
 
 
