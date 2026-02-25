@@ -9,8 +9,8 @@ loss:
   name: SFMLoss
   kwargs:
     use_prior: True
-    use_dag: True
-    prior_pos_weight: 20.0
+    use_dag: False
+    prior_pos_weight: 10.0
     prior_neg_weight: 1.0
     prior_neg_sample_ratio: 5.0
     alpha: 0.0

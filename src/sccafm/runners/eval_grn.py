@@ -171,7 +171,7 @@ def main():
             "torchrun",
             f"--nproc_per_node={args.nproc_per_node}",
             "-m",
-            "sccafm.runner.eval_grn",
+            "sccafm.runners.eval_grn",
             "--config",
             args.config,
         ]
@@ -186,7 +186,7 @@ def main():
 
     if args.dry_run:
         print(f"Resolved dataset files: {len(adata_files)}")
-        print("Command:", " ".join([sys.executable, "-m", "sccafm.runner.eval_grn", "--config", args.config]))
+        print("Command:", " ".join([sys.executable, "-m", "sccafm.runners.eval_grn", "--config", args.config]))
         return
 
     token_dict = load_resources(data_cfg["token_dict"])

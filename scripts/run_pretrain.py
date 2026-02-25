@@ -5,7 +5,7 @@ Compatibility wrapper.
 This script keeps the old command entrypoint:
     python3 scripts/run_pretrain.py ...
 and forwards options to the canonical CLI:
-    python -m sccafm.runner.pretrain_sfm ...
+    python -m sccafm.runners.pretrain_sfm ...
 """
 
 import argparse
@@ -52,7 +52,7 @@ def main() -> int:
     cmd = [
         sys.executable,
         "-m",
-        "sccafm.runner.pretrain_sfm",
+        "sccafm.runners.pretrain_sfm",
         "--config",
         args.meta_config,
         "--nproc-per-node",

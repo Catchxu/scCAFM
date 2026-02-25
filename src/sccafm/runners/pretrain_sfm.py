@@ -157,7 +157,7 @@ def main():
             "torchrun",
             f"--nproc_per_node={args.nproc_per_node}",
             "-m",
-            "sccafm.runner.pretrain_sfm",
+            "sccafm.runners.pretrain_sfm",
             "--config",
             args.config,
         ]
@@ -175,7 +175,7 @@ def main():
         print(
             "Command:",
             " ".join(
-                [sys.executable, "-m", "sccafm.runner.pretrain_sfm", "--config", args.config]
+                [sys.executable, "-m", "sccafm.runners.pretrain_sfm", "--config", args.config]
                 + (["--override", *args.override] if args.override else [])
             ),
         )

@@ -5,7 +5,7 @@ Compatibility wrapper for GRN evaluation.
 Entrypoint:
     python3 scripts/run_eval_grn.py ...
 Forwards to:
-    python -m sccafm.runner.eval_grn ...
+    python -m sccafm.runners.eval_grn ...
 """
 
 import argparse
@@ -52,7 +52,7 @@ def main() -> int:
     cmd = [
         sys.executable,
         "-m",
-        "sccafm.runner.eval_grn",
+        "sccafm.runners.eval_grn",
         "--config",
         args.meta_config,
         "--nproc-per-node",
