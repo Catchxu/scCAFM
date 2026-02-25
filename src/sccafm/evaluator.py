@@ -135,6 +135,35 @@ def _safe_nan_stats(values: List[float]) -> Tuple[float, float, int]:
     return float(valid.mean()), float(valid.std()), int(valid.size)
 
 
+def _resolve_species_for_tf(adata, cond_species_key: Optional[str]) -> str:
+    # 1) Prefer tokenizer species key from adata.obs if provided.
+    if cond_species_key is not None and cond_species_key in adata.obs:
+        vals = (
+            adata.obs[cond_species_key]
+            .astype(str)
+            .str.lower()
+            .replace("nan", np.nan)
+            .dropna()
+            .unique()
+            .tolist()
+        )
+        if len(vals) == 1:
+            return vals[0]
+        if len(vals) > 1:
+            raise ValueError(
+                f"Found multiple species values in adata.obs['{cond_species_key}']: {vals[:10]}. "
+                "GRN evaluation currently expects one species per dataset file."
+            )
+
+    # 2) Fallback to adata.uns['species'] if available.
+    species_uns = adata.uns.get("species", None)
+    if species_uns is not None:
+        return str(species_uns).lower()
+
+    # 3) Last fallback.
+    return "human"
+
+
 def evaluate_grn(
     model: SFM,
     adata_files: Union[str, List[str]],
@@ -142,7 +171,6 @@ def evaluate_grn(
     eval_grn_df: pd.DataFrame,
     human_tfs: Optional[pd.DataFrame] = None,
     mouse_tfs: Optional[pd.DataFrame] = None,
-    species_key: str = "species",
     batch_size: int = 32,
     device: str = "cuda",
     output_dir: str = "./eval/grn",
@@ -247,10 +275,7 @@ def evaluate_grn(
             pin_memory=True,
         )
 
-        try:
-            species = adata.uns[species_key]
-        except Exception:
-            species = "human"
+        species = _resolve_species_for_tf(adata, cond_species_key)
 
         if species == "human":
             model.update_tfs(human_tfs)

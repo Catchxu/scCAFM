@@ -176,3 +176,5 @@ cython_debug/
 
 # Project file
 checkpoints/
+logs/
+results/

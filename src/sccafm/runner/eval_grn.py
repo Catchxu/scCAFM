@@ -74,7 +74,6 @@ def _normalize_eval_cfg(eval_cfg):
     eval_cfg["device"] = _as_str(eval_cfg.get("device", "cuda"), "eval.device")
     eval_cfg["output_dir"] = _as_str(eval_cfg.get("output_dir", "./eval/grn"), "eval.output_dir")
     eval_cfg["log_name"] = _as_str(eval_cfg.get("log_name", "grn_eval.log"), "eval.log_name")
-    eval_cfg["species_key"] = _as_str(eval_cfg.get("species_key", "species"), "eval.species_key")
     eval_cfg["use_amp"] = _as_bool(eval_cfg.get("use_amp", False), "eval.use_amp")
     eval_cfg["amp_dtype"] = _as_str(eval_cfg.get("amp_dtype", "bf16"), "eval.amp_dtype").lower()
     eval_cfg["preprocess"] = _as_bool(eval_cfg.get("preprocess", True), "eval.preprocess")
@@ -175,7 +174,6 @@ def main():
         eval_grn_df=eval_grn_df,
         human_tfs=human_tfs,
         mouse_tfs=mouse_tfs,
-        species_key=eval_task_cfg["species_key"],
         batch_size=eval_task_cfg["batch_size"],
         device=eval_task_cfg["device"],
         output_dir=eval_task_cfg["output_dir"],
