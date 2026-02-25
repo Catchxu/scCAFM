@@ -1,3 +1,4 @@
 model_config: model.yaml
 tokenizer_config: tokenizer.yaml
 pretrain_sfm_config: pretrain_sfm.yaml
+eval_grn_config: eval_grn.yaml

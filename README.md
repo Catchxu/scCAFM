@@ -49,30 +49,3 @@ python3 data/run_download_all.py \
 ```
 
 For complete data pipeline details (workflow, options, and integrity check), see [Data Download Guide](data/README.md).
-
-
-## Training Commands
-Detailed end-to-end tutorials will be provided separately. This section lists the core training commands.
-
-Taking pretraining SFM task as an example, you can:
-
-Validate config and required files:
-```bash
-python3 scripts/run_pretrain.py --dry-run
-```
-
-Pretrain SFM on a single GPU:
-```bash
-python3 scripts/run_pretrain.py
-```
-
-Pretrain SFM on multiple GPUs (DDP):
-```bash
-python3 scripts/run_pretrain.py --nproc-per-node 4
-```
-
-Notes:
-- Set dataset path in `configs/pretrain_sfm.yaml` (`datasets.adata_files`) first.
-- Set metadata keys in `configs/tokenizer.yaml` if needed (`platform_key`, `species_key`, `tissue_key`, `disease_key`, `batch_key`).
-- In DDP, `batch_size` is per GPU process.
-- Checkpoints are saved by rank 0 in `train.checkpoint_dir`.

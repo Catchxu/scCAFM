@@ -8,6 +8,7 @@ except PackageNotFoundError:
 # Founctions
 from .load import load_resources
 from .trainer import sfm_trainer
+from .evaluator import evaluate_grn
 
 # Modules
 from .models import SFM

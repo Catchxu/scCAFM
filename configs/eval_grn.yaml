@@ -1,0 +1,31 @@
+datasets:
+  adata_files: /data1021/xukaichen/data/CTA/myeloid.h5ad
+  token_dict: token_dict.csv
+  human_tfs: human_tfs.csv
+  mouse_tfs: mouse_tfs.csv
+  eval_grn: /data1021/xukaichen/data/GRN/networks/hSTRING.csv
+
+tokenizer:
+  # Optional overrides used only in GRN evaluation.
+  # If null, values from configs/tokenizer.yaml are kept.
+  platform_key: null
+  species_key: null
+  tissue_key: tissue
+  disease_key: cancer_type
+  batch_key: patient
+
+eval:
+  # adata.uns key for selecting TF reference table (human/mouse)
+  species_key: species
+  checkpoint_path: ./checkpoints/sfm_latest.pt
+  batch_size: 8
+  device: cuda
+  output_dir: ./results
+  log_dir: ./logs
+  log_name: grn_eval.log
+  log_overwrite: True
+  log_interval: 100
+  metric: auprc
+  preprocess: True
+  use_amp: True
+  amp_dtype: bf16
