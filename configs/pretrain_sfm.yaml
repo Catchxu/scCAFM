@@ -30,7 +30,7 @@ train:
   log_dir: ./logs
   log_name: pretrain.log
   log_overwrite: True
-  log_interval: 100
+  log_interval: 1000
   use_tqdm: True
   tqdm_mininterval: 1.0
   use_amp: True

@@ -50,6 +50,26 @@ class VariationalEncoder(nn.Module):
         tmp = torch.einsum("cfm,cfe->cme", u, expr_tf)      # (C, M, E)
         pred_tg = torch.einsum("cgm,cme->cge", v, tmp)      # (C, TG, E)
         return pred_tg
+
+    def _select_fixed_count(self, x: torch.Tensor, mask: torch.Tensor, name: str):
+        if mask.dtype != torch.bool:
+            mask = mask.bool()
+        if mask.ndim != 2:
+            raise ValueError(f"{name} mask must be (C, L), got {tuple(mask.shape)}")
+        if x.ndim != 3 or x.shape[:2] != mask.shape:
+            raise ValueError(
+                f"Shape mismatch for {name}: x={tuple(x.shape)}, mask={tuple(mask.shape)}; expected x=(C,L,E), mask=(C,L)"
+            )
+
+        counts = mask.sum(dim=1)
+        if not torch.all(counts == counts[0]):
+            raise ValueError(
+                f"{name} selected counts must be identical across batch for dense batching, got {counts.tolist()}"
+            )
+
+        C, _, E = x.shape
+        S = int(counts[0].item())
+        return x[mask].view(C, S, E)
     
     def forward(self, x, grn, binary_tf, binary_tg, u=None, v=None):
         x = x.unsqueeze(-1)
@@ -58,12 +78,20 @@ class VariationalEncoder(nn.Module):
     
         # Select TF and TG embeddings using boolean masks
         # Assumes a fixed number of TFs / TGs per cell
-        expr_tf = x[binary_tf].view(C, -1, E)
-        expr_tg = x[binary_tg].view(C, -1, E)
+        expr_tf = self._select_fixed_count(x, binary_tf, "binary_tf")
+        expr_tg = self._select_fixed_count(x, binary_tg, "binary_tg")
 
         self._check_shape(expr_tf, expr_tg)
 
         if u is not None and v is not None:
+            if u.shape[:2] != expr_tf.shape[:2]:
+                raise ValueError(
+                    f"u shape {tuple(u.shape)} incompatible with selected TF embeddings {tuple(expr_tf.shape)}"
+                )
+            if v.shape[0] != C or v.shape[1] != expr_tg.shape[1]:
+                raise ValueError(
+                    f"v shape {tuple(v.shape)} incompatible with selected TG embeddings {tuple(expr_tg.shape)}"
+                )
             pred_tg = self._predict_tg_from_factors(expr_tf, u, v)
         else:
             if grn is None:
@@ -114,10 +142,34 @@ class ExprModeling(nn.Module):
         vt_h = torch.bmm(v.transpose(1, 2), h)   # (C, M, H)
         return torch.bmm(u_full, vt_h)           # (C, S, H)
 
-    def _solve_with_factors(self, z_proj: torch.Tensor, u: torch.Tensor, v: torch.Tensor, binary_tf: torch.Tensor):
+    def _masked_select_fixed_count(self, x: torch.Tensor, mask: torch.Tensor, name: str):
+        if mask.dtype != torch.bool:
+            mask = mask.bool()
+        if x.ndim != 2 or mask.ndim != 2 or x.shape != mask.shape:
+            raise ValueError(
+                f"{name}: expected x/mask both (C, L), got {tuple(x.shape)} and {tuple(mask.shape)}"
+            )
+        counts = mask.sum(dim=1)
+        if not torch.all(counts == counts[0]):
+            raise ValueError(
+                f"{name}: selected counts must be identical across batch for dense batching, got {counts.tolist()}"
+            )
+        C = x.shape[0]
+        S = int(counts[0].item())
+        return x[mask].view(C, S)
+
+    def _solve_with_factors(
+        self,
+        z_proj: torch.Tensor,
+        u: torch.Tensor,
+        v: torch.Tensor,
+        binary_tf: torch.Tensor,
+        binary_tg: torch.Tensor,
+    ):
         # Fixed-point iteration for h = z + gamma * A h.
         # This avoids dense SxS matrix construction and solve.
-        u_full = expand_u(u, binary_tf)          # (C, S, M)
+        binary_tf_sel = self._masked_select_fixed_count(binary_tf.float(), binary_tg, "binary_tf/binary_tg")
+        u_full = expand_u(u, binary_tf_sel)      # (C, S, M), S matches selected TG space
         h = z_proj
         for _ in range(max(1, self.fp_steps)):
             ah = self._apply_a_with_factors(h, u_full, v)
@@ -142,7 +194,7 @@ class ExprModeling(nn.Module):
         z = self.z_proj(z)  # (C, S, H)
 
         if u is not None and v is not None:
-            out = self._solve_with_factors(z, u, v, binary_tf)
+            out = self._solve_with_factors(z, u, v, binary_tf, binary_tg)
         else:
             out = self._solve_dense_fallback(z, grn, binary_tf, binary_tg)
         out = self.h_proj(out)
@@ -228,6 +280,22 @@ class ELBOLoss(nn.Module):
             mu.pow(2) + sigma.pow(2) - 1 - torch.log(sigma.pow(2)),
             dim=-1
         )
+
+    def _masked_select_fixed_count(self, x: torch.Tensor, mask: torch.Tensor, name: str):
+        if mask.dtype != torch.bool:
+            mask = mask.bool()
+        if x.ndim != 2 or mask.ndim != 2 or x.shape != mask.shape:
+            raise ValueError(
+                f"{name}: expected x/mask both (C, L), got {tuple(x.shape)} and {tuple(mask.shape)}"
+            )
+        counts = mask.sum(dim=1)
+        if not torch.all(counts == counts[0]):
+            raise ValueError(
+                f"{name}: selected counts must be identical across batch for dense batching, got {counts.tolist()}"
+            )
+        C = x.shape[0]
+        S = int(counts[0].item())
+        return x[mask].view(C, S)
     
     def forward(self, tokens, grn, binary_tf, binary_tg, u=None, v=None):
         x = tokens["expr"]
@@ -236,8 +304,7 @@ class ELBOLoss(nn.Module):
 
         # Align expression targets with decoder outputs:
         # decoder operates on TG-selected (non-pad) genes, not full padded length.
-        C = x.shape[0]
-        x = x[binary_tg].view(C, -1)
+        x = self._masked_select_fixed_count(x, binary_tg, "tokens['expr']/binary_tg")
 
         # Likelihood term
         log_px = self.zinormal_loglik(x, mu_h, sigma_h, p_drop).mean()

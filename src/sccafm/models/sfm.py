@@ -80,20 +80,15 @@ class GumbelTopK(nn.Module):
 
         else:
             # ---------- EVAL: hard Top-K with normalization ----------
-            topk_vals, topk_idx = self._safe_topk(logits, k_eff, dim=-1)
+            _, topk_idx = self._safe_topk(logits, k_eff, dim=-1)
             mask = torch.zeros_like(logits)
             if topk_idx.numel() > 0:
                 mask.scatter_(-1, topk_idx, 1.0)
 
-            # Keep only top-k logits
-            topk_logits = logits * mask
-
-            # Normalize top-k logits to sum=1 along last dim
-            sum_topk = topk_logits.sum(dim=-1, keepdim=True)
-            sum_topk = sum_topk + 1e-12  # avoid divide by zero
-            probs = topk_logits / sum_topk
-
-            return probs
+            # Normalize selected logits with softmax (stable for negative logits).
+            masked_logits = logits.masked_fill(mask == 0, float("-inf"))
+            probs = F.softmax(masked_logits, dim=-1)
+            return torch.where(mask > 0, probs, torch.zeros_like(probs))
 
 
 class GeneRouter(nn.Module):

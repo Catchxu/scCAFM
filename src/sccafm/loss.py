@@ -103,6 +103,22 @@ class PriorLoss(nn.Module):
         u_full = expand_u(u, model_tf_mask.bool())
         return torch.bmm(u_full, v.transpose(1, 2))
 
+    def _masked_select_fixed_count(self, x: torch.Tensor, mask: torch.Tensor, name: str):
+        if mask.dtype != torch.bool:
+            mask = mask.bool()
+        if x.ndim != 2 or mask.ndim != 2 or x.shape != mask.shape:
+            raise ValueError(
+                f"{name}: expected x/mask both (C, L), got {tuple(x.shape)} and {tuple(mask.shape)}"
+            )
+        counts = mask.sum(dim=1)
+        if not torch.all(counts == counts[0]):
+            raise ValueError(
+                f"{name}: selected counts must be identical across batch for dense batching, got {counts.tolist()}"
+            )
+        C = x.shape[0]
+        S = int(counts[0].item())
+        return x[mask].view(C, S)
+
     def forward(
         self,
         tokens,
@@ -117,8 +133,8 @@ class PriorLoss(nn.Module):
         C = gene_tokens.shape[0]
 
         # 1. Project everything to the same TG-selected space used by GRN prediction.
-        gene_tokens = gene_tokens[binary_tg].view(C, -1)
-        model_tf_mask = binary_tf[binary_tg].view(C, -1).float()
+        gene_tokens = self._masked_select_fixed_count(gene_tokens, binary_tg, "gene_tokens/binary_tg")
+        model_tf_mask = self._masked_select_fixed_count(binary_tf.float(), binary_tg, "binary_tf/binary_tg")
 
         if true_grn_df is not None and true_grn_df is not self._cached_prior_ref:
             self._prepare_prior_cache(true_grn_df)
@@ -223,10 +239,25 @@ class DAGLoss(nn.Module):
         self.accumulated_h = 0.0
         self.step_counter = 0
 
+    def _masked_select_fixed_count(self, x: torch.Tensor, mask: torch.Tensor, name: str):
+        if mask.dtype != torch.bool:
+            mask = mask.bool()
+        if x.ndim != 2 or mask.ndim != 2 or x.shape != mask.shape:
+            raise ValueError(
+                f"{name}: expected x/mask both (C, L), got {tuple(x.shape)} and {tuple(mask.shape)}"
+            )
+        counts = mask.sum(dim=1)
+        if not torch.all(counts == counts[0]):
+            raise ValueError(
+                f"{name}: selected counts must be identical across batch for dense batching, got {counts.tolist()}"
+            )
+        C = x.shape[0]
+        S = int(counts[0].item())
+        return x[mask].view(C, S)
+
     def forward(self, u, v, binary_tf, binary_tg=None):
         if binary_tg is not None:
-            C = binary_tf.shape[0]
-            binary_tf = binary_tf[binary_tg].view(C, -1)
+            binary_tf = self._masked_select_fixed_count(binary_tf.float(), binary_tg, "binary_tf/binary_tg")
         u_full = expand_u(u, binary_tf)
         adj_factor = torch.bmm(v.transpose(1, 2), u_full)
         
