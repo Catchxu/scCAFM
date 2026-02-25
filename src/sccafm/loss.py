@@ -97,6 +97,69 @@ class PriorLoss(nn.Module):
 
         return target
 
+    def _filter_prior_pairs_by_used_genes(self, gene_tokens: torch.Tensor):
+        """
+        Explicitly filter cached prior edges to genes used in this batch.
+
+        Args:
+            gene_tokens: (B, S) selected gene token ids
+        Returns:
+            filtered_src_ids, filtered_tgt_ids: 1D tensors
+        """
+        device = gene_tokens.device
+        if self._cached_src_ids is None or self._cached_tgt_ids is None:
+            raise RuntimeError("Prior cache is empty. Call with true_grn_df at least once.")
+        if self._cached_src_ids.numel() == 0:
+            empty = torch.empty(0, dtype=torch.long, device=device)
+            return empty, empty
+
+        used_ids = torch.unique(gene_tokens)
+        src_ids = self._cached_src_ids.to(device=device)
+        tgt_ids = self._cached_tgt_ids.to(device=device)
+        keep = torch.isin(src_ids, used_ids) & torch.isin(tgt_ids, used_ids)
+        return src_ids[keep], tgt_ids[keep]
+
+    def _build_gt_matrix_from_pairs(
+        self,
+        gene_tokens: torch.Tensor,
+        src_ids: torch.Tensor,
+        tgt_ids: torch.Tensor,
+    ):
+        """
+        Build batch target matrix using already-filtered prior pairs.
+        """
+        C, S = gene_tokens.shape
+        device = gene_tokens.device
+        if src_ids.numel() == 0:
+            return torch.zeros((C, S, S), device=device)
+
+        target = torch.zeros((C, S, S), device=device)
+        for b in range(C):
+            src_matches = (gene_tokens[b].unsqueeze(-1) == src_ids.view(1, -1)).float()
+            tgt_matches = (gene_tokens[b].unsqueeze(-1) == tgt_ids.view(1, -1)).float()
+            target[b] = (src_matches @ tgt_matches.transpose(0, 1) > 0).float()
+        return target
+
+    def _build_assoc_mask_from_pairs(
+        self,
+        gene_tokens: torch.Tensor,
+        src_ids: torch.Tensor,
+        tgt_ids: torch.Tensor,
+    ):
+        """
+        Supervise only source/target genes that appear in filtered prior pairs.
+        """
+        C, S = gene_tokens.shape
+        device = gene_tokens.device
+        if src_ids.numel() == 0:
+            return torch.zeros((C, S, S), dtype=torch.bool, device=device)
+
+        src_unique = torch.unique(src_ids)
+        tgt_unique = torch.unique(tgt_ids)
+        src_assoc = (gene_tokens.unsqueeze(-1) == src_unique.view(1, 1, -1)).any(dim=-1)
+        tgt_assoc = (gene_tokens.unsqueeze(-1) == tgt_unique.view(1, 1, -1)).any(dim=-1)
+        return torch.einsum("bi,bj->bij", src_assoc, tgt_assoc).bool()
+
     def _factorized_logits(self, u: torch.Tensor, v: torch.Tensor, model_tf_mask: torch.Tensor):
         # Build full-source factors in selected TG space and compute dense logits lazily.
         # logits: (C, S, S) with S = selected TG count
@@ -139,8 +202,9 @@ class PriorLoss(nn.Module):
         if true_grn_df is not None and true_grn_df is not self._cached_prior_ref:
             self._prepare_prior_cache(true_grn_df)
 
-        # 2. Map ground truth to sequence positions in the selected space.
-        target = self._build_gt_matrix(gene_tokens)
+        # 2. Explicitly filter prior by used genes, then map to sequence positions.
+        filt_src_ids, filt_tgt_ids = self._filter_prior_pairs_by_used_genes(gene_tokens)
+        target = self._build_gt_matrix_from_pairs(gene_tokens, filt_src_ids, filt_tgt_ids)
         
         # 3. Compute predicted logits in selected-space dimensions (B, S, S)
         if u is not None and v is not None:
@@ -153,7 +217,9 @@ class PriorLoss(nn.Module):
         # 4. Construct 2D mask (Source x Target):
         # source gene must be an active TF in selected space.
         all_targets = torch.ones_like(model_tf_mask)
-        valid_mask = torch.einsum('bi,bj->bij', model_tf_mask, all_targets)
+        valid_mask = torch.einsum('bi,bj->bij', model_tf_mask, all_targets).bool()
+        assoc_mask = self._build_assoc_mask_from_pairs(gene_tokens, filt_src_ids, filt_tgt_ids)
+        valid_mask = valid_mask & assoc_mask
 
         # 5. Compute pixel-wise loss
         loss = self.criterion(grn_full, target)
@@ -163,8 +229,8 @@ class PriorLoss(nn.Module):
         # 6. Optional negative sampling to avoid overwhelming positive supervision.
         supervise_mask = valid_mask
         if self.neg_sample_ratio is not None and self.neg_sample_ratio > 0:
-            pos_mask = (target > 0.5) & (valid_mask > 0)
-            neg_mask = (~(target > 0.5)) & (valid_mask > 0)
+            pos_mask = (target > 0.5) & valid_mask
+            neg_mask = (~(target > 0.5)) & valid_mask
             pos_count = int(pos_mask.sum().item())
             neg_count = int(neg_mask.sum().item())
 
@@ -176,9 +242,10 @@ class PriorLoss(nn.Module):
                     chosen = neg_idx[perm]
                     sampled_neg = torch.zeros_like(neg_mask)
                     sampled_neg[chosen[:, 0], chosen[:, 1], chosen[:, 2]] = True
-                    supervise_mask = (pos_mask | sampled_neg).float()
+                    supervise_mask = pos_mask | sampled_neg
         
         # 7. Normalize by supervised entries to prevent loss inflation.
+        supervise_mask = supervise_mask.float()
         total_loss = (loss * supervise_mask).sum() / (supervise_mask.sum() + 1e-8)
         
         return total_loss
