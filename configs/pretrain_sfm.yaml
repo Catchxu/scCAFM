@@ -1,5 +1,5 @@
 datasets:
-  adata_files: /data1021/xukaichen/data/CTA/myeloid.h5ad
+  adata_files: /data1021/xukaichen/data/CTA/pbmc.h5ad
   token_dict: token_dict.csv
   human_tfs: human_tfs.csv
   mouse_tfs: mouse_tfs.csv

@@ -1,4 +1,6 @@
 import argparse
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -42,6 +44,22 @@ def _as_str(v, key):
     raise ValueError(f"`{key}` must be a string, got: {v}")
 
 
+def _as_metric_list(v, key):
+    if isinstance(v, str):
+        out = [v.strip().lower()]
+    elif isinstance(v, list):
+        if not all(isinstance(x, str) for x in v):
+            raise ValueError(f"`{key}` list items must be strings, got: {v}")
+        out = [x.strip().lower() for x in v]
+    else:
+        raise ValueError(f"`{key}` must be a string or list of strings, got: {v}")
+
+    out = [x for x in out if x]
+    if not out:
+        raise ValueError(f"`{key}` must contain at least one metric.")
+    return list(dict.fromkeys(out))
+
+
 def _expand_adata_entry(entry: str):
     p = Path(entry).expanduser()
     if p.is_dir():
@@ -70,7 +88,7 @@ def _resolve_adata_files(raw):
 def _normalize_eval_cfg(eval_cfg):
     eval_cfg["batch_size"] = _as_int(eval_cfg.get("batch_size", 32), "eval.batch_size")
     eval_cfg["log_interval"] = _as_int(eval_cfg.get("log_interval", 100), "eval.log_interval")
-    eval_cfg["metric"] = _as_str(eval_cfg.get("metric", "auprc"), "eval.metric").lower()
+    eval_cfg["metric"] = _as_metric_list(eval_cfg.get("metric", "auprc"), "eval.metric")
     eval_cfg["device"] = _as_str(eval_cfg.get("device", "cuda"), "eval.device")
     eval_cfg["output_dir"] = _as_str(eval_cfg.get("output_dir", "./eval/grn"), "eval.output_dir")
     eval_cfg["log_name"] = _as_str(eval_cfg.get("log_name", "grn_eval.log"), "eval.log_name")
@@ -106,6 +124,12 @@ def main():
     parser.add_argument("--config", type=str, default="meta.yaml", help="Meta config YAML path")
     parser.add_argument("--override", nargs="*", default=[], help="Optional overrides: key=value")
     parser.add_argument("--dry-run", action="store_true", help="Validate config and paths without evaluation.")
+    parser.add_argument(
+        "--nproc-per-node",
+        type=int,
+        default=1,
+        help="Number of processes for DDP evaluation via torchrun (default: 1).",
+    )
     args = parser.parse_args()
 
     meta_cfg = load_cfg(args.config)
@@ -140,6 +164,25 @@ def main():
     _normalize_tokenizer_eval_cfg(eval_tokenizer_cfg)
 
     adata_files = _resolve_adata_files(data_cfg["adata_files"])
+
+    in_torchrun = int(os.environ.get("WORLD_SIZE", "1")) > 1
+    if args.nproc_per_node > 1 and not in_torchrun:
+        cmd = [
+            "torchrun",
+            f"--nproc_per_node={args.nproc_per_node}",
+            "-m",
+            "sccafm.runner.eval_grn",
+            "--config",
+            args.config,
+        ]
+        if args.override:
+            cmd.extend(["--override", *args.override])
+        print(f"Resolved dataset files: {len(adata_files)}")
+        print("Command:", " ".join(cmd))
+        if args.dry_run:
+            return
+        subprocess.run(cmd, check=True)
+        return
 
     if args.dry_run:
         print(f"Resolved dataset files: {len(adata_files)}")
@@ -192,11 +235,15 @@ def main():
         log_overwrite=eval_task_cfg["log_overwrite"],
     )
 
-    print("GRN evaluation finished.")
-    print(
-        f"{summary['metric_name']} mean={summary['metric_mean']:.6f} "
-        f"std={summary['metric_std']:.6f} valid_cells={summary['metric_valid_cells']}"
-    )
+    rank = int(os.environ.get("RANK", "0"))
+    if rank == 0:
+        print("GRN evaluation finished.")
+        metrics = eval_task_cfg["metric"]
+        for m in metrics:
+            print(
+                f"{m} mean={summary[f'{m}_mean']:.6f} "
+                f"std={summary[f'{m}_std']:.6f} valid_cells={summary[f'{m}_valid_cells']}"
+            )
 
 
 if __name__ == "__main__":

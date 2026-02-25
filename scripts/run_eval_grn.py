@@ -33,6 +33,12 @@ def main() -> int:
         action="store_true",
         help="Validate config and paths without evaluation.",
     )
+    parser.add_argument(
+        "--nproc-per-node",
+        type=int,
+        default=1,
+        help="Number of DDP processes for torchrun.",
+    )
     args = parser.parse_args()
 
     project_root = Path(__file__).resolve().parent.parent
@@ -49,6 +55,8 @@ def main() -> int:
         "sccafm.runner.eval_grn",
         "--config",
         args.meta_config,
+        "--nproc-per-node",
+        str(args.nproc_per_node),
     ]
     if args.dry_run:
         cmd.append("--dry-run")

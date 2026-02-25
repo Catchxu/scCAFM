@@ -8,7 +8,9 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 import torch
+import torch.distributed as dist
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 
 from .models import SFM
 from .tokenizer import TomeDataset, TomeTokenizer, tome_collate_fn
@@ -41,6 +43,26 @@ def _setup_logger(
     logger.addHandler(fh)
     logger.addHandler(sh)
     return logger
+
+
+def _setup_distributed(device: str):
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    is_distributed = world_size > 1
+    initialized_here = False
+    rank = 0
+    local_rank = 0
+
+    if is_distributed:
+        rank = int(os.environ.get("RANK", "0"))
+        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+        if device.startswith("cuda") and torch.cuda.is_available():
+            torch.cuda.set_device(local_rank)
+        if not dist.is_initialized():
+            backend = "nccl" if torch.cuda.is_available() else "gloo"
+            dist.init_process_group(backend=backend)
+            initialized_here = True
+        rank = dist.get_rank()
+    return is_distributed, initialized_here, rank, local_rank, world_size
 
 
 def _map_gene_to_token(name: str, symbol2id: Dict[str, int], id2id: Dict[str, int]) -> Optional[int]:
@@ -135,6 +157,12 @@ def _safe_nan_stats(values: List[float]) -> Tuple[float, float, int]:
     return float(valid.mean()), float(valid.std()), int(valid.size)
 
 
+def _safe_ratio(numer: float, denom: float) -> float:
+    if np.isnan(numer) or np.isnan(denom) or denom <= 0:
+        return float("nan")
+    return float(numer / denom)
+
+
 def _resolve_species_for_tf(adata, cond_species_key: Optional[str]) -> str:
     # 1) Prefer tokenizer species key from adata.obs if provided.
     if cond_species_key is not None and cond_species_key in adata.obs:
@@ -177,7 +205,7 @@ def evaluate_grn(
     log_dir: Optional[str] = None,
     log_name: str = "grn_eval.log",
     log_interval: int = 100,
-    metric: str = "auprc",
+    metric: Union[str, List[str]] = "auprc",
     preprocess: bool = True,
     platform_key: Optional[str] = None,
     cond_species_key: Optional[str] = None,
@@ -191,19 +219,38 @@ def evaluate_grn(
     if isinstance(adata_files, str):
         adata_files = [adata_files]
 
-    os.makedirs(output_dir, exist_ok=True)
-    logger = _setup_logger(output_dir, log_dir, log_name, log_overwrite=log_overwrite)
+    is_distributed, initialized_here, rank, local_rank, world_size = _setup_distributed(device)
+    rank0 = rank == 0
 
-    metric = metric.lower()
-    if metric not in {"auprc", "auroc"}:
-        raise ValueError(f"Unsupported metric '{metric}'. Use 'auprc' or 'auroc'.")
+    os.makedirs(output_dir, exist_ok=True)
+    logger = _setup_logger(output_dir, log_dir, log_name, log_overwrite=log_overwrite) if rank0 else None
+
+    if isinstance(metric, str):
+        selected_metrics = [metric.lower()]
+    elif isinstance(metric, list) and all(isinstance(m, str) for m in metric):
+        selected_metrics = [m.lower() for m in metric]
+    else:
+        raise ValueError("`metric` must be a string or a list of strings.")
+
+    if len(selected_metrics) == 0:
+        raise ValueError("`metric` must contain at least one metric.")
+    # Preserve user order and deduplicate.
+    selected_metrics = list(dict.fromkeys(selected_metrics))
+
+    supported_metrics = {"auprc", "auroc", "auprc_ratio", "auroc_ratio"}
+    invalid_metrics = [m for m in selected_metrics if m not in supported_metrics]
+    if invalid_metrics:
+        raise ValueError(
+            f"Unsupported metric(s) {invalid_metrics}. Use one of: {sorted(supported_metrics)}."
+        )
+    primary_metric = selected_metrics[0]
 
     amp_dtype = amp_dtype.lower()
     if amp_dtype not in {"bf16", "fp16"}:
         raise ValueError(f"Unsupported amp_dtype: {amp_dtype}. Use 'bf16' or 'fp16'.")
 
     if device.startswith("cuda") and torch.cuda.is_available():
-        device = "cuda"
+        device = f"cuda:{local_rank}" if is_distributed else "cuda"
     else:
         device = "cpu"
 
@@ -224,32 +271,34 @@ def evaluate_grn(
     tokenizer.set_batch_key(batch_key=batch_key)
 
     src_to_tg, unique_pairs, mapped_pairs = _build_gt_lookup(eval_grn_df, tokenizer)
-    logger.info(
-        (
-            "GRN eval start | files=%d | batch_size=%d | device=%s | metric=%s | "
-            "gt_mapped_edges=%d | gt_unique_edges=%d | tokenizer_keys="
-            "platform=%s cond_species=%s tissue=%s disease=%s batch=%s"
-        ),
-        len(adata_files),
-        batch_size,
-        device,
-        metric,
-        mapped_pairs,
-        unique_pairs,
-        platform_key,
-        cond_species_key,
-        tissue_key,
-        disease_key,
-        batch_key,
-    )
+    if logger:
+        logger.info(
+            (
+                "GRN eval start | files=%d | batch_size=%d | device=%s | ddp=%s | world_size=%d | metrics=%s | "
+                "gt_mapped_edges=%d | gt_unique_edges=%d | tokenizer_keys="
+                "platform=%s cond_species=%s tissue=%s disease=%s batch=%s"
+            ),
+            len(adata_files),
+            batch_size,
+            device,
+            is_distributed,
+            world_size,
+            ",".join(selected_metrics),
+            mapped_pairs,
+            unique_pairs,
+            platform_key,
+            cond_species_key,
+            tissue_key,
+            disease_key,
+            batch_key,
+        )
 
     records = []
     processed = 0
-    auprc_all: List[float] = []
-    auroc_all: List[float] = []
 
     for file_idx, file_path in enumerate(adata_files):
-        logger.info("[File %d/%d] Loading: %s", file_idx + 1, len(adata_files), file_path)
+        if logger:
+            logger.info("[File %d/%d] Loading: %s", file_idx + 1, len(adata_files), file_path)
 
         adata = sc.read_h5ad(file_path)
         obs_names = adata.obs_names.tolist()
@@ -258,18 +307,31 @@ def evaluate_grn(
             tokens_dict = tokenizer(adata, preprocess=preprocess)
         token_cells = int(tokens_dict["gene"].shape[0])
         if len(obs_names) != token_cells:
-            logger.warning(
-                "obs_names size (%d) != tokenized cells (%d). Using index-based names after preprocessing.",
-                len(obs_names),
-                token_cells,
-            )
+            if logger:
+                logger.warning(
+                    "obs_names size (%d) != tokenized cells (%d). Using index-based names after preprocessing.",
+                    len(obs_names),
+                    token_cells,
+                )
             obs_names = [str(i) for i in range(token_cells)]
 
         dataset = TomeDataset(tokens_dict)
+        sampler = None
+        sample_indices = list(range(len(dataset)))
+        if is_distributed:
+            sampler = DistributedSampler(
+                dataset,
+                num_replicas=world_size,
+                rank=rank,
+                shuffle=False,
+                drop_last=False,
+            )
+            sample_indices = list(iter(sampler))
         loader = DataLoader(
             dataset,
             batch_size=batch_size,
-            shuffle=False,
+            shuffle=sampler is None,
+            sampler=sampler,
             collate_fn=tome_collate_fn,
             num_workers=0,
             pin_memory=True,
@@ -284,7 +346,7 @@ def evaluate_grn(
         else:
             raise ValueError(f"{species} isn't supported!")
 
-        cell_offset = 0
+        sample_ptr = 0
         with torch.no_grad():
             for step, batch in enumerate(loader, start=1):
                 batch_cpu = {k: v.clone() for k, v in batch.items()}
@@ -308,6 +370,8 @@ def evaluate_grn(
                 genes = batch_cpu["gene"].cpu().long()
 
                 batch_n = genes.shape[0]
+                batch_indices = sample_indices[sample_ptr: sample_ptr + batch_n]
+                sample_ptr += batch_n
                 for i in range(batch_n):
                     tf_mask = b_tf[i]
                     tg_mask = b_tg[i]
@@ -315,14 +379,15 @@ def evaluate_grn(
                     tg_n = int(tg_mask.sum().item())
 
                     if grn[i].shape != (tf_n, tg_n):
-                        logger.warning(
-                            "Skip cell due to shape mismatch | file=%s cell_offset=%d grn_shape=%s tf_n=%d tg_n=%d",
-                            file_path,
-                            cell_offset + i,
-                            tuple(grn[i].shape),
-                            tf_n,
-                            tg_n,
-                        )
+                        if logger:
+                            logger.warning(
+                                "Skip cell due to shape mismatch | file=%s cell_index=%d grn_shape=%s tf_n=%d tg_n=%d",
+                                file_path,
+                                int(batch_indices[i]),
+                                tuple(grn[i].shape),
+                                tf_n,
+                                tg_n,
+                            )
                         continue
 
                     tf_ids = genes[i][tf_mask].numpy().astype(np.int64, copy=False)
@@ -335,40 +400,50 @@ def evaluate_grn(
 
                     auprc = _safe_auprc(y_true, y_score)
                     auroc = _safe_auroc(y_true, y_score)
-                    primary = auprc if metric == "auprc" else auroc
 
-                    auprc_all.append(auprc)
-                    auroc_all.append(auroc)
+                    pos_edges = int(y_true.sum())
+                    all_edges = int(y_true.shape[0])
+                    neg_edges = all_edges - pos_edges
 
-                    abs_idx = cell_offset + i
-                    records.append(
-                        {
-                            "file_idx": file_idx,
-                            "file_path": file_path,
-                            "cell_index_in_file": abs_idx,
-                            "cell_name": obs_names[abs_idx] if abs_idx < len(obs_names) else str(abs_idx),
-                            "num_tf": tf_n,
-                            "num_tg": tg_n,
-                            "num_edges": int(tf_n * tg_n),
-                            "num_pos_edges": int(y_true.sum()),
-                            "auprc": auprc,
-                            "auroc": auroc,
-                            "metric_name": metric,
-                            "metric_value": primary,
-                        }
-                    )
+                    # Random baseline: positive prevalence for AUPRC and 0.5 for AUROC.
+                    auprc_random = float(pos_edges / all_edges) if all_edges > 0 else float("nan")
+                    auroc_random = 0.5 if pos_edges > 0 and neg_edges > 0 else float("nan")
+
+                    auprc_ratio = _safe_ratio(auprc, auprc_random)
+                    auroc_ratio = _safe_ratio(auroc, auroc_random)
+
+                    metric_map = {
+                        "auprc": auprc,
+                        "auroc": auroc,
+                        "auprc_ratio": auprc_ratio,
+                        "auroc_ratio": auroc_ratio,
+                    }
+
+                    abs_idx = int(batch_indices[i])
+                    row = {
+                        "file_idx": file_idx,
+                        "file_path": file_path,
+                        "cell_index_in_file": abs_idx,
+                        "cell_name": obs_names[abs_idx] if abs_idx < len(obs_names) else str(abs_idx),
+                        "num_tf": tf_n,
+                        "num_tg": tg_n,
+                        "num_edges": int(tf_n * tg_n),
+                        "num_pos_edges": pos_edges,
+                    }
+                    for m in selected_metrics:
+                        row[m] = metric_map[m]
+                    records.append(row)
 
                 processed += batch_n
-                cell_offset += batch_n
-                if log_interval > 0 and step % log_interval == 0:
-                    metric_vals = [r["metric_value"] for r in records]
+                if logger and log_interval > 0 and step % log_interval == 0:
+                    metric_vals = [r.get(primary_metric, float("nan")) for r in records]
                     mean_metric, _, valid_n = _safe_nan_stats(metric_vals)
                     logger.info(
                         "progress | file=%d step=%d processed_cells=%d metric=%s mean=%.6f valid=%d",
                         file_idx + 1,
                         step,
                         processed,
-                        metric,
+                        primary_metric,
                         mean_metric,
                         valid_n,
                     )
@@ -378,46 +453,62 @@ def evaluate_grn(
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    if len(records) == 0:
+    if is_distributed:
+        gathered_records: List[List[Dict[str, Union[int, str, float]]]] = [None] * world_size
+        dist.all_gather_object(gathered_records, records)
+        if not rank0:
+            if initialized_here:
+                dist.destroy_process_group()
+            return {}, pd.DataFrame()
+        parts = [pd.DataFrame(part) for part in gathered_records if part]
+    else:
+        parts = [pd.DataFrame(records)] if records else []
+
+    if len(parts) == 0:
         raise RuntimeError("No valid cells were evaluated. Please check your data and model outputs.")
 
-    df = pd.DataFrame(records)
+    df = pd.concat(parts, ignore_index=True)
+    # DistributedSampler may pad data on some ranks. Keep one record per cell.
+    df = df.sort_values(["file_idx", "cell_index_in_file"]).drop_duplicates(
+        subset=["file_idx", "cell_index_in_file"], keep="first"
+    ).reset_index(drop=True)
     cell_csv = os.path.join(output_dir, "grn_eval_per_cell.csv")
     df.to_csv(cell_csv, index=False)
 
-    mean_metric, std_metric, valid_metric_n = _safe_nan_stats(df["metric_value"].tolist())
-    mean_auprc, std_auprc, valid_auprc_n = _safe_nan_stats(auprc_all)
-    mean_auroc, std_auroc, valid_auroc_n = _safe_nan_stats(auroc_all)
-
     summary = {
         "num_cells": int(df.shape[0]),
-        "metric_name": metric,
-        "metric_mean": mean_metric,
-        "metric_std": std_metric,
-        "metric_valid_cells": valid_metric_n,
-        "auprc_mean": mean_auprc,
-        "auprc_std": std_auprc,
-        "auprc_valid_cells": valid_auprc_n,
-        "auroc_mean": mean_auroc,
-        "auroc_std": std_auroc,
-        "auroc_valid_cells": valid_auroc_n,
+        "metrics": ",".join(selected_metrics),
         "gt_unique_edges_mapped": int(unique_pairs),
         "gt_edges_total_mapped_rows": int(mapped_pairs),
         "per_cell_csv": cell_csv,
     }
+    for m in selected_metrics:
+        mean_m, std_m, valid_m = _safe_nan_stats(df[m].tolist())
+        summary[f"{m}_mean"] = mean_m
+        summary[f"{m}_std"] = std_m
+        summary[f"{m}_valid_cells"] = valid_m
+
+    if len(selected_metrics) == 1:
+        only = selected_metrics[0]
+        summary["metric_name"] = only
+        summary["metric_mean"] = summary[f"{only}_mean"]
+        summary["metric_std"] = summary[f"{only}_std"]
+        summary["metric_valid_cells"] = summary[f"{only}_valid_cells"]
     summary_df = pd.DataFrame([summary])
     summary_csv = os.path.join(output_dir, "grn_eval_summary.csv")
     summary_df.to_csv(summary_csv, index=False)
 
-    logger.info(
-        "GRN eval done | cells=%d | %s_mean=%.6f | auprc_mean=%.6f | auroc_mean=%.6f",
-        summary["num_cells"],
-        metric,
-        summary["metric_mean"],
-        summary["auprc_mean"],
-        summary["auroc_mean"],
-    )
-    logger.info("Saved per-cell metrics: %s", cell_csv)
-    logger.info("Saved summary metrics: %s", summary_csv)
+    if logger:
+        metric_log_parts = [f"{m}_mean={summary[f'{m}_mean']:.6f}" for m in selected_metrics]
+        logger.info(
+            "GRN eval done | cells=%d | %s",
+            summary["num_cells"],
+            " | ".join(metric_log_parts),
+        )
+        logger.info("Saved per-cell metrics: %s", cell_csv)
+        logger.info("Saved summary metrics: %s", summary_csv)
+
+    if initialized_here:
+        dist.destroy_process_group()
 
     return summary, df
