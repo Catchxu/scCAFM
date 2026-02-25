@@ -97,7 +97,22 @@ class PriorLoss(nn.Module):
 
         return target
 
-    def forward(self, tokens, grn, binary_tf, binary_tg, true_grn_df: Optional[pd.DataFrame] = None):
+    def _factorized_logits(self, u: torch.Tensor, v: torch.Tensor, model_tf_mask: torch.Tensor):
+        # Build full-source factors in selected TG space and compute dense logits lazily.
+        # logits: (C, S, S) with S = selected TG count
+        u_full = expand_u(u, model_tf_mask.bool())
+        return torch.bmm(u_full, v.transpose(1, 2))
+
+    def forward(
+        self,
+        tokens,
+        grn,
+        binary_tf,
+        binary_tg,
+        true_grn_df: Optional[pd.DataFrame] = None,
+        u: Optional[torch.Tensor] = None,
+        v: Optional[torch.Tensor] = None,
+    ):
         gene_tokens = tokens["gene"]
         C = gene_tokens.shape[0]
 
@@ -111,8 +126,13 @@ class PriorLoss(nn.Module):
         # 2. Map ground truth to sequence positions in the selected space.
         target = self._build_gt_matrix(gene_tokens)
         
-        # 3. Expand predicted GRN to selected-space dimensions (B, S, S)
-        grn_full = expand_grn(grn, binary_tf, binary_tg)
+        # 3. Compute predicted logits in selected-space dimensions (B, S, S)
+        if u is not None and v is not None:
+            grn_full = self._factorized_logits(u, v, model_tf_mask)
+        else:
+            if grn is None:
+                raise ValueError("Either `grn` or (`u`, `v`) must be provided for PriorLoss.")
+            grn_full = expand_grn(grn, binary_tf, binary_tg)
         
         # 4. Construct 2D mask (Source x Target):
         # source gene must be an active TF in selected space.
@@ -298,7 +318,7 @@ class SFMLoss(nn.Module):
         loss_dict = {}
 
         # 1. ELBO Loss
-        loss_elbo = self.elbo_criterion(tokens, grn, binary_tf, binary_tg)
+        loss_elbo = self.elbo_criterion(tokens, grn, binary_tf, binary_tg, u=u, v=v)
         total_loss += loss_elbo
         loss_dict["elbo"] = loss_elbo.item()
 
@@ -306,7 +326,9 @@ class SFMLoss(nn.Module):
         if self.use_prior:
             w_p = self.get_prior_weight()
             # Use self.true_grn_df stored during init
-            loss_p = self.prior_criterion(tokens, grn, binary_tf, binary_tg, self.true_grn_df)
+            loss_p = self.prior_criterion(
+                tokens, grn, binary_tf, binary_tg, self.true_grn_df, u=u, v=v
+            )
             total_loss += w_p * loss_p
             loss_dict["prior"] = loss_p.item()
 

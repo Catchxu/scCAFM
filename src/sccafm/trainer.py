@@ -12,7 +12,6 @@ from torch.utils.data import DataLoader
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
-from torch.cuda.amp import GradScaler
 
 from .models import SFM
 from .loss import SFMLoss
@@ -42,7 +41,13 @@ def _setup_distributed(device: str):
     return is_distributed, initialized_here, rank, local_rank, world_size
 
 
-def _setup_logger(rank0: bool, checkpoint_dir: str, log_dir: Optional[str], log_name: str):
+def _setup_logger(
+    rank0: bool,
+    checkpoint_dir: str,
+    log_dir: Optional[str],
+    log_name: str,
+    log_overwrite: bool = True,
+):
     if not rank0:
         return None
     if log_dir is None:
@@ -59,7 +64,7 @@ def _setup_logger(rank0: bool, checkpoint_dir: str, log_dir: Optional[str], log_
         fmt="%(asctime)s | %(levelname)s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    fh = logging.FileHandler(log_path)
+    fh = logging.FileHandler(log_path, mode="w" if log_overwrite else "a")
     fh.setFormatter(formatter)
     sh = logging.StreamHandler()
     sh.setFormatter(formatter)
@@ -88,6 +93,7 @@ def sfm_trainer(
     log_interval: int = 100,
     use_tqdm: bool = True,
     tqdm_mininterval: float = 1.0,
+    log_overwrite: bool = True,
     use_amp: bool = False,
     amp_dtype: str = "bf16",
 ):
@@ -104,7 +110,7 @@ def sfm_trainer(
 
     model.to(device)
     criterion.to(device)
-    logger = _setup_logger(rank0, checkpoint_dir, log_dir, log_name)
+    logger = _setup_logger(rank0, checkpoint_dir, log_dir, log_name, log_overwrite=log_overwrite)
 
     amp_dtype = amp_dtype.lower()
     if amp_dtype not in {"bf16", "fp16"}:
@@ -114,7 +120,7 @@ def sfm_trainer(
         raise ValueError(
             "use_amp=True with amp_dtype='bf16' requires CUDA bf16 support on this GPU/runtime."
         )
-    scaler = GradScaler(enabled=amp_enabled and amp_dtype == "fp16")
+    scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled and amp_dtype == "fp16")
 
     if is_distributed:
         ddp_kwargs = {}
@@ -257,7 +263,9 @@ def sfm_trainer(
                     else nullcontext()
                 )
                 with autocast_ctx:
-                    grn, b_tf, b_tg, u, v = model(batch, return_factors=True)
+                    grn, b_tf, b_tg, u, v = model(
+                        batch, return_factors=True, compute_grn=False
+                    )
 
                     # Loss Forward (true_grn_df is now internal to criterion)
                     total_loss, loss_dict = criterion(

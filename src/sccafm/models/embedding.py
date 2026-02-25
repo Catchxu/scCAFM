@@ -51,8 +51,7 @@ class ExprMapping(nn.Module):
         zero_mask = (expr_tokens == 0)  # C, L
         nonzero_mask = ~zero_mask       # C, L
 
-        out = torch.zeros(C, L, self.embedding_dim, device=device)
-
+        out = None
         if nonzero_mask.any():
             nonzero_values = expr_tokens[nonzero_mask].float().unsqueeze(-1)
             encoded = self.encoder(nonzero_values)
@@ -62,10 +61,19 @@ class ExprMapping(nn.Module):
             probs = F.softmax(sim, dim=-1)
 
             emb = torch.matmul(probs, bin_embs)
+            out = torch.zeros(C, L, self.embedding_dim, device=device, dtype=emb.dtype)
             out[nonzero_mask] = emb
+        else:
+            out = torch.zeros(
+                C,
+                L,
+                self.embedding_dim,
+                device=device,
+                dtype=self.bin_embeddings.dtype,
+            )
 
         if zero_mask.any():
-            out[zero_mask] = self.bin_embeddings[0]
+            out[zero_mask] = self.bin_embeddings[0].to(out.dtype)
 
         return out
 

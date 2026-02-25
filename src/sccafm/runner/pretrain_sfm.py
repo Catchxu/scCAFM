@@ -62,6 +62,7 @@ def _normalize_pretrain_cfg(train_cfg, loss_cfg):
     train_cfg["log_interval"] = _as_int(train_cfg.get("log_interval", 100), "train.log_interval")
     train_cfg["use_tqdm"] = _as_bool(train_cfg.get("use_tqdm", True), "train.use_tqdm")
     train_cfg["tqdm_mininterval"] = _as_float(train_cfg.get("tqdm_mininterval", 1.0), "train.tqdm_mininterval")
+    train_cfg["log_overwrite"] = _as_bool(train_cfg.get("log_overwrite", True), "train.log_overwrite")
     train_cfg["use_amp"] = _as_bool(train_cfg.get("use_amp", False), "train.use_amp")
     train_cfg["amp_dtype"] = _as_str(train_cfg.get("amp_dtype", "bf16"), "train.amp_dtype").lower()
 

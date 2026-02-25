@@ -283,7 +283,7 @@ class SFM(nn.Module):
         gene_subset = (gene_tokens.unsqueeze(-1) == self.tf_idx.unsqueeze(0).unsqueeze(0)).any(dim=-1)
         return gene_subset
 
-    def forward(self, tokens, return_factors=False, **kwargs):
+    def forward(self, tokens, return_factors=False, compute_grn=True, **kwargs):
         x, key_padding_mask = self.embedding(tokens)
         x = self.backbone(x, key_padding_mask, causal=False)
 
@@ -295,7 +295,9 @@ class SFM(nn.Module):
         u, binary_tf = self.tfrouter(x, gene_subset, key_padding_mask, **kwargs)
         v, binary_tg = self.tgrouter(x, None, key_padding_mask, **kwargs)
 
-        grn = torch.einsum('cfm,cgm->cfg', u, v)
+        grn = None
+        if compute_grn:
+            grn = torch.einsum('cfm,cgm->cfg', u, v)
         
         if return_factors:
             return grn, binary_tf, binary_tg, u, v
