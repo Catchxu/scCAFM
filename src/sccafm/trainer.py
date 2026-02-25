@@ -73,6 +73,35 @@ def _setup_logger(
     return logger
 
 
+def _resolve_species_for_tf(
+    adata,
+    species_obs_key: Optional[str],
+):
+    if species_obs_key is not None and species_obs_key in adata.obs:
+        vals = (
+            adata.obs[species_obs_key]
+            .astype(str)
+            .str.lower()
+            .replace("nan", pd.NA)
+            .dropna()
+            .unique()
+            .tolist()
+        )
+        if len(vals) == 1:
+            return vals[0]
+        if len(vals) > 1:
+            raise ValueError(
+                f"Found multiple species values in adata.obs['{species_obs_key}']: {vals[:10]}. "
+                "Training currently expects one species per dataset file."
+            )
+
+    species_uns = adata.uns.get("species", None)
+    if species_uns is not None:
+        return str(species_uns).lower()
+
+    return "human"
+
+
 def sfm_trainer(
     model: SFM,
     adata_files: Union[str, List[str]], 
@@ -80,7 +109,7 @@ def sfm_trainer(
     criterion: SFMLoss,
     human_tfs: Optional[pd.DataFrame] = None,
     mouse_tfs: Optional[pd.DataFrame] = None,
-    species_key: str = "species",
+    species_key: Optional[str] = None,
     learning_rate: float = 1e-5,
     weight_decay: float = 1e-2,
     epochs_per_file: int = 1,
@@ -171,6 +200,14 @@ def sfm_trainer(
     total_global_epochs = len(adata_files) * epochs_per_file
     criterion_core.T = total_global_epochs
 
+    # Prefer train.species_key when provided, otherwise reuse tokenizer species key.
+    tokenizer_species_key = None
+    try:
+        tokenizer_species_key = tokenizer.cond_tokenizer.condition_keys[1]
+    except Exception:
+        tokenizer_species_key = None
+    species_obs_key = species_key if species_key is not None else tokenizer_species_key
+
     # 3. Main File Loop
     model.train()
     criterion.train()
@@ -211,10 +248,7 @@ def sfm_trainer(
             pin_memory=True
         )
 
-        try:
-            species = adata.uns[species_key]
-        except Exception:
-            species = "human"  # default species is human
+        species = _resolve_species_for_tf(adata, species_obs_key)
 
         if species == "human":
             model_core.update_tfs(human_tfs)
