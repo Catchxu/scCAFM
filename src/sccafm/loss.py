@@ -29,7 +29,8 @@ class PriorLoss(nn.Module):
         self._cached_tgt_ids = None
         self._cached_prior_ref = None
         
-        # Using reduction='none' to apply custom masking later
+        # Using reduction='none' to apply custom masking later.
+        # Keep BCEWithLogits for AMP/autocast safety.
         self.criterion = nn.BCEWithLogitsLoss(reduction='none')
         if true_grn_df is not None:
             self._prepare_prior_cache(true_grn_df)
@@ -161,8 +162,8 @@ class PriorLoss(nn.Module):
         return torch.einsum("bi,bj->bij", src_assoc, tgt_assoc).bool()
 
     def _factorized_logits(self, u: torch.Tensor, v: torch.Tensor, model_tf_mask: torch.Tensor):
-        # Build full-source factors in selected TG space and compute dense logits lazily.
-        # logits: (C, S, S) with S = selected TG count
+        # Build full-source factors in selected TG space and compute dense scores lazily.
+        # scores: (C, S, S) with S = selected TG count
         u_full = expand_u(u, model_tf_mask.bool())
         return torch.bmm(u_full, v.transpose(1, 2))
 
@@ -206,13 +207,17 @@ class PriorLoss(nn.Module):
         filt_src_ids, filt_tgt_ids = self._filter_prior_pairs_by_used_genes(gene_tokens)
         target = self._build_gt_matrix_from_pairs(gene_tokens, filt_src_ids, filt_tgt_ids)
         
-        # 3. Compute predicted logits in selected-space dimensions (B, S, S)
+        # 3. Compute predicted edge scores in selected-space dimensions (B, S, S)
         if u is not None and v is not None:
             grn_full = self._factorized_logits(u, v, model_tf_mask)
         else:
             if grn is None:
                 raise ValueError("Either `grn` or (`u`, `v`) must be provided for PriorLoss.")
             grn_full = expand_grn(grn, binary_tf, binary_tg)
+
+        # Parameter-free abs-based existence logit.
+        # |x| -> 0 gives very negative logit; larger |x| increases edge likelihood.
+        edge_logit = torch.log(grn_full.abs() + 1e-8)
         
         # 4. Construct 2D mask (Source x Target):
         # source gene must be an active TF in selected space.
@@ -222,7 +227,7 @@ class PriorLoss(nn.Module):
         valid_mask = valid_mask & assoc_mask
 
         # 5. Compute pixel-wise loss
-        loss = self.criterion(grn_full, target)
+        loss = self.criterion(edge_logit, target)
         weight_mask = target * self.pos_weight + (1.0 - target) * self.neg_weight
         loss = loss * weight_mask
         
