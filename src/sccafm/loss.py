@@ -462,7 +462,7 @@ if __name__ == "__main__":
 
     Ng = 1000
     Nc = 50
-    tokenizer = TomeTokenizer(token_dict, simplify=True, max_length=Ng+1, n_top_genes=Ng)
+    tokenizer = TomeTokenizer(token_dict, max_length=Ng+1, n_top_genes=Ng)
     tokens = tokenizer(adata[:Nc, :].copy())
 
     # 2. Initialize SFM Model

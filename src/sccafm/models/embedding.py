@@ -180,7 +180,7 @@ if __name__ == "__main__":
     adata = sc.read_h5ad("/data1021/xukaichen/data/DRP/cell_line.h5ad")
     token_dict = pd.read_csv("./resources/token_dict.csv")
 
-    tokenizer = TomeTokenizer(token_dict, simplify=True)
+    tokenizer = TomeTokenizer(token_dict)
     tokens = tokenizer(adata)
 
     embedding_layer = TomoEmbedding(token_dict)

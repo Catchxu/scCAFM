@@ -1,19 +1,15 @@
 datasets:
-  adata_files: /data1021/xukaichen/data/CTA/myeloid.h5ad
+  adata_files: /data1021/xukaichen/data/CTA/pbmc.h5ad
   token_dict: token_dict.csv
   human_tfs: human_tfs.csv
   mouse_tfs: mouse_tfs.csv
   eval_grn: /data1021/xukaichen/data/GRN/networks/hSTRING.csv
 
 tokenizer:
-  # Optional overrides used only in GRN evaluation.
-  # If null, values from configs/tokenizer.yaml are kept.
-  platform_key: null
-  # Preferred source for TF-species routing (human/mouse), read from adata.obs.
-  # If unavailable, evaluator falls back to adata.uns['species'], then 'human'.
+  platform_key: assay
   species_key: null
-  tissue_key: null
-  disease_key: null
+  tissue_key: tissue
+  disease_key: disease
   batch_key: null
 
 eval:

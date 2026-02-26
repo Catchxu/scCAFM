@@ -4,12 +4,11 @@ Tome:
     max_length: 2048
     cond_dict: null
     batch_dict: null
-    simplify: False
-    platform_key: null
+    platform_key: assay
     species_key: null
-    tissue_key: null
-    disease_key: null
-    batch_key: null
+    tissue_key: tissue
+    disease_key: disease
+    batch_key: dataset_id
     min_genes_per_cell: 200
     min_cells_per_gene: 3
     log_norm: True

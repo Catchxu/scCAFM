@@ -124,7 +124,6 @@ class CondTokenizer:
     def __init__(
         self,
         cond_dict=None,
-        simplify=False,
         platform_key=None,
         species_key=None,
         tissue_key=None,
@@ -132,9 +131,7 @@ class CondTokenizer:
     ):
         """
         cond_dict: DataFrame with columns: cond_value, token_index
-        simplify: if True -> always return 0 token for all 4 features
         """
-        self.simplify = simplify
 
         # If no dict provided, create an empty one with a reserved 0 token
         if cond_dict is None:
@@ -201,10 +198,10 @@ class CondTokenizer:
         Lowercase the value, check exist.
         If not exist, add new token row.
         """
-        value = str(value).lower()
+        value = str(value).strip().lower()
 
         # missing or nan -> return 0 token
-        if value == "nan":
+        if value in {"", "nan", "none", "<na>", "na", "null"}:
             return 0
 
         df = self.cond_dict
@@ -222,19 +219,22 @@ class CondTokenizer:
     def __call__(self, adata):
         C = adata.n_obs
 
-        # If simplify mode: return all zero tokens
-        if self.simplify:
-            return torch.zeros((C, 4), dtype=torch.long)
-
         obs = adata.obs
 
         keys = self.condition_keys
         cond_values = []
 
-        for key in keys:
-            if key is None or key not in obs:
-                # missing key -> use pad (0)
-                cond_values.append(["nan"] * C)
+        for j, key in enumerate(keys):
+            if key is None:
+                # Species defaults to human only when species_key is not configured.
+                if j == 1:
+                    cond_values.append(["human"] * C)
+                else:
+                    cond_values.append(["nan"] * C)
+            elif key not in obs:
+                # Ensure missing configured keys exist in adata.obs as NaN.
+                obs[key] = np.nan
+                cond_values.append(obs[key].astype(str).tolist())
             else:
                 cond_values.append(obs[key].astype(str).tolist())
 
@@ -255,8 +255,7 @@ class BatchTokenizer:
     Maps batch metadata from adata.obs to stable token IDs.
     Output: (C, 1) tensor.
     """
-    def __init__(self, batch_dict=None, simplify=False, batch_key=None):
-        self.simplify = simplify
+    def __init__(self, batch_dict=None, batch_key=None):
         if batch_dict is None:
             batch_dict = pd.DataFrame(
                 {"batch_value": ["<unk>"], "token_index": [0]}
@@ -294,8 +293,8 @@ class BatchTokenizer:
         return int(self.batch_dict["token_index"].max()) + 1
 
     def _fetch_or_add(self, value):
-        value = str(value).lower()
-        if value == "nan":
+        value = str(value).strip().lower()
+        if value in {"", "nan", "none", "<na>", "na", "null"}:
             return 0
         hit = self.batch_dict[self.batch_dict["batch_value"] == value]
         if len(hit) > 0:
@@ -308,10 +307,6 @@ class BatchTokenizer:
     def __call__(self, adata):
         C = adata.n_obs
 
-        # In simplify mode: always output zero token
-        if self.simplify:
-            return torch.zeros((C, 1), dtype=torch.long)
-
         if self.batch_keys is None:
             values = ["nan"] * C
         else:
@@ -319,13 +314,22 @@ class BatchTokenizer:
             cols = []
             for key in self.batch_keys:
                 if key is None or key not in obs:
+                    if key is not None and key not in obs:
+                        # Ensure missing configured batch key exists in adata.obs as NaN.
+                        obs[key] = np.nan
                     cols.append(["nan"] * C)
                 else:
                     cols.append(obs[key].astype(str).tolist())
             if len(cols) == 1:
                 values = cols[0]
             else:
-                values = ["|".join(items) for items in zip(*cols)]
+                values = []
+                for items in zip(*cols):
+                    lowered = [str(x).strip().lower() for x in items]
+                    if any(v in {"", "nan", "none", "<na>", "na", "null"} for v in lowered):
+                        values.append("nan")
+                    else:
+                        values.append("|".join(lowered))
 
         out = np.zeros((C, 1), dtype=np.int64)
         for i in range(C):
@@ -344,7 +348,6 @@ class TomeTokenizer:
         max_length=2048,      # max length for gene/expression sequences
         cond_dict=None,       # optional pre-existing cond_dict DataFrame
         batch_dict=None,      # optional pre-existing batch_dict DataFrame
-        simplify=False,       # if True -> cond and batch tokens simplified
         platform_key=None,
         species_key=None,
         tissue_key=None,
@@ -356,7 +359,6 @@ class TomeTokenizer:
         self.expr_tokenizer = ExprTokenizer(max_length=max_length)
         self.cond_tokenizer = CondTokenizer(
             cond_dict=cond_dict,
-            simplify=simplify,
             platform_key=platform_key,
             species_key=species_key,
             tissue_key=tissue_key,
@@ -364,7 +366,6 @@ class TomeTokenizer:
         )
         self.batch_tokenizer = BatchTokenizer(
             batch_dict=batch_dict,
-            simplify=simplify,
             batch_key=batch_key,
         )
 
@@ -555,7 +556,7 @@ if __name__ == "__main__":
     adata = sc.read_h5ad("/data1021/xukaichen/data/DRP/cell_line.h5ad")
     token_dict = pd.read_csv("./resources/token_dict.csv")
 
-    tokenizer = TomeTokenizer(token_dict, simplify=True)
+    tokenizer = TomeTokenizer(token_dict)
     tokens = tokenizer(adata)
     dataset = TomeDataset(tokens)
 
