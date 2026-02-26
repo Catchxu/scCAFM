@@ -1,6 +1,9 @@
 Tome:
   name: "Tome"
   kwargs:
+    # Gene column in adata.var to use for token mapping.
+    # null -> use adata.var_names
+    gene_key: feature_id
     max_length: 2048
     cond_dict: null
     batch_dict: null

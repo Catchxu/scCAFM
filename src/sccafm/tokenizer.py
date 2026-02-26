@@ -26,6 +26,31 @@ class GeneTokenizer:
         # build two lookup tables for fast search
         self.symbol2id = dict(zip(token_dict["gene_symbol"], token_dict["token_index"]))
         self.id2id = dict(zip(token_dict["gene_id"], token_dict["token_index"]))
+        self.id2symbol = dict(zip(token_dict["gene_id"], token_dict["gene_symbol"]))
+        self._symbol2id_upper = {
+            str(k).strip().upper(): int(v) for k, v in self.symbol2id.items()
+        }
+        self._id2id_norm = {}
+        self._idnorm2symbol = {}
+        for k, v in self.id2id.items():
+            ks = str(k).strip().upper()
+            if ks.startswith("ENSG"):
+                ks = ks.split(".", 1)[0]
+            self._id2id_norm[ks] = int(v)
+            sym = self.id2symbol.get(k, None)
+            if sym is not None and str(sym).strip():
+                self._idnorm2symbol[ks] = str(sym).strip().upper()
+
+    @staticmethod
+    def _norm_symbol(x):
+        return str(x).strip().upper()
+
+    @staticmethod
+    def _norm_ensembl(x):
+        s = str(x).strip().upper()
+        if s.startswith("ENSG"):
+            return s.split(".", 1)[0]
+        return s
 
     def __call__(self, adata, gene_key=None, order_matrix=None):
         """
@@ -47,14 +72,17 @@ class GeneTokenizer:
 
         # ---- 2. Detect gene name type: symbol or ENSG id ----
         # If all names start with 'ENSG', treat as gene_id
-        use_gene_id = all(name.startswith("ENSG") for name in gene_names)
+        use_gene_id = all(str(name).strip().upper().startswith("ENSG") for name in gene_names)
 
         # Select lookup table
-        lookup = self.id2id if use_gene_id else self.symbol2id
-
-        # ---- 3. Resolve token index for each gene ----
-        # Unknown genes are mapped to pad
-        base_order_idx = np.array([lookup.get(g, self.pad_index) for g in gene_names])  # shape G
+        if use_gene_id:
+            base_order_idx = np.array(
+                [self._id2id_norm.get(self._norm_ensembl(g), self.pad_index) for g in gene_names]
+            )  # shape G
+        else:
+            base_order_idx = np.array(
+                [self._symbol2id_upper.get(self._norm_symbol(g), self.pad_index) for g in gene_names]
+            )  # shape G
 
         C = adata.n_obs
         tokens = np.full((C, self.max_length), self.pad_index, dtype=np.int64)
@@ -346,6 +374,7 @@ class TomeTokenizer:
         self,
         token_dict,           # token dictionary DataFrame for GeneTokenizer
         max_length=2048,      # max length for gene/expression sequences
+        gene_key=None,        # default adata.var key for gene ids/symbols
         cond_dict=None,       # optional pre-existing cond_dict DataFrame
         batch_dict=None,      # optional pre-existing batch_dict DataFrame
         platform_key=None,
@@ -368,6 +397,7 @@ class TomeTokenizer:
             batch_dict=batch_dict,
             batch_key=batch_key,
         )
+        self.gene_key = gene_key
 
         self.prep_cfg = {
             'min_genes_per_cell': 200,
@@ -375,7 +405,10 @@ class TomeTokenizer:
             'log_norm': True,
             'n_top_genes': 3000
         }
+        kwargs.pop("gene_key", None)
         self.prep_cfg.update(kwargs)
+        self._token_symbol_set = set(self.gene_tokenizer._symbol2id_upper.keys())
+        self._token_id_set = set(self.gene_tokenizer._id2id_norm.keys())
 
     def set_condition_keys(
         self,
@@ -412,6 +445,12 @@ class TomeTokenizer:
         """
         self.batch_tokenizer.set_batch_key_group(key_group)
 
+    def set_gene_key(self, gene_key=None):
+        """
+        Update default gene key for adata.var lookup.
+        """
+        self.gene_key = gene_key
+
     def _check_pad_consistency(self, gene_pad: torch.Tensor, expr_pad: torch.Tensor):
         """
         Check if gene_pad and expr_pad are identical.
@@ -423,19 +462,47 @@ class TomeTokenizer:
                 f"First differences at indices: {diff_idx[:10]}"
             )
     
-    def _preprocess(self, adata):
+    def _resolve_gene_names(self, adata, gene_key=None):
+        if gene_key is None:
+            return adata.var_names.astype(str).tolist()
+        if gene_key not in adata.var:
+            raise ValueError(f"gene_key='{gene_key}' not found in adata.var.")
+        return adata.var[gene_key].astype(str).tolist()
+
+    def _build_mito_mask(self, gene_names):
+        mito = np.zeros(len(gene_names), dtype=bool)
+        idnorm2symbol = self.gene_tokenizer._idnorm2symbol
+        for i, g in enumerate(gene_names):
+            s = str(g).strip().upper()
+            if s.startswith("MT-"):
+                mito[i] = True
+                continue
+            if s.startswith("ENSG"):
+                sid = s.split(".", 1)[0]
+                sym = idnorm2symbol.get(sid, "")
+                if sym.startswith("MT-"):
+                    mito[i] = True
+        return mito
+
+    def _preprocess(self, adata, gene_key=None):
         adata = adata.copy()
 
-        min_genes_per_cell = self.prep_cfg["min_genes_per_cell"]
         min_cells_per_gene = self.prep_cfg["min_cells_per_gene"]
+        min_genes_per_cell = self.prep_cfg["min_genes_per_cell"]
         log_norm = self.prep_cfg["log_norm"]
         n_top_genes = self.prep_cfg["n_top_genes"]
 
-        if min_genes_per_cell:
-            sc.pp.filter_cells(adata, min_genes=min_genes_per_cell)
-        
+        # Remove mitochondrial genes before downstream filtering/normalization.
+        gene_names = self._resolve_gene_names(adata, gene_key=gene_key)
+        mito_mask = self._build_mito_mask(gene_names)
+        if mito_mask.any():
+            adata = adata[:, ~mito_mask].copy()
+
         if min_cells_per_gene:
             sc.pp.filter_genes(adata, min_cells=min_cells_per_gene)
+
+        if min_genes_per_cell:
+            sc.pp.filter_cells(adata, min_genes=min_genes_per_cell)
 
         if log_norm:
             sc.pp.normalize_total(adata, target_sum=1e4)
@@ -445,6 +512,43 @@ class TomeTokenizer:
             sc.pp.highly_variable_genes(adata, n_top_genes=n_top_genes, subset=True)
         
         return adata
+
+    @staticmethod
+    def _norm_symbol(x):
+        return str(x).strip().upper()
+
+    @staticmethod
+    def _norm_ensembl(x):
+        s = str(x).strip().upper()
+        if s.startswith("ENSG"):
+            return s.split(".", 1)[0]
+        return s
+
+    def _intersect_with_token_dict(self, adata, gene_key=None):
+        """
+        Keep only genes that can be mapped by token_dict, using robust matching:
+        - gene_symbol: case-insensitive
+        - gene_id (ENSG*): version suffix tolerant (e.g., ENSG... .1)
+        """
+        if gene_key is None:
+            raw_names = adata.var_names.astype(str).tolist()
+        else:
+            if gene_key not in adata.var:
+                raise ValueError(f"gene_key='{gene_key}' not found in adata.var.")
+            raw_names = adata.var[gene_key].astype(str).tolist()
+
+        keep = []
+        for g in raw_names:
+            s_sym = self._norm_symbol(g)
+            s_id = self._norm_ensembl(g)
+            keep.append((s_sym in self._token_symbol_set) or (s_id in self._token_id_set))
+
+        keep = np.asarray(keep, dtype=bool)
+        if keep.sum() == 0:
+            raise ValueError(
+                "No overlapping genes between input adata and token_dict after robust symbol/ENSG matching."
+            )
+        return adata[:, keep].copy()
 
     def __call__(
         self,
@@ -457,7 +561,8 @@ class TomeTokenizer:
         tissue_key=None,
         disease_key=None,
         batch_key=None,
-        preprocess=True
+        preprocess=True,
+        return_obs_names: bool = False,
     ):
         """
         Tokenize adata and return a dict of tensors.
@@ -468,8 +573,13 @@ class TomeTokenizer:
             batch: (C, 1)
             pad: (C, L-1)
         """
+        if gene_key is None:
+            gene_key = self.gene_key
+
+        # Always align genes to token_dict first, then optional preprocessing.
+        adata = self._intersect_with_token_dict(adata, gene_key=gene_key)
         if preprocess:
-            adata = self._preprocess(adata)
+            adata = self._preprocess(adata, gene_key=gene_key)
 
         gene_tokens, gene_pad = self.gene_tokenizer(
             adata,
@@ -498,13 +608,16 @@ class TomeTokenizer:
 
         self._check_pad_consistency(gene_pad, expr_pad)
 
-        return {
+        tokens = {
             "gene": gene_tokens,
             "expr": expr_tokens,
             "cond": cond_tokens,
             "batch": batch_tokens,
             "pad": gene_pad
         }
+        if return_obs_names:
+            return tokens, adata.obs_names.astype(str).tolist()
+        return tokens
 
 
 class TomeDataset(Dataset):

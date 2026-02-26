@@ -99,6 +99,7 @@ def _normalize_eval_cfg(eval_cfg):
 
 
 def _normalize_tokenizer_eval_cfg(tokenizer_cfg):
+    tokenizer_cfg["gene_key"] = tokenizer_cfg.get("gene_key", None)
     tokenizer_cfg["platform_key"] = tokenizer_cfg.get("platform_key", None)
     tokenizer_cfg["species_key"] = tokenizer_cfg.get("species_key", None)
     tokenizer_cfg["tissue_key"] = tokenizer_cfg.get("tissue_key", None)
@@ -225,6 +226,7 @@ def main():
         log_interval=eval_task_cfg["log_interval"],
         metric=eval_task_cfg["metric"],
         preprocess=eval_task_cfg["preprocess"],
+        gene_key=eval_tokenizer_cfg["gene_key"],
         platform_key=eval_tokenizer_cfg["platform_key"],
         cond_species_key=eval_tokenizer_cfg["species_key"],
         tissue_key=eval_tokenizer_cfg["tissue_key"],

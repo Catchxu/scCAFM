@@ -207,6 +207,7 @@ def evaluate_grn(
     log_interval: int = 100,
     metric: Union[str, List[str]] = "auprc",
     preprocess: bool = True,
+    gene_key: Optional[str] = None,
     platform_key: Optional[str] = None,
     cond_species_key: Optional[str] = None,
     tissue_key: Optional[str] = None,
@@ -262,6 +263,7 @@ def evaluate_grn(
 
     model = model.to(device)
     model.eval()
+    tokenizer.set_gene_key(gene_key)
     tokenizer.set_condition_keys(
         platform_key=platform_key,
         species_key=cond_species_key,
@@ -276,7 +278,7 @@ def evaluate_grn(
             (
                 "GRN eval start | files=%d | batch_size=%d | device=%s | ddp=%s | world_size=%d | metrics=%s | "
                 "gt_mapped_edges=%d | gt_unique_edges=%d | tokenizer_keys="
-                "platform=%s cond_species=%s tissue=%s disease=%s batch=%s"
+                "gene=%s platform=%s cond_species=%s tissue=%s disease=%s batch=%s"
             ),
             len(adata_files),
             batch_size,
@@ -286,6 +288,7 @@ def evaluate_grn(
             ",".join(selected_metrics),
             mapped_pairs,
             unique_pairs,
+            gene_key,
             platform_key,
             cond_species_key,
             tissue_key,
@@ -301,19 +304,24 @@ def evaluate_grn(
             logger.info("[File %d/%d] Loading: %s", file_idx + 1, len(adata_files), file_path)
 
         adata = sc.read_h5ad(file_path)
-        obs_names = adata.obs_names.tolist()
+        raw_cells, raw_genes = int(adata.n_obs), int(adata.n_vars)
 
         with torch.no_grad():
-            tokens_dict = tokenizer(adata, preprocess=preprocess)
+            tokens_dict, obs_names = tokenizer(adata, preprocess=preprocess, return_obs_names=True)
         token_cells = int(tokens_dict["gene"].shape[0])
-        if len(obs_names) != token_cells:
-            if logger:
-                logger.warning(
-                    "obs_names size (%d) != tokenized cells (%d). Using index-based names after preprocessing.",
-                    len(obs_names),
-                    token_cells,
-                )
-            obs_names = [str(i) for i in range(token_cells)]
+        if token_cells > 0:
+            token_genes = int((~tokens_dict["pad"][0].bool()).sum().item())
+        else:
+            token_genes = 0
+        if logger:
+            logger.info(
+                "Preprocess result | file=%d | raw_cells=%d raw_genes=%d -> post_cells=%d post_genes=%d",
+                file_idx + 1,
+                raw_cells,
+                raw_genes,
+                token_cells,
+                token_genes,
+            )
 
         dataset = TomeDataset(tokens_dict)
         sampler = None

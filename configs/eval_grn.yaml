@@ -6,6 +6,9 @@ datasets:
   eval_grn: /data1021/xukaichen/data/GRN/networks/hSTRING.csv
 
 tokenizer:
+  # Gene column in adata.var to use for token mapping.
+  # null -> use adata.var_names
+  gene_key: null
   platform_key: assay
   species_key: null
   tissue_key: tissue

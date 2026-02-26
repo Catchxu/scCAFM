@@ -225,8 +225,23 @@ def sfm_trainer(
                 logger.info("[File %d/%d] Loading: %s", file_idx + 1, len(adata_files), file_path)
 
         adata = sc.read_h5ad(file_path)
+        raw_cells, raw_genes = int(adata.n_obs), int(adata.n_vars)
         with torch.no_grad():
             tokens_dict = tokenizer(adata, preprocess=True)
+        post_cells = int(tokens_dict["gene"].shape[0])
+        if post_cells > 0:
+            post_genes = int((~tokens_dict["pad"][0].bool()).sum().item())
+        else:
+            post_genes = 0
+        if rank0 and logger:
+            logger.info(
+                "Preprocess result | file=%d | raw_cells=%d raw_genes=%d -> post_cells=%d post_genes=%d",
+                file_idx + 1,
+                raw_cells,
+                raw_genes,
+                post_cells,
+                post_genes,
+            )
 
         dataset = TomeDataset(tokens_dict)
         sampler = None
