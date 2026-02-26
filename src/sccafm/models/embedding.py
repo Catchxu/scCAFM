@@ -15,7 +15,7 @@ class ExprMapping(nn.Module):
             3. Softmax over bins -> probability vector
             4. Weighted sum over bin embeddings -> final embedding
     """
-    def __init__(self, num_bins: int, embedding_dim: int, hidden_dim=128, dropout=0.1):
+    def __init__(self, num_bins: int, embedding_dim: int, hidden_dim=256, dropout=0.1):
         """
         Args:
             num_bins: total number of bins including 0 bin
