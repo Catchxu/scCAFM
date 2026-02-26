@@ -316,16 +316,15 @@ def sfm_trainer(
                 global_step += 1
 
                 if rank0:
-                    display_metrics = {"loss": f"{total_loss.item():.3f}"}
-                    for k, v in loss_dict.items():
-                        display_metrics[k] = f"{v:.3f}"
+                    metric_keys = [k for k in ("elbo", "prior", "dag") if k in loss_dict]
+                    display_metrics = {k: f"{loss_dict[k]:.3f}" for k in metric_keys}
                     if use_tqdm:
                         iterator.set_postfix(display_metrics)
                     if logger and log_interval > 0 and global_step % log_interval == 0:
-                        metric_text = " ".join([f"{k}={v:.6f}" for k, v in loss_dict.items()])
+                        metric_text = " ".join([f"{k}={loss_dict[k]:.6f}" for k in metric_keys])
                         logger.info(
-                            "step=%d file=%d epoch=%d loss=%.6f %s",
-                            global_step, file_idx + 1, epoch + 1, total_loss.item(), metric_text
+                            "step=%d file=%d epoch=%d %s",
+                            global_step, file_idx + 1, epoch + 1, metric_text
                         )
 
         # 4. Save Checkpoint after each file (rank 0 only)

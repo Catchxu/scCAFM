@@ -252,10 +252,13 @@ class VariationalDecoder(nn.Module):
 
 
 class ELBOLoss(nn.Module):
-    def __init__(self, hidden_dim=128, dropout=0.1):
+    def __init__(self, hidden_dim=128, dropout=0.1, recon_reduction: str = "sum"):
         super().__init__()
         self.encoder = VariationalEncoder(hidden_dim, dropout)
         self.decoder = VariationalDecoder(hidden_dim, dropout)
+        if recon_reduction not in {"mean", "sum"}:
+            raise ValueError(f"recon_reduction must be 'mean' or 'sum', got {recon_reduction}")
+        self.recon_reduction = recon_reduction
 
     def zinormal_loglik(self, x, mu, sigma, p_drop, eps=1e-8):
         """
@@ -273,6 +276,9 @@ class ELBOLoss(nn.Module):
             torch.log(1 - p_drop + eps) + normal.log_prob(x)
         )
 
+        if self.recon_reduction == "mean":
+            # Normalize reconstruction scale by selected TG count.
+            return log_prob.mean(dim=-1)
         return log_prob.sum(dim=-1)
 
     def kl_normal(self, mu, sigma):

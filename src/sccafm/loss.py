@@ -370,7 +370,8 @@ class SFMLoss(nn.Module):
         # 1. ELBO Loss
         self.elbo_criterion = ELBOLoss(
             hidden_dim=kwargs.get("hidden_dim", 128),
-            dropout=kwargs.get("dropout", 0.1)
+            dropout=kwargs.get("dropout", 0.1),
+            recon_reduction=kwargs.get("recon_reduction", "mean"),
         )
         
         # 2. Prior Loss Setup
