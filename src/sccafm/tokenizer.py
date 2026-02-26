@@ -403,7 +403,8 @@ class TomeTokenizer:
             'min_genes_per_cell': 200,
             'min_cells_per_gene': 3,
             'log_norm': True,
-            'n_top_genes': 3000
+            'n_top_genes': 2000,
+            'remove_mito_genes': True,
         }
         kwargs.pop("gene_key", None)
         self.prep_cfg.update(kwargs)
@@ -491,12 +492,14 @@ class TomeTokenizer:
         min_genes_per_cell = self.prep_cfg["min_genes_per_cell"]
         log_norm = self.prep_cfg["log_norm"]
         n_top_genes = self.prep_cfg["n_top_genes"]
+        remove_mito_genes = self.prep_cfg["remove_mito_genes"]
 
         # Remove mitochondrial genes before downstream filtering/normalization.
-        gene_names = self._resolve_gene_names(adata, gene_key=gene_key)
-        mito_mask = self._build_mito_mask(gene_names)
-        if mito_mask.any():
-            adata = adata[:, ~mito_mask].copy()
+        if remove_mito_genes:
+            gene_names = self._resolve_gene_names(adata, gene_key=gene_key)
+            mito_mask = self._build_mito_mask(gene_names)
+            if mito_mask.any():
+                adata = adata[:, ~mito_mask].copy()
 
         if min_cells_per_gene:
             sc.pp.filter_genes(adata, min_cells=min_cells_per_gene)
