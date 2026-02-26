@@ -1,6 +1,7 @@
 import os
 import gc
 import logging
+import signal
 from contextlib import nullcontext
 import pandas as pd
 import scanpy as sc
@@ -171,204 +172,206 @@ def sfm_trainer(
         weight_decay=weight_decay
     )
 
-    # 1. Resume Logic
-    if resume and os.path.exists(checkpoint_path):
-        if rank0:
-            print(f"Loading checkpoint from {checkpoint_path}...")
-            if logger:
-                logger.info("Loading checkpoint from %s", checkpoint_path)
-        ckpt = torch.load(checkpoint_path, map_location=device)
-        model_core.load_state_dict(ckpt['model_state_dict'])
-        if 'criterion_state_dict' in ckpt:
-            criterion_core.load_state_dict(ckpt['criterion_state_dict'])
-        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+    prev_handlers = {}
+    if logger is not None:
+        def _log_signal(signum, _frame):
+            logger.error("Received termination signal %s. Training will stop.", signum)
+            raise SystemExit(128 + signum)
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            prev_handlers[sig] = signal.getsignal(sig)
+            signal.signal(sig, _log_signal)
 
-        if 'dag_state' in ckpt and hasattr(criterion_core, 'dag_criterion') and ckpt['dag_state'] is not None:
-            alpha = ckpt['dag_state']['alpha']
-            rho = ckpt['dag_state']['rho']
-            criterion_core.dag_criterion.alpha = alpha.item() if isinstance(alpha, torch.Tensor) else float(alpha)
-            criterion_core.dag_criterion.rho = rho.item() if isinstance(rho, torch.Tensor) else float(rho)
-            criterion_core.dag_criterion.prev_h_val = ckpt['dag_state']['prev_h_val']
-
-        start_file_idx = ckpt['file_idx'] + 1
-        if rank0:
-            print(f"Resuming from File Index: {start_file_idx}")
-            if logger:
-                logger.info("Resuming from file index %d", start_file_idx)
-
-    # 2. Global T Setup
-    total_global_epochs = len(adata_files) * epochs_per_file
-    criterion_core.T = total_global_epochs
-
-    # Prefer train.species_key when provided, otherwise reuse tokenizer species key.
-    tokenizer_species_key = None
-    try:
-        tokenizer_species_key = tokenizer.cond_tokenizer.condition_keys[1]
-    except Exception:
-        tokenizer_species_key = None
-    species_obs_key = species_key if species_key is not None else tokenizer_species_key
-
-    # 3. Main File Loop
-    model.train()
-    criterion.train()
     global_step = 0
-    if rank0 and logger:
-        logger.info(
-            "Training start | files=%d | epochs_per_file=%d | batch_size=%d | device=%s | ddp=%s | amp=%s | amp_dtype=%s",
-            len(adata_files), epochs_per_file, batch_size, device, is_distributed, amp_enabled, amp_dtype
-        )
-    for file_idx in range(start_file_idx, len(adata_files)):
-        file_path = adata_files[file_idx]
-        if rank0:
-            print(f"\n[File {file_idx+1}/{len(adata_files)}] Loading: {file_path}")
-            if logger:
-                logger.info("[File %d/%d] Loading: %s", file_idx + 1, len(adata_files), file_path)
+    current_file_idx = start_file_idx - 1
+    current_epoch = -1
+    try:
+        # 1. Resume Logic
+        if resume and os.path.exists(checkpoint_path):
+            if rank0:
+                print(f"Loading checkpoint from {checkpoint_path}...")
+                if logger:
+                    logger.info("Loading checkpoint from %s", checkpoint_path)
+            ckpt = torch.load(checkpoint_path, map_location=device)
+            model_core.load_state_dict(ckpt['model_state_dict'])
+            if 'criterion_state_dict' in ckpt:
+                criterion_core.load_state_dict(ckpt['criterion_state_dict'])
+            optimizer.load_state_dict(ckpt['optimizer_state_dict'])
 
-        adata = sc.read_h5ad(file_path)
-        raw_cells, raw_genes = int(adata.n_obs), int(adata.n_vars)
-        with torch.no_grad():
-            tokens_dict = tokenizer(adata, preprocess=True)
-        post_cells = int(tokens_dict["gene"].shape[0])
-        if post_cells > 0:
-            post_genes = int((~tokens_dict["pad"][0].bool()).sum().item())
-        else:
-            post_genes = 0
+            if 'dag_state' in ckpt and hasattr(criterion_core, 'dag_criterion') and ckpt['dag_state'] is not None:
+                alpha = ckpt['dag_state']['alpha']
+                rho = ckpt['dag_state']['rho']
+                criterion_core.dag_criterion.alpha = alpha.item() if isinstance(alpha, torch.Tensor) else float(alpha)
+                criterion_core.dag_criterion.rho = rho.item() if isinstance(rho, torch.Tensor) else float(rho)
+                criterion_core.dag_criterion.prev_h_val = ckpt['dag_state']['prev_h_val']
+
+            start_file_idx = ckpt['file_idx'] + 1
+            if rank0:
+                print(f"Resuming from File Index: {start_file_idx}")
+                if logger:
+                    logger.info("Resuming from file index %d", start_file_idx)
+
+        # 2. Global T Setup
+        total_global_epochs = len(adata_files) * epochs_per_file
+        criterion_core.T = total_global_epochs
+
+        # Prefer train.species_key when provided, otherwise reuse tokenizer species key.
+        tokenizer_species_key = None
+        try:
+            tokenizer_species_key = tokenizer.cond_tokenizer.condition_keys[1]
+        except Exception:
+            tokenizer_species_key = None
+        species_obs_key = species_key if species_key is not None else tokenizer_species_key
+
+        # 3. Main File Loop
+        model.train()
+        criterion.train()
         if rank0 and logger:
             logger.info(
-                "Preprocess result | file=%d | raw_cells=%d raw_genes=%d -> post_cells=%d post_genes=%d",
-                file_idx + 1,
-                raw_cells,
-                raw_genes,
-                post_cells,
-                post_genes,
+                "Training start | files=%d | epochs_per_file=%d | batch_size=%d | device=%s | ddp=%s | amp=%s | amp_dtype=%s",
+                len(adata_files), epochs_per_file, batch_size, device, is_distributed, amp_enabled, amp_dtype
             )
+        for file_idx in range(start_file_idx, len(adata_files)):
+            current_file_idx = file_idx
+            file_path = adata_files[file_idx]
+            if rank0:
+                print(f"\n[File {file_idx+1}/{len(adata_files)}] Loading: {file_path}")
+                if logger:
+                    logger.info("[File %d/%d] Loading: %s", file_idx + 1, len(adata_files), file_path)
 
-        dataset = TomeDataset(tokens_dict)
-        sampler = None
-        if is_distributed:
-            sampler = DistributedSampler(
-                dataset,
-                num_replicas=world_size,
-                rank=rank,
-                shuffle=True,
-                drop_last=False
-            )
-        loader = DataLoader(
-            dataset,
-            batch_size=batch_size,
-            shuffle=sampler is None,
-            sampler=sampler,
-            collate_fn=tome_collate_fn,
-            num_workers=0,
-            pin_memory=True
-        )
-
-        species = _resolve_species_for_tf(adata, species_obs_key)
-
-        if species == "human":
-            model_core.update_tfs(human_tfs)
-        elif species == "mouse":
-            model_core.update_tfs(mouse_tfs)
-        else:
-            raise ValueError(
-                f"{species} isn't supported!"
-            )
-
-        for epoch in range(epochs_per_file):
-            # Calculate global epoch for cosine schedule
-            global_epoch_idx = (file_idx * epochs_per_file) + epoch
-            criterion_core.update_epoch(global_epoch_idx)
-            if sampler is not None:
-                sampler.set_epoch(global_epoch_idx)
-
+            adata = sc.read_h5ad(file_path)
+            raw_cells, raw_genes = int(adata.n_obs), int(adata.n_vars)
+            with torch.no_grad():
+                tokens_dict = tokenizer(adata, preprocess=True)
+            post_cells = int(tokens_dict["gene"].shape[0])
+            post_genes = int((~tokens_dict["pad"][0].bool()).sum().item()) if post_cells > 0 else 0
             if rank0 and logger:
                 logger.info(
-                    "[File %d/%d] Epoch %d/%d start",
+                    "Preprocess result | file=%d | raw_cells=%d raw_genes=%d -> post_cells=%d post_genes=%d",
                     file_idx + 1,
-                    len(adata_files),
-                    epoch + 1,
-                    epochs_per_file,
+                    raw_cells,
+                    raw_genes,
+                    post_cells,
+                    post_genes,
                 )
 
-            if rank0 and use_tqdm:
-                iterator = tqdm(
-                    loader,
-                    desc=f"Epoch {epoch+1}/{epochs_per_file}",
-                    mininterval=tqdm_mininterval,
+            dataset = TomeDataset(tokens_dict)
+            sampler = None
+            if is_distributed:
+                sampler = DistributedSampler(
+                    dataset,
+                    num_replicas=world_size,
+                    rank=rank,
+                    shuffle=True,
+                    drop_last=False
                 )
+            loader = DataLoader(
+                dataset,
+                batch_size=batch_size,
+                shuffle=sampler is None,
+                sampler=sampler,
+                collate_fn=tome_collate_fn,
+                num_workers=0,
+                pin_memory=True
+            )
+
+            species = _resolve_species_for_tf(adata, species_obs_key)
+            if species == "human":
+                model_core.update_tfs(human_tfs)
+            elif species == "mouse":
+                model_core.update_tfs(mouse_tfs)
             else:
-                iterator = loader
-            for batch in iterator:
-                batch = {k: v.to(device) for k, v in batch.items()}
+                raise ValueError(f"{species} isn't supported!")
 
-                # Model Forward
-                optimizer.zero_grad()
-                autocast_ctx = (
-                    torch.autocast(
-                        device_type="cuda",
-                        dtype=torch.bfloat16 if amp_dtype == "bf16" else torch.float16,
-                    )
-                    if amp_enabled
-                    else nullcontext()
-                )
-                with autocast_ctx:
-                    grn, b_tf, b_tg, u, v = model(
-                        batch, return_factors=True, compute_grn=False
-                    )
+            for epoch in range(epochs_per_file):
+                current_epoch = epoch
+                global_epoch_idx = (file_idx * epochs_per_file) + epoch
+                criterion_core.update_epoch(global_epoch_idx)
+                if sampler is not None:
+                    sampler.set_epoch(global_epoch_idx)
 
-                    # Loss Forward (true_grn_df is now internal to criterion)
-                    total_loss, loss_dict = criterion(
-                        tokens=batch, grn=grn, binary_tf=b_tf, binary_tg=b_tg, u=u, v=v
+                if rank0 and logger:
+                    logger.info(
+                        "[File %d/%d] Epoch %d/%d start",
+                        file_idx + 1,
+                        len(adata_files),
+                        epoch + 1,
+                        epochs_per_file,
                     )
 
-                if scaler.is_enabled():
-                    scaler.scale(total_loss).backward()
-                    scaler.step(optimizer)
-                    scaler.update()
-                else:
-                    total_loss.backward()
-                    optimizer.step()
-                global_step += 1
-
-                if rank0:
-                    metric_keys = [k for k in ("elbo", "prior", "dag") if k in loss_dict]
-                    display_metrics = {k: f"{loss_dict[k]:.3f}" for k in metric_keys}
-                    if use_tqdm:
-                        iterator.set_postfix(display_metrics)
-                    if logger and log_interval > 0 and global_step % log_interval == 0:
-                        metric_text = " ".join([f"{k}={loss_dict[k]:.6f}" for k in metric_keys])
-                        logger.info(
-                            "step=%d file=%d epoch=%d %s",
-                            global_step, file_idx + 1, epoch + 1, metric_text
+                iterator = tqdm(loader, desc=f"Epoch {epoch+1}/{epochs_per_file}", mininterval=tqdm_mininterval) if (rank0 and use_tqdm) else loader
+                for batch in iterator:
+                    batch = {k: v.to(device) for k, v in batch.items()}
+                    optimizer.zero_grad()
+                    autocast_ctx = (
+                        torch.autocast(
+                            device_type="cuda",
+                            dtype=torch.bfloat16 if amp_dtype == "bf16" else torch.float16,
                         )
+                        if amp_enabled
+                        else nullcontext()
+                    )
+                    with autocast_ctx:
+                        grn, b_tf, b_tg, u, v = model(batch, return_factors=True, compute_grn=False)
+                        total_loss, loss_dict = criterion(tokens=batch, grn=grn, binary_tf=b_tf, binary_tg=b_tg, u=u, v=v)
 
-        # 4. Save Checkpoint after each file (rank 0 only)
+                    if scaler.is_enabled():
+                        scaler.scale(total_loss).backward()
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        total_loss.backward()
+                        optimizer.step()
+                    global_step += 1
+
+                    if rank0:
+                        metric_keys = [k for k in ("elbo", "prior", "dag") if k in loss_dict]
+                        display_metrics = {k: f"{loss_dict[k]:.3f}" for k in metric_keys}
+                        if use_tqdm:
+                            iterator.set_postfix(display_metrics)
+                        if logger and log_interval > 0 and global_step % log_interval == 0:
+                            metric_text = " ".join([f"{k}={loss_dict[k]:.6f}" for k in metric_keys])
+                            logger.info(
+                                "step=%d file=%d epoch=%d %s",
+                                global_step, file_idx + 1, epoch + 1, metric_text
+                            )
+
+            if rank0:
+                torch.save({
+                    'file_idx': file_idx,
+                    'model_state_dict': model_core.state_dict(),
+                    'criterion_state_dict': criterion_core.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'dag_state': {
+                        'alpha': criterion_core.dag_criterion.alpha,
+                        'rho': criterion_core.dag_criterion.rho,
+                        'prev_h_val': criterion_core.dag_criterion.prev_h_val
+                    } if hasattr(criterion_core, 'dag_criterion') else None,
+                }, checkpoint_path)
+                if logger:
+                    logger.info("Checkpoint saved: %s", checkpoint_path)
+            if is_distributed:
+                dist.barrier()
+
+            del adata, tokens_dict, dataset, loader
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
         if rank0:
-            torch.save({
-                'file_idx': file_idx,
-                'model_state_dict': model_core.state_dict(),
-                'criterion_state_dict': criterion_core.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'dag_state': {
-                    'alpha': criterion_core.dag_criterion.alpha,
-                    'rho': criterion_core.dag_criterion.rho,
-                    'prev_h_val': criterion_core.dag_criterion.prev_h_val
-                } if hasattr(criterion_core, 'dag_criterion') else None,
-            }, checkpoint_path)
+            print("\nTraining workflow completed.")
             if logger:
-                logger.info("Checkpoint saved: %s", checkpoint_path)
-        if is_distributed:
-            dist.barrier()
-
-        # 5. Cleanup
-        del adata, tokens_dict, dataset, loader
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-    if rank0:
-        print("\nTraining workflow completed.")
+                logger.info("Training workflow completed.")
+    except BaseException:
         if logger:
-            logger.info("Training workflow completed.")
-    if initialized_here:
-        dist.destroy_process_group()
+            logger.exception(
+                "Training aborted | file_idx=%d epoch=%d global_step=%d",
+                current_file_idx + 1,
+                current_epoch + 1,
+                global_step,
+            )
+        raise
+    finally:
+        for sig, handler in prev_handlers.items():
+            signal.signal(sig, handler)
+        if initialized_here and dist.is_initialized():
+            dist.destroy_process_group()
