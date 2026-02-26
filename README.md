@@ -1,4 +1,4 @@
-# Building a causality-aware single-cell RNA-Seq foundation model via context-specific causal regulation modeling
+# Building a causality-aware single-cell RNA-seq foundation model via context-specific causal regulation modeling
 
 scCAFM is a causality-aware foundation model designed for large-scale single-cell transcriptomic analysis. Unlike existing single-cell foundation models that mainly learn associative gene relationships or operate only at the dataset‐ or cell-type level, scCAFM enables cell-specific causal inference at atlas scale while simultaneously learning transferable gene and cell embeddings enriched with causal semantics. By jointly modeling gene regulatory structure and context-dependent embeddings, scCAFM provides a powerful foundation for studying heterogeneous cellular states, developmental trajectories, disease progression, and perturbation responses.
 
