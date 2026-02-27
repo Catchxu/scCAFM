@@ -1,7 +1,7 @@
 # src/sccafm/builder.py
 from .models import SFM, ELBOLoss
 from .loss import SFMLoss, DAGLoss, PriorLoss
-from .tokenizer import TomeTokenizer, GeneTokenizer, ExprTokenizer, CondTokenizer, BatchTokenizer
+from .tokenizer import TomeTokenizer, GeneTokenizer, ExprTokenizer, CondTokenizer
 
 
 # ----------------- Registries -----------------
@@ -14,7 +14,6 @@ TOKENIZER_REGISTRY = {
     "Gene": GeneTokenizer,
     "Expr": ExprTokenizer,
     "Cond": CondTokenizer,
-    "Batch": BatchTokenizer,
 }
 
 LOSS_REGISTRY = {

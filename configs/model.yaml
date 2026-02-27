@@ -3,8 +3,10 @@ SFM:
   kwargs:
     embed_dim: 768
     expr_num_bins: 32
+    expr_tau: 0.5
     cond_max_item: 1024
-    batch_max_item: 256
+    batch_num_bins: 128
+    batch_tau: 0.07
     num_layers: 12
     num_heads: 12
     num_factors: 256

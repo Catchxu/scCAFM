@@ -9,11 +9,9 @@
 #   - For persistent logs, redirect to a file instead of /dev/null.
 
 # model training
-python3 scripts/run_pretrain.py --nproc-per-node 4
 setsid nohup python3 scripts/run_pretrain.py --nproc-per-node 4 > /dev/null 2>&1 < /dev/null &
 
 # evaluation
-python3 scripts/run_eval_grn.py --nproc-per-node 4
 setsid nohup python3 scripts/run_eval_grn.py --nproc-per-node 4 > /dev/null 2>&1 < /dev/null &
 
 # pipeline

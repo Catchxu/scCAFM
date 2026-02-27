@@ -277,98 +277,10 @@ class CondTokenizer:
         return torch.tensor(out, dtype=torch.long)
 
 
-class BatchTokenizer:
-    """
-    Batch tokenizer:
-    Maps batch metadata from adata.obs to stable token IDs.
-    Output: (C, 1) tensor.
-    """
-    def __init__(self, batch_dict=None, batch_key=None):
-        if batch_dict is None:
-            batch_dict = pd.DataFrame(
-                {"batch_value": ["<unk>"], "token_index": [0]}
-            )
-        if "<unk>" not in batch_dict["batch_value"].values:
-            raise ValueError("batch_dict must contain '<unk>' as token_index=0")
-        self.batch_dict = batch_dict
-        self.set_batch_key(batch_key=batch_key)
-
-    def set_batch_key(self, batch_key=None):
-        """
-        Set batch key(s) from adata.obs.
-
-        batch_key can be:
-        - str: single obs column
-        - list/tuple[str]: multiple columns, joined as one batch label
-        - None: all cells mapped to unknown batch token
-        """
-        if batch_key is None:
-            self.batch_keys = None
-        elif isinstance(batch_key, str):
-            self.batch_keys = [batch_key]
-        elif isinstance(batch_key, (list, tuple)):
-            self.batch_keys = list(batch_key)
-        else:
-            raise ValueError("batch_key must be None, str, list, or tuple.")
-
-    def set_batch_key_group(self, key_group):
-        """
-        Alias setter for consistency with CondTokenizer APIs.
-        """
-        self.set_batch_key(batch_key=key_group)
-
-    def _get_next_index(self):
-        return int(self.batch_dict["token_index"].max()) + 1
-
-    def _fetch_or_add(self, value):
-        value = str(value).strip().lower()
-        if value in {"", "nan", "none", "<na>", "na", "null"}:
-            return 0
-        hit = self.batch_dict[self.batch_dict["batch_value"] == value]
-        if len(hit) > 0:
-            return int(hit["token_index"].iloc[0])
-        new_idx = self._get_next_index()
-        new_row = pd.DataFrame({"batch_value": [value], "token_index": [new_idx]})
-        self.batch_dict = pd.concat([self.batch_dict, new_row], ignore_index=True)
-        return new_idx
-
-    def __call__(self, adata):
-        C = adata.n_obs
-
-        if self.batch_keys is None:
-            values = ["nan"] * C
-        else:
-            obs = adata.obs
-            cols = []
-            for key in self.batch_keys:
-                if key is None or key not in obs:
-                    if key is not None and key not in obs:
-                        # Ensure missing configured batch key exists in adata.obs as NaN.
-                        obs[key] = np.nan
-                    cols.append(["nan"] * C)
-                else:
-                    cols.append(obs[key].astype(str).tolist())
-            if len(cols) == 1:
-                values = cols[0]
-            else:
-                values = []
-                for items in zip(*cols):
-                    lowered = [str(x).strip().lower() for x in items]
-                    if any(v in {"", "nan", "none", "<na>", "na", "null"} for v in lowered):
-                        values.append("nan")
-                    else:
-                        values.append("|".join(lowered))
-
-        out = np.zeros((C, 1), dtype=np.int64)
-        for i in range(C):
-            out[i, 0] = self._fetch_or_add(values[i])
-        return torch.tensor(out, dtype=torch.long)
-
-
 class TomeTokenizer:
     """
     Unified Transcriptome Tokenizer:
-    Internally manages GeneTokenizer, ExprTokenizer, CondTokenizer, BatchTokenizer.
+    Internally manages GeneTokenizer, ExprTokenizer, and CondTokenizer.
     """
     def __init__(
         self,
@@ -376,12 +288,10 @@ class TomeTokenizer:
         max_length=2048,      # max length for gene/expression sequences
         gene_key=None,        # default adata.var key for gene ids/symbols
         cond_dict=None,       # optional pre-existing cond_dict DataFrame
-        batch_dict=None,      # optional pre-existing batch_dict DataFrame
         platform_key=None,
         species_key=None,
         tissue_key=None,
         disease_key=None,
-        batch_key=None,
         **kwargs
     ):
         self.gene_tokenizer = GeneTokenizer(token_dict, max_length=max_length)
@@ -392,10 +302,6 @@ class TomeTokenizer:
             species_key=species_key,
             tissue_key=tissue_key,
             disease_key=disease_key,
-        )
-        self.batch_tokenizer = BatchTokenizer(
-            batch_dict=batch_dict,
-            batch_key=batch_key,
         )
         self.gene_key = gene_key
 
@@ -433,18 +339,6 @@ class TomeTokenizer:
         Update condition keys from a list/tuple/dict.
         """
         self.cond_tokenizer.set_condition_key_group(key_group)
-
-    def set_batch_key(self, batch_key=None):
-        """
-        Update batch key(s) for a new dataset without rebuilding tokenizer.
-        """
-        self.batch_tokenizer.set_batch_key(batch_key=batch_key)
-
-    def set_batch_key_group(self, key_group):
-        """
-        Update batch key(s) from a list/tuple/string.
-        """
-        self.batch_tokenizer.set_batch_key_group(key_group)
 
     def set_gene_key(self, gene_key=None):
         """
@@ -563,7 +457,6 @@ class TomeTokenizer:
         species_key=None,
         tissue_key=None,
         disease_key=None,
-        batch_key=None,
         preprocess=True,
         return_obs_names: bool = False,
     ):
@@ -573,7 +466,6 @@ class TomeTokenizer:
             gene: (C, L-1)
             expr: (C, L-1)
             cond: (C, 4)
-            batch: (C, 1)
             pad: (C, L-1)
         """
         if gene_key is None:
@@ -602,12 +494,7 @@ class TomeTokenizer:
                 tissue_key=tissue_key,
                 disease_key=disease_key,
             )
-        if batch_key is not None:
-            self.set_batch_key(batch_key=batch_key)
-
         cond_tokens = self.cond_tokenizer(adata)
-
-        batch_tokens = self.batch_tokenizer(adata)
 
         self._check_pad_consistency(gene_pad, expr_pad)
 
@@ -615,7 +502,6 @@ class TomeTokenizer:
             "gene": gene_tokens,
             "expr": expr_tokens,
             "cond": cond_tokens,
-            "batch": batch_tokens,
             "pad": gene_pad
         }
         if return_obs_names:

@@ -13,7 +13,6 @@ tokenizer:
   species_key: null
   tissue_key: tissue
   disease_key: disease
-  batch_key: null
 
 eval:
   checkpoint_path: ./checkpoints/sfm_latest.pt

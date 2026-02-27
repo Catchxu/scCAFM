@@ -212,7 +212,6 @@ def evaluate_grn(
     cond_species_key: Optional[str] = None,
     tissue_key: Optional[str] = None,
     disease_key: Optional[str] = None,
-    batch_key: Optional[Union[str, List[str]]] = None,
     use_amp: bool = False,
     amp_dtype: str = "bf16",
     log_overwrite: bool = True,
@@ -270,7 +269,6 @@ def evaluate_grn(
         tissue_key=tissue_key,
         disease_key=disease_key,
     )
-    tokenizer.set_batch_key(batch_key=batch_key)
 
     src_to_tg, unique_pairs, mapped_pairs = _build_gt_lookup(eval_grn_df, tokenizer)
     if logger:
@@ -278,7 +276,7 @@ def evaluate_grn(
             (
                 "GRN eval start | files=%d | batch_size=%d | device=%s | ddp=%s | world_size=%d | metrics=%s | "
                 "gt_mapped_edges=%d | gt_unique_edges=%d | tokenizer_keys="
-                "gene=%s platform=%s cond_species=%s tissue=%s disease=%s batch=%s"
+                "gene=%s platform=%s cond_species=%s tissue=%s disease=%s"
             ),
             len(adata_files),
             batch_size,
@@ -293,7 +291,6 @@ def evaluate_grn(
             cond_species_key,
             tissue_key,
             disease_key,
-            batch_key,
         )
 
     records = []

@@ -15,16 +15,20 @@ class ExprMapping(nn.Module):
             3. Softmax over bins -> probability vector
             4. Weighted sum over bin embeddings -> final embedding
     """
-    def __init__(self, num_bins: int, embedding_dim: int, hidden_dim=256, dropout=0.1):
+    def __init__(self, num_bins: int, embedding_dim: int, hidden_dim=256, dropout=0.1, tau: float = 1.0):
         """
         Args:
             num_bins: total number of bins including 0 bin
             embedding_dim: D, embedding dimension
             hidden_dim: hidden size of the MLP encoder
+            tau: temperature for distance-based soft assignment
         """
         super().__init__()
         self.num_bins = num_bins
         self.embedding_dim = embedding_dim
+        if tau <= 0:
+            raise ValueError(f"tau must be positive, got {tau}")
+        self.tau = float(tau)
 
         self.bin_embeddings = nn.Parameter(
             torch.randn(num_bins, embedding_dim)
@@ -57,8 +61,9 @@ class ExprMapping(nn.Module):
             encoded = self.encoder(nonzero_values)
 
             bin_embs = self.bin_embeddings[1:]
-            sim = torch.matmul(encoded, bin_embs.t())
-            probs = F.softmax(sim, dim=-1)
+            dist2 = (encoded.unsqueeze(1) - bin_embs.unsqueeze(0)).pow(2).sum(dim=-1)
+            logits = -dist2 / self.tau
+            probs = F.softmax(logits, dim=-1)
 
             emb = torch.matmul(probs, bin_embs)
             out = torch.zeros(C, L, self.embedding_dim, device=device, dtype=emb.dtype)
@@ -78,6 +83,54 @@ class ExprMapping(nn.Module):
         return out
 
 
+class BatchMapping(nn.Module):
+    """
+    Estimate per-cell batch embeddings directly from expression tokens (C, L).
+
+    Unlike ExprMapping, there is no special zero case. We first encode each expression
+    value to D dimensions, pool over the sequence to get a single (C, D) representation,
+    then compute soft assignment over learned batch bins.
+    """
+    def __init__(self, num_bins: int, embedding_dim: int, hidden_dim=128, dropout=0.1, tau: float = 1.0):
+        super().__init__()
+        self.num_bins = num_bins
+        self.embedding_dim = embedding_dim
+        if tau <= 0:
+            raise ValueError(f"tau must be positive, got {tau}")
+        self.tau = float(tau)
+
+        self.bin_embeddings = nn.Parameter(torch.randn(num_bins, embedding_dim))
+        self.token_encoder = nn.Sequential(
+            nn.Linear(1, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, embedding_dim),
+        )
+
+    def forward(self, expr_tokens: torch.Tensor, pad_mask: torch.Tensor = None) -> torch.Tensor:
+        if expr_tokens.ndim != 2:
+            raise ValueError(f"expr_tokens must be (C, L), got {tuple(expr_tokens.shape)}")
+        if pad_mask is not None:
+            if pad_mask.shape != expr_tokens.shape:
+                raise ValueError(
+                    f"pad_mask must match expr_tokens shape {tuple(expr_tokens.shape)}, got {tuple(pad_mask.shape)}"
+                )
+            if pad_mask.dtype != torch.bool:
+                pad_mask = pad_mask.bool()
+
+        x = expr_tokens.float().unsqueeze(-1)     # (C, L, 1)
+        h = self.token_encoder(x)                 # (C, L, D)
+        if pad_mask is None:
+            encoded = h.mean(dim=1)               # (C, D)
+        else:
+            valid = (~pad_mask).unsqueeze(-1).to(h.dtype)
+            encoded = (h * valid).sum(dim=1) / valid.sum(dim=1).clamp_min(1.0)
+        dist2 = (encoded.unsqueeze(1) - self.bin_embeddings.unsqueeze(0)).pow(2).sum(dim=-1)
+        logits = -dist2 / self.tau
+        probs = F.softmax(logits, dim=-1)
+        return torch.matmul(probs, self.bin_embeddings)
+
+
 class TomoEmbedding(nn.Module):
     """
     Convert tokens dict to embeddings.
@@ -88,7 +141,6 @@ class TomoEmbedding(nn.Module):
         "gene": gene_tokens,    # (C, L-1)
         "expr": expr_tokens,    # (C, L-1)
         "cond": cond_tokens,    # (C, 4)
-        "batch": batch_tokens,  # (C, 1)
         "pad": gene_pad         # (C, L-1)
     }
     ```
@@ -102,7 +154,7 @@ class TomoEmbedding(nn.Module):
         D=256,
         expr_num_bins=32, 
         cond_max_item=1024, 
-        batch_max_item=256,
+        batch_num_bins=32,
         **kwargs
     ):
         super().__init__()
@@ -116,26 +168,32 @@ class TomoEmbedding(nn.Module):
         self.gene_embedding = nn.Embedding(num_gene_tokens, D, padding_idx=pad_idx)
 
         # ---- Expr embedding via ExprMapping ----
-        self.expr_mapping = ExprMapping(num_bins=expr_num_bins, embedding_dim=D)
+        self.expr_mapping = ExprMapping(
+            num_bins=expr_num_bins,
+            embedding_dim=D,
+            hidden_dim=kwargs.get("expr_hidden_dim", 256),
+            dropout=kwargs.get("expr_dropout", 0.1),
+            tau=kwargs.get("expr_tau", 1.0),
+        )
 
         # ---- Cond embedding ----
         self.cond_embedding = nn.Embedding(cond_max_item, D//4)
 
-        # ---- Batch embedding ----
-        self.batch_embedding = nn.Embedding(batch_max_item, D)
+        # ---- Batch embedding via BatchMapping ----
+        self.batch_mapping = BatchMapping(
+            num_bins=batch_num_bins,
+            embedding_dim=D,
+            hidden_dim=kwargs.get("batch_hidden_dim", 128),
+            dropout=kwargs.get("batch_dropout", 0.1),
+            tau=kwargs.get("batch_tau", 1.0),
+        )
     
     def _safety_check(self, tokens):
         cond_max_item = self.cond_embedding.num_embeddings-1
-        batch_max_item = self.batch_embedding.num_embeddings-1
 
         if tokens["cond"].max() > cond_max_item:
             raise ValueError(
                 f"Found cond token index exceeding cond_max_item={cond_max_item}"
-            )
-
-        if tokens["batch"].max() > batch_max_item:
-            raise ValueError(
-                f"Found batch token index exceeding batch_max_item={batch_max_item}"
             )
 
     def forward(self, tokens: dict):
@@ -152,7 +210,7 @@ class TomoEmbedding(nn.Module):
         cond_emb = self.cond_embedding(tokens["cond"]) 
         cond_emb = cond_emb.view(C, 1, self.D)
 
-        batch_emb = self.batch_embedding(tokens["batch"].squeeze(-1))
+        batch_emb = self.batch_mapping(tokens["expr"], pad_mask=tokens["pad"])
         batch_emb = batch_emb.unsqueeze(1)
 
         cb_emb = torch.cat([cond_emb, batch_emb], dim=-1)  # (C, 1, 2D)

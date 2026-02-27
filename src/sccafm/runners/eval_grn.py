@@ -104,7 +104,6 @@ def _normalize_tokenizer_eval_cfg(tokenizer_cfg):
     tokenizer_cfg["species_key"] = tokenizer_cfg.get("species_key", None)
     tokenizer_cfg["tissue_key"] = tokenizer_cfg.get("tissue_key", None)
     tokenizer_cfg["disease_key"] = tokenizer_cfg.get("disease_key", None)
-    tokenizer_cfg["batch_key"] = tokenizer_cfg.get("batch_key", None)
 
 
 def _load_checkpoint(model, checkpoint_path: str, map_location: str = "cpu"):
@@ -231,7 +230,6 @@ def main():
         cond_species_key=eval_tokenizer_cfg["species_key"],
         tissue_key=eval_tokenizer_cfg["tissue_key"],
         disease_key=eval_tokenizer_cfg["disease_key"],
-        batch_key=eval_tokenizer_cfg["batch_key"],
         use_amp=eval_task_cfg["use_amp"],
         amp_dtype=eval_task_cfg["amp_dtype"],
         log_overwrite=eval_task_cfg["log_overwrite"],
