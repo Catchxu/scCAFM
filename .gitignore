@@ -178,3 +178,4 @@ cython_debug/
 checkpoints/
 logs/
 results/
+resources/gene_descriptions.csv

@@ -3,7 +3,7 @@
 #   Keep frequently used training/evaluation commands in one place.
 # Usage:
 #   Run from project root: e.g., cd /data1021/xukaichen/scCAFM
-#   Use foreground commands for debugging and nohup commands for long jobs.
+#   Use foreground commands for test and nohup commands for long jobs.
 # Notes:
 #   - Redirected nohup command below suppresses terminal output.
 #   - For persistent logs, redirect to a file instead of /dev/null.
