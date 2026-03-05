@@ -1,20 +1,56 @@
 import argparse
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import logging
+import multiprocessing
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import pandas as pd
-import requests
+import torch
+from modelscope import AutoModelForCausalLM, AutoTokenizer
 
 
+DEFAULT_MODEL_NAME = "/data1021/xukaichen/data/LLM/Llama-3.1-8B-Instruct"
 DEFAULT_GPU_INDICES = [0, 1, 2, 3]
+SYSTEM_PROMPT = "You are a biomedical expert."
+
+
+def _setup_logger(
+    logger_name: str,
+    log_dir: str,
+    log_name: str,
+    log_overwrite: bool = True,
+):
+    os.makedirs(log_dir, exist_ok=True)
+    log_path = os.path.join(log_dir, log_name)
+
+    logger = logging.getLogger(logger_name)
+    logger.setLevel(logging.INFO)
+    logger.handlers.clear()
+    logger.propagate = False
+
+    formatter = logging.Formatter(
+        fmt="%(asctime)s | %(levelname)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    fh = logging.FileHandler(log_path, mode="w" if log_overwrite else "a")
+    fh.setFormatter(formatter)
+    sh = logging.StreamHandler()
+    sh.setFormatter(formatter)
+    logger.addHandler(fh)
+    logger.addHandler(sh)
+    return logger
+
+
+def _make_worker_log_name(base_name: str, gpu_index: int) -> str:
+    p = Path(base_name)
+    if p.suffix:
+        return f"{p.stem}.gpu{gpu_index}{p.suffix}"
+    return f"{base_name}.gpu{gpu_index}.log"
 
 
 def build_gene_prompt(gene_symbol: str) -> str:
     prompt = f"""
-        [ROLE]
-        You are a biomedical expert.
-
         [OBJECTIVE]
         Provide structured, factual, and concise gene descriptions.
 
@@ -65,25 +101,33 @@ def build_gene_prompt(gene_symbol: str) -> str:
     return prompt
 
 
-def ask_ollama(prompt: str, server_name: str, gpu_index: int, model_name: str, timeout: int = 180) -> str:
-    payload = {
-        "model": model_name,
-        "prompt": prompt,
-        "stream": False,
-        "think": False,
-        "options": {"seed": 42},
-    }
-    port = f"{server_name}{gpu_index}"
-    response = requests.post(
-        f"http://localhost:{port}/api/generate",
-        json=payload,
-        timeout=timeout,
+def ask_model(
+    prompt: str,
+    model: AutoModelForCausalLM,
+    tokenizer: AutoTokenizer,
+    max_new_tokens: int,
+    target_device: torch.device,
+) -> str:
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": prompt},
+    ]
+    text = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
     )
-    response.raise_for_status()
-    data = response.json()
-    if "response" not in data:
-        raise ValueError(f"Missing 'response' field in Ollama payload from port {port}")
-    return data["response"].strip()
+    model_inputs = tokenizer([text], return_tensors="pt").to(target_device)
+    with torch.no_grad():
+        generated_ids = model.generate(
+            **model_inputs,
+            max_new_tokens=max_new_tokens,
+        )
+    generated_ids = [
+        output_ids[len(input_ids):] for input_ids, output_ids in zip(model_inputs.input_ids, generated_ids)
+    ]
+    response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+    return response.strip()
 
 
 def load_gene_symbols(token_dict_path: Path) -> list[str]:
@@ -91,69 +135,9 @@ def load_gene_symbols(token_dict_path: Path) -> list[str]:
     if "gene_symbol" not in df.columns:
         raise ValueError(f"`gene_symbol` column not found in {token_dict_path}")
 
-    symbols = (
-        df["gene_symbol"]
-        .dropna()
-        .astype(str)
-        .str.strip()
-    )
+    symbols = df["gene_symbol"].dropna().astype(str).str.strip()
     symbols = [s for s in symbols.tolist() if s]
-    # Preserve order while removing duplicates.
     return list(dict.fromkeys(symbols))
-
-
-def load_completed_symbols(output_path: Path) -> set[str]:
-    if not output_path.exists():
-        return set()
-    df = pd.read_csv(output_path)
-    if "gene_symbol" not in df.columns:
-        return set()
-    return set(df["gene_symbol"].dropna().astype(str).tolist())
-
-
-def shard_items(items: list[str], num_shards: int) -> list[list[str]]:
-    if num_shards <= 0:
-        raise ValueError("num_shards must be positive")
-    shards = [[] for _ in range(num_shards)]
-    for i, item in enumerate(items):
-        shards[i % num_shards].append(item)
-    return shards
-
-
-def fetch_gene_descriptions_for_gpu(
-    gene_symbols: list[str],
-    gpu_index: int,
-    server_name: str,
-    model_name: str,
-    timeout: int,
-    output_path: Path,
-    save_lock: threading.Lock,
-) -> list[dict]:
-    rows = []
-    for gene_symbol in gene_symbols:
-        row = {
-            "gene_symbol": gene_symbol,
-            "gpu_index": gpu_index,
-            "status": "ok",
-            "description": "",
-            "error": "",
-        }
-        try:
-            prompt = build_gene_prompt(gene_symbol)
-            row["description"] = ask_ollama(
-                prompt=prompt,
-                server_name=server_name,
-                gpu_index=gpu_index,
-                model_name=model_name,
-                timeout=timeout,
-            )
-        except Exception as exc:
-            row["status"] = "error"
-            row["error"] = str(exc)
-        rows.append(row)
-        with save_lock:
-            save_results(output_path, [row])
-    return rows
 
 
 def save_results(output_path: Path, rows: list[dict]) -> None:
@@ -166,6 +150,81 @@ def save_results(output_path: Path, rows: list[dict]) -> None:
     else:
         merged = new_df
     merged.to_csv(output_path, index=False)
+
+
+def shard_items(items: list[str], num_shards: int) -> list[list[str]]:
+    if num_shards <= 0:
+        raise ValueError("num_shards must be positive")
+    shards = [[] for _ in range(num_shards)]
+    for i, item in enumerate(items):
+        shards[i % num_shards].append(item)
+    return shards
+
+
+def process_gene_shard(
+    gene_symbols: list[str],
+    gpu_index: int,
+    model_name: str,
+    max_new_tokens: int,
+    log_interval: int,
+    log_dir: str,
+    log_name: str,
+    log_overwrite: bool,
+) -> list[dict]:
+    worker_logger = _setup_logger(
+        logger_name=f"sccafm.gene_text.gpu{gpu_index}",
+        log_dir=log_dir,
+        log_name=_make_worker_log_name(log_name, gpu_index),
+        log_overwrite=log_overwrite,
+    )
+
+    use_cuda = gpu_index >= 0 and torch.cuda.is_available()
+    if use_cuda:
+        torch.cuda.set_device(gpu_index)
+        target_device = torch.device(f"cuda:{gpu_index}")
+        device_map = {"": f"cuda:{gpu_index}"}
+        dtype = torch.bfloat16
+    else:
+        target_device = torch.device("cpu")
+        device_map = "cpu"
+        dtype = torch.float32
+
+    worker_logger.info("GPU %s starting; assigned genes=%s", gpu_index, len(gene_symbols))
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        torch_dtype=dtype,
+        device_map=device_map,
+    )
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+    rows = []
+    total = len(gene_symbols)
+    for i, gene_symbol in enumerate(gene_symbols, start=1):
+        row = {
+            "gene_symbol": gene_symbol,
+            "gpu_index": gpu_index,
+            "status": "ok",
+            "description": "",
+            "error": "",
+        }
+        try:
+            prompt = build_gene_prompt(gene_symbol)
+            row["description"] = ask_model(
+                prompt=prompt,
+                model=model,
+                tokenizer=tokenizer,
+                max_new_tokens=max_new_tokens,
+                target_device=target_device,
+            )
+        except Exception as exc:
+            row["status"] = "error"
+            row["error"] = str(exc)
+        rows.append(row)
+
+        if log_interval > 0 and (i % log_interval == 0 or i == total):
+            worker_logger.info("GPU %s progress: %s/%s genes processed", gpu_index, i, total)
+
+    return rows
 
 
 def parse_args():
@@ -183,40 +242,46 @@ def parse_args():
         help="Path to output CSV",
     )
     parser.add_argument(
-        "--server-name",
-        type=str,
-        default="102",
-        help="Port prefix; final port is <server-name><gpu-index>, e.g. 1020",
-    )
-    parser.add_argument(
         "--model-name",
         type=str,
-        default="gemma3:27b",
-        help="Ollama model name",
+        default=DEFAULT_MODEL_NAME,
+        help="Local model path or model id",
+    )
+    parser.add_argument(
+        "--max-new-tokens",
+        type=int,
+        default=512,
+        help="Maximum number of newly generated tokens",
     )
     parser.add_argument(
         "--gpu-indices",
         type=int,
         nargs="+",
         default=DEFAULT_GPU_INDICES,
-        help="GPU indices / Ollama port suffixes to query in parallel",
+        help="One process per GPU index (example: --gpu-indices 0 1 2 3). Default: 0 1 2 3.",
     )
     parser.add_argument(
-        "--timeout",
+        "--log-dir",
+        type=str,
+        default="logs",
+        help="Directory for logs",
+    )
+    parser.add_argument(
+        "--log-name",
+        type=str,
+        default="gene_text.log",
+        help="Main log filename",
+    )
+    parser.add_argument(
+        "--log-interval",
         type=int,
-        default=180,
-        help="Per-request timeout in seconds",
+        default=20,
+        help="Log progress every N genes",
     )
     parser.add_argument(
-        "--limit",
-        type=int,
-        default=None,
-        help="Optional max number of genes to process",
-    )
-    parser.add_argument(
-        "--overwrite",
+        "--log-overwrite",
         action="store_true",
-        help="Ignore existing output file and regenerate everything",
+        help="Overwrite logs instead of appending",
     )
     return parser.parse_args()
 
@@ -226,54 +291,73 @@ def main():
     token_dict_path = Path(args.token_dict).expanduser().resolve()
     output_path = Path(args.output).expanduser().resolve()
 
+    logger = _setup_logger(
+        logger_name="sccafm.gene_text",
+        log_dir=args.log_dir,
+        log_name=args.log_name,
+        log_overwrite=args.log_overwrite,
+    )
+
     gene_symbols = load_gene_symbols(token_dict_path)
-    if args.limit is not None:
-        gene_symbols = gene_symbols[: max(0, args.limit)]
+    logger.info("Loaded %s unique gene symbols from %s", len(gene_symbols), token_dict_path)
+    logger.info("Regenerating descriptions for all genes.")
 
-    completed = set() if args.overwrite else load_completed_symbols(output_path)
-    pending_symbols = [g for g in gene_symbols if g not in completed]
-
-    print(f"Loaded {len(gene_symbols)} gene symbols from {token_dict_path}")
-    print(f"Existing completed symbols: {len(completed)}")
-    print(f"Pending symbols: {len(pending_symbols)}")
-
-    if not pending_symbols:
-        print("No pending gene symbols. Nothing to do.")
+    if not gene_symbols:
+        logger.info("No gene symbols found. Nothing to do.")
         return
 
-    gpu_indices = list(dict.fromkeys(args.gpu_indices))
-    shards = shard_items(pending_symbols, len(gpu_indices))
-    save_lock = threading.Lock()
+    if output_path.exists():
+        output_path.unlink()
+        logger.info("Removed existing output: %s", output_path)
 
-    all_rows = []
-    with ThreadPoolExecutor(max_workers=len(gpu_indices)) as executor:
+    gpu_indices = list(dict.fromkeys(args.gpu_indices))
+    shards = shard_items(gene_symbols, len(gpu_indices))
+    logger.info("Using GPUs: %s", gpu_indices)
+
+    rows = []
+    processed_total = 0
+    with ProcessPoolExecutor(
+        max_workers=len(gpu_indices),
+        mp_context=multiprocessing.get_context("spawn"),
+    ) as executor:
         future_to_gpu = {}
         for gpu_index, shard in zip(gpu_indices, shards):
             if not shard:
                 continue
             future = executor.submit(
-                fetch_gene_descriptions_for_gpu,
+                process_gene_shard,
                 gene_symbols=shard,
                 gpu_index=gpu_index,
-                server_name=args.server_name,
                 model_name=args.model_name,
-                timeout=args.timeout,
-                output_path=output_path,
-                save_lock=save_lock,
+                max_new_tokens=args.max_new_tokens,
+                log_interval=args.log_interval,
+                log_dir=args.log_dir,
+                log_name=args.log_name,
+                log_overwrite=args.log_overwrite,
             )
             future_to_gpu[future] = gpu_index
 
         for future in as_completed(future_to_gpu):
             gpu_index = future_to_gpu[future]
-            rows = future.result()
-            all_rows.extend(rows)
-            ok_count = sum(1 for row in rows if row["status"] == "ok")
-            err_count = len(rows) - ok_count
-            print(f"GPU {gpu_index}: completed {len(rows)} genes (ok={ok_count}, error={err_count})")
+            shard_rows = future.result()
+            rows.extend(shard_rows)
+            save_results(output_path, shard_rows)
+            processed_total += len(shard_rows)
+            ok_count = sum(1 for row in shard_rows if row["status"] == "ok")
+            err_count = len(shard_rows) - ok_count
+            logger.info(
+                "GPU %s completed %s genes (ok=%s, error=%s). Global progress: %s/%s",
+                gpu_index,
+                len(shard_rows),
+                ok_count,
+                err_count,
+                processed_total,
+                len(gene_symbols),
+            )
 
-    total_ok = sum(1 for row in all_rows if row["status"] == "ok")
-    total_err = len(all_rows) - total_ok
-    print(f"Saved {len(all_rows)} rows to {output_path} (ok={total_ok}, error={total_err})")
+    total_ok = sum(1 for row in rows if row["status"] == "ok")
+    total_err = len(rows) - total_ok
+    logger.info("Saved %s rows to %s (ok=%s, error=%s)", len(rows), output_path, total_ok, total_err)
 
 
 if __name__ == "__main__":

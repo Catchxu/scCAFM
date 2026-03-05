@@ -8,6 +8,9 @@
 #   - Redirected nohup command below suppresses terminal output.
 #   - For persistent logs, redirect to a file instead of /dev/null.
 
+# gene descriptions generation
+setsid nohup python3 scripts/run_gene_text.py --log-overwrite > /dev/null 2>&1 < /dev/null & 
+
 # model training
 setsid nohup python3 scripts/run_pretrain.py --nproc-per-node 4 > /dev/null 2>&1 < /dev/null &
 
