@@ -42,13 +42,6 @@ def _setup_logger(
     return logger
 
 
-def _make_worker_log_name(base_name: str, gpu_index: int) -> str:
-    p = Path(base_name)
-    if p.suffix:
-        return f"{p.stem}.gpu{gpu_index}{p.suffix}"
-    return f"{base_name}.gpu{gpu_index}.log"
-
-
 def build_gene_prompt(gene_symbol: str) -> str:
     prompt = f"""
         [OBJECTIVE]
@@ -174,7 +167,7 @@ def process_gene_shard(
     worker_logger = _setup_logger(
         logger_name=f"sccafm.gene_text.gpu{gpu_index}",
         log_dir=log_dir,
-        log_name=_make_worker_log_name(log_name, gpu_index),
+        log_name=log_name,
         log_overwrite=log_overwrite,
     )
 
