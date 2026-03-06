@@ -215,9 +215,9 @@ class PriorLoss(nn.Module):
                 raise ValueError("Either `grn` or (`u`, `v`) must be provided for PriorLoss.")
             grn_full = expand_grn(grn, binary_tf, binary_tg)
 
-        # Parameter-free abs-based existence logit.
-        # |x| -> 0 gives very negative logit; larger |x| increases edge likelihood.
-        edge_logit = torch.log(grn_full.abs() + 1e-8)
+        # Parameter-free existence logit.
+        # x -> 0 gives very negative logit; larger x increases edge likelihood.
+        edge_logit = torch.log(grn_full + 1e-8)
         
         # 4. Construct 2D mask (Source x Target):
         # source gene must be an active TF in selected space.

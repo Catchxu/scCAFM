@@ -370,7 +370,6 @@ def evaluate_grn(
                     grn, b_tf, b_tg = model(batch_dev, return_factors=False, compute_grn=True)
 
                 grn = grn.detach().float().cpu()
-                grn = grn.abs()
                 b_tf = b_tf.detach().cpu().bool()
                 b_tg = b_tg.detach().cpu().bool()
                 genes = batch_cpu["gene"].cpu().long()
