@@ -6,7 +6,7 @@ from typing import Optional
 
 from .tokenizer import TomeTokenizer
 from .models.vgae import ELBOLoss
-from .models.utils import FactorState, expand_grn, expand_u
+from .models.utils import FactorState, expand_u
 
 
 class PriorLoss(nn.Module):
@@ -188,7 +188,6 @@ class PriorLoss(nn.Module):
         self,
         tokens,
         factors: FactorState = None,
-        grn=None,
         true_grn_df: Optional[pd.DataFrame] = None,
     ):
         if factors is None:
@@ -212,12 +211,7 @@ class PriorLoss(nn.Module):
         target = self._build_gt_matrix_from_pairs(gene_tokens, filt_src_ids, filt_tgt_ids)
         
         # 3. Compute predicted edge scores in selected-space dimensions (B, S, S)
-        if u is not None and v is not None:
-            grn_full = self._factorized_logits(u, v, model_tf_mask)
-        else:
-            if grn is None:
-                raise ValueError("Either `grn` or (`u`, `v`) must be provided for PriorLoss.")
-            grn_full = expand_grn(grn, binary_tf, binary_tg)
+        grn_full = self._factorized_logits(u, v, model_tf_mask)
 
         # Parameter-free existence logit.
         # x -> 0 gives very negative logit; larger x increases edge likelihood.
@@ -435,7 +429,6 @@ class SFMLoss(nn.Module):
         loss_elbo = self.elbo_criterion(
             tokens,
             factors=factors,
-            grn=None,
         )
         total_loss += loss_elbo
         loss_dict["elbo"] = loss_elbo.item()
@@ -447,7 +440,6 @@ class SFMLoss(nn.Module):
             loss_p = self.prior_criterion(
                 tokens,
                 factors=factors,
-                grn=None,
                 true_grn_df=self.true_grn_df,
             )
             total_loss += w_p * loss_p

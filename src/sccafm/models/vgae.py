@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .utils import FactorState, reparameterize, expand_grn, expand_u
+from .utils import FactorState, reparameterize, expand_u
 
 
 class VariationalEncoder(nn.Module):
@@ -71,7 +71,7 @@ class VariationalEncoder(nn.Module):
         S = int(counts[0].item())
         return x[mask].view(C, S, E)
     
-    def forward(self, x, grn, binary_tf, binary_tg, u=None, v=None):
+    def forward(self, x, binary_tf, binary_tg, u, v):
         x = x.unsqueeze(-1)
         x = self.expr_proj(x)
         C, _, E = x.shape
@@ -83,24 +83,15 @@ class VariationalEncoder(nn.Module):
 
         self._check_shape(expr_tf, expr_tg)
 
-        if u is not None and v is not None:
-            if u.shape[:2] != expr_tf.shape[:2]:
-                raise ValueError(
-                    f"u shape {tuple(u.shape)} incompatible with selected TF embeddings {tuple(expr_tf.shape)}"
-                )
-            if v.shape[0] != C or v.shape[1] != expr_tg.shape[1]:
-                raise ValueError(
-                    f"v shape {tuple(v.shape)} incompatible with selected TG embeddings {tuple(expr_tg.shape)}"
-                )
-            pred_tg = self._predict_tg_from_factors(expr_tf, u, v)
-        else:
-            if grn is None:
-                raise ValueError("Either `grn` or (`u`, `v`) must be provided.")
-            if grn.dim() != 3:
-                raise ValueError(f"grn must be (C, TF, TG), got {grn.shape}!")
-            # Predict TG embeddings from TF embeddings via the GRN
-            # Sum over TF dimension: (C, TF, TG) x (C, TF, E) -> (C, TG, E)
-            pred_tg = torch.einsum("cfg,cfe->cge", grn, expr_tf)
+        if u.shape[:2] != expr_tf.shape[:2]:
+            raise ValueError(
+                f"u shape {tuple(u.shape)} incompatible with selected TF embeddings {tuple(expr_tf.shape)}"
+            )
+        if v.shape[0] != C or v.shape[1] != expr_tg.shape[1]:
+            raise ValueError(
+                f"v shape {tuple(v.shape)} incompatible with selected TG embeddings {tuple(expr_tg.shape)}"
+            )
+        pred_tg = self._predict_tg_from_factors(expr_tf, u, v)
 
         # Encode the residual TG signal into a latent distribution
         out = self.z_proj(expr_tg - pred_tg)
@@ -124,17 +115,6 @@ class ExprModeling(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, 2)
         )
-
-    def _check_shape(self, z, grn_full):
-        if z.dim() != 2:
-            raise ValueError(f"latent z must be (C, TG), got {z.shape}!")
-        
-        C, TG = z.shape
-
-        if grn_full.shape != (C, TG, TG):
-            raise ValueError(
-                f"grn_full must be a expanded GRN (C, TG, TG), got {grn_full.shape}!"
-            )
 
     def _apply_a_with_factors(self, h: torch.Tensor, u_full: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         # A @ h where A ~= U_full @ V^T.
@@ -176,27 +156,10 @@ class ExprModeling(nn.Module):
             h = z_proj + self.fp_damping * ah
         return h
 
-    def _solve_dense_fallback(self, z_proj: torch.Tensor, grn, binary_tf, binary_tg):
-        grn_full = expand_grn(grn, binary_tf, binary_tg)
-        self._check_shape(z_proj.squeeze(-1), grn_full)  # only checks C,TG dimensions
-
-        C, TG, _ = grn_full.shape
-        I = torch.eye(TG, device=grn_full.device, dtype=grn_full.dtype).expand(C, TG, TG)
-        M = I - grn_full
-
-        # NOTE: batched LU solve may be unsupported for lower precision dtypes.
-        solve_dtype = z_proj.dtype
-        out = torch.linalg.solve(M.float(), z_proj.float()).to(solve_dtype)
-        return out
-
-    def forward(self, z: torch.Tensor, grn, binary_tf, binary_tg, u=None, v=None):
+    def forward(self, z: torch.Tensor, binary_tf, binary_tg, u, v):
         z = z.unsqueeze(-1)
         z = self.z_proj(z)  # (C, S, H)
-
-        if u is not None and v is not None:
-            out = self._solve_with_factors(z, u, v, binary_tf, binary_tg)
-        else:
-            out = self._solve_dense_fallback(z, grn, binary_tf, binary_tg)
+        out = self._solve_with_factors(z, u, v, binary_tf, binary_tg)
         out = self.h_proj(out)
 
         mu_h, log_sigma_h = out.unbind(dim=-1)
@@ -231,15 +194,14 @@ class VariationalDecoder(nn.Module):
             self, 
             mu_z: torch.Tensor, 
             sigma_z: torch.Tensor,
-            grn: torch.Tensor, 
             binary_tf, binary_tg,
-            u=None, v=None
+            u, v
     ):
         # Sample latent regulator state z ~ q(z)
         z = reparameterize(mu_z, sigma_z)   # (C, TG)
 
         # Predict expression distribution p(h | z)
-        mu_h, sigma_h = self.expr_model(z, grn, binary_tf, binary_tg, u=u, v=v)
+        mu_h, sigma_h = self.expr_model(z, binary_tf, binary_tg, u=u, v=v)
         # Shapes: (C, TG), (C, TG)
 
         # Sample true expression before dropout
@@ -303,7 +265,7 @@ class ELBOLoss(nn.Module):
         S = int(counts[0].item())
         return x[mask].view(C, S)
     
-    def forward(self, tokens, factors: FactorState = None, grn=None):
+    def forward(self, tokens, factors: FactorState = None):
         if factors is None:
             raise ValueError("factors must be provided.")
         factors.validate()
@@ -312,8 +274,8 @@ class ELBOLoss(nn.Module):
         u = factors.u
         v = factors.v
         x = tokens["expr"]
-        mu_z, sigma_z = self.encoder(x, grn, binary_tf, binary_tg, u=u, v=v)
-        mu_h, sigma_h, p_drop = self.decoder(mu_z, sigma_z, grn, binary_tf, binary_tg, u=u, v=v)
+        mu_z, sigma_z = self.encoder(x, binary_tf, binary_tg, u=u, v=v)
+        mu_h, sigma_h, p_drop = self.decoder(mu_z, sigma_z, binary_tf, binary_tg, u=u, v=v)
 
         # Align expression targets with decoder outputs:
         # decoder operates on TG-selected (non-pad) genes, not full padded length.
@@ -351,8 +313,8 @@ if __name__ == "__main__":
     tokens = tokenizer(adata[:Nc, :].copy())
 
     model = SFM(token_dict, tf_list=tf_list)
-    grn, factors = model(tokens, return_factors=True, compute_grn=True)
+    _, factors = model(tokens, return_factors=True, compute_grn=False)
 
     loss_fn = ELBOLoss()
-    loss = loss_fn(tokens, factors=factors, grn=grn)
+    loss = loss_fn(tokens, factors=factors)
     print("ELBO loss:", loss.item())
