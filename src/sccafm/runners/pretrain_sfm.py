@@ -58,6 +58,7 @@ def _normalize_pretrain_cfg(train_cfg, loss_cfg):
     train_cfg["weight_decay"] = _as_float(train_cfg.get("weight_decay", 1e-2), "train.weight_decay")
     train_cfg["epochs_per_file"] = _as_int(train_cfg.get("epochs_per_file", 1), "train.epochs_per_file")
     train_cfg["batch_size"] = _as_int(train_cfg.get("batch_size", 32), "train.batch_size")
+    train_cfg["warmup_steps"] = _as_int(train_cfg.get("warmup_steps", 1000), "train.warmup_steps")
     train_cfg["resume"] = _as_bool(train_cfg.get("resume", True), "train.resume")
     train_cfg["log_interval"] = _as_int(train_cfg.get("log_interval", 100), "train.log_interval")
     train_cfg["use_tqdm"] = _as_bool(train_cfg.get("use_tqdm", True), "train.use_tqdm")

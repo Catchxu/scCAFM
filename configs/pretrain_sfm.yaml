@@ -23,6 +23,7 @@ train:
   weight_decay: 0.1
   epochs_per_file: 1
   batch_size: 4
+  warmup_steps: 1000
   device: cuda
   checkpoint_dir: ./checkpoints
   resume: False

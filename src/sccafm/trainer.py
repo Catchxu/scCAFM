@@ -126,6 +126,7 @@ def sfm_trainer(
     log_overwrite: bool = True,
     use_amp: bool = False,
     amp_dtype: str = "bf16",
+    warmup_steps: int = 1000,
 ):
     """
     Complete training pipeline for SFM model.
@@ -171,6 +172,12 @@ def sfm_trainer(
         lr=learning_rate,
         weight_decay=weight_decay
     )
+    scheduler = None
+    if warmup_steps > 0:
+        scheduler = torch.optim.lr_scheduler.LambdaLR(
+            optimizer,
+            lr_lambda=lambda step: min(1.0, float(step + 1) / float(warmup_steps)),
+        )
 
     prev_handlers = {}
     if logger is not None:
@@ -196,6 +203,8 @@ def sfm_trainer(
             if 'criterion_state_dict' in ckpt:
                 criterion_core.load_state_dict(ckpt['criterion_state_dict'])
             optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+            if scheduler is not None and ckpt.get('scheduler_state_dict') is not None:
+                scheduler.load_state_dict(ckpt['scheduler_state_dict'])
 
             if 'dag_state' in ckpt and hasattr(criterion_core, 'dag_criterion') and ckpt['dag_state'] is not None:
                 alpha = ckpt['dag_state']['alpha']
@@ -205,6 +214,7 @@ def sfm_trainer(
                 criterion_core.dag_criterion.prev_h_val = ckpt['dag_state']['prev_h_val']
 
             start_file_idx = ckpt['file_idx'] + 1
+            global_step = int(ckpt.get('global_step', 0))
             if rank0:
                 print(f"Resuming from File Index: {start_file_idx}")
                 if logger:
@@ -227,8 +237,8 @@ def sfm_trainer(
         criterion.train()
         if rank0 and logger:
             logger.info(
-                "Training start | files=%d | epochs_per_file=%d | batch_size=%d | device=%s | ddp=%s | amp=%s | amp_dtype=%s",
-                len(adata_files), epochs_per_file, batch_size, device, is_distributed, amp_enabled, amp_dtype
+                "Training start | files=%d | epochs_per_file=%d | batch_size=%d | device=%s | ddp=%s | amp=%s | amp_dtype=%s | warmup_steps=%d",
+                len(adata_files), epochs_per_file, batch_size, device, is_distributed, amp_enabled, amp_dtype, warmup_steps
             )
         for file_idx in range(start_file_idx, len(adata_files)):
             current_file_idx = file_idx
@@ -321,6 +331,8 @@ def sfm_trainer(
                     else:
                         total_loss.backward()
                         optimizer.step()
+                    if scheduler is not None:
+                        scheduler.step()
                     global_step += 1
 
                     if rank0:
@@ -330,9 +342,10 @@ def sfm_trainer(
                             iterator.set_postfix(display_metrics)
                         if logger and log_interval > 0 and global_step % log_interval == 0:
                             metric_text = " ".join([f"{k}={loss_dict[k]:.6f}" for k in metric_keys])
+                            current_lr = optimizer.param_groups[0]["lr"]
                             logger.info(
-                                "step=%d file=%d epoch=%d %s",
-                                global_step, file_idx + 1, epoch + 1, metric_text
+                                "step=%d file=%d epoch=%d lr=%.8e %s",
+                                global_step, file_idx + 1, epoch + 1, current_lr, metric_text
                             )
 
             if rank0:
@@ -341,6 +354,8 @@ def sfm_trainer(
                     'model_state_dict': model_core.state_dict(),
                     'criterion_state_dict': criterion_core.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict() if scheduler is not None else None,
+                    'global_step': global_step,
                     'dag_state': {
                         'alpha': criterion_core.dag_criterion.alpha,
                         'rho': criterion_core.dag_criterion.rho,
