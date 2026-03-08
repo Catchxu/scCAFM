@@ -6,7 +6,7 @@ SFM:
     expr_tau: 0.5
     cond_max_item: 1024
     batch_num_bins: 128
-    batch_tau: 0.07
+    batch_tau: 0.1
     num_layers: 12
     num_heads: 12
     num_factors: 256
