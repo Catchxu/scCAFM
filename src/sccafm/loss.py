@@ -5,7 +5,8 @@ import pandas as pd
 from typing import Optional
 
 from .tokenizer import TomeTokenizer
-from .models import ELBOLoss, expand_grn, expand_u
+from .models.vgae import ELBOLoss
+from .models.utils import FactorState, expand_grn, expand_u
 
 
 class PriorLoss(nn.Module):
@@ -186,15 +187,18 @@ class PriorLoss(nn.Module):
     def forward(
         self,
         tokens,
-        grn,
-        binary_tf,
-        binary_tg,
+        factors: FactorState = None,
+        grn=None,
         true_grn_df: Optional[pd.DataFrame] = None,
-        u: Optional[torch.Tensor] = None,
-        v: Optional[torch.Tensor] = None,
     ):
+        if factors is None:
+            raise ValueError("factors must be provided.")
+        factors.validate()
+        binary_tf = factors.binary_tf
+        binary_tg = factors.binary_tg
+        u = factors.u
+        v = factors.v
         gene_tokens = tokens["gene"]
-        C = gene_tokens.shape[0]
 
         # 1. Project everything to the same TG-selected space used by GRN prediction.
         gene_tokens = self._masked_select_fixed_count(gene_tokens, binary_tg, "gene_tokens/binary_tg")
@@ -327,7 +331,12 @@ class DAGLoss(nn.Module):
         S = int(counts[0].item())
         return x[mask].view(C, S)
 
-    def forward(self, u, v, binary_tf, binary_tg=None):
+    def forward(self, factors: FactorState):
+        factors.validate()
+        u = factors.u
+        v = factors.v
+        binary_tf = factors.binary_tf
+        binary_tg = factors.binary_tg
         if binary_tg is not None:
             binary_tf = self._masked_select_fixed_count(binary_tf.float(), binary_tg, "binary_tf/binary_tg")
         u_full = expand_u(u, binary_tf)
@@ -411,18 +420,23 @@ class SFMLoss(nn.Module):
         t_eff = min(self.current_epoch, self.T)
         return 0.5 + 0.5 * np.cos(np.pi * t_eff / self.T)
 
-    def forward(
-        self, tokens, grn, binary_tf, binary_tg, 
-        u=None, v=None
-    ):
+    def forward(self, tokens, factors: FactorState = None):
         """
         Calculates total loss based on ELBO, Prior, and DAG constraints.
         """
+        if factors is None:
+            raise ValueError("factors must be provided.")
+        factors.validate()
+
         total_loss = 0.0
         loss_dict = {}
 
         # 1. ELBO Loss
-        loss_elbo = self.elbo_criterion(tokens, grn, binary_tf, binary_tg, u=u, v=v)
+        loss_elbo = self.elbo_criterion(
+            tokens,
+            factors=factors,
+            grn=None,
+        )
         total_loss += loss_elbo
         loss_dict["elbo"] = loss_elbo.item()
 
@@ -431,15 +445,17 @@ class SFMLoss(nn.Module):
             w_p = self.get_prior_weight()
             # Use self.true_grn_df stored during init
             loss_p = self.prior_criterion(
-                tokens, grn, binary_tf, binary_tg, self.true_grn_df, u=u, v=v
+                tokens,
+                factors=factors,
+                grn=None,
+                true_grn_df=self.true_grn_df,
             )
             total_loss += w_p * loss_p
             loss_dict["prior"] = loss_p.item()
 
         # 3. DAG Loss
         if self.use_dag:
-            # Note: Ensure u/v are not None if use_dag is True
-            loss_d = self.dag_criterion(u, v, binary_tf, binary_tg)
+            loss_d = self.dag_criterion(factors)
             total_loss += loss_d
             loss_dict["dag"] = loss_d.item()
 
@@ -469,8 +485,8 @@ if __name__ == "__main__":
     model = SFM(token_dict, tf_list=tf_list)
     
     # 3. Model Forward Pass
-    # Ensure your SFM.forward returns: grn, binary_tf, binary_tg, u, v
-    grn, binary_tf, binary_tg, u, v = model(tokens, return_factors=True)
+    # For training, keep factorized state only (no dense GRN).
+    _, factors = model(tokens, return_factors=True, compute_grn=False)
 
     # 4. Setup SFMLoss
     # Loading the Prior DataFrame
@@ -484,6 +500,7 @@ if __name__ == "__main__":
         use_prior=True,
         use_dag=True,
         tome_tokenizer=tokenizer,
+        true_grn_df=true_grn_df,
         num_epochs=num_epochs,
     )
 
@@ -494,12 +511,7 @@ if __name__ == "__main__":
     # 6. Compute Integrated Loss
     total_loss, loss_dict = criterion(
         tokens=tokens,
-        grn=grn,
-        binary_tf=binary_tf,
-        binary_tg=binary_tg,
-        u=u,
-        v=v,
-        true_grn_df=true_grn_df
+        factors=factors,
     )
 
     # 7. Verification Output

@@ -1,4 +1,47 @@
 import torch
+from dataclasses import dataclass
+
+
+@dataclass
+class FactorState:
+    """
+    Container for factorized GRN state shared across training/evaluation.
+    Shapes:
+      - binary_tf: (C, L)
+      - binary_tg: (C, L)
+      - u: (C, TF, M)
+      - v: (C, TG_sel, M)
+    """
+    binary_tf: torch.Tensor
+    binary_tg: torch.Tensor
+    u: torch.Tensor
+    v: torch.Tensor
+
+    def validate(self) -> None:
+        if self.binary_tf.ndim != 2 or self.binary_tg.ndim != 2:
+            raise ValueError(
+                f"binary_tf/binary_tg must be 2-D, got {tuple(self.binary_tf.shape)} and {tuple(self.binary_tg.shape)}"
+            )
+        if self.u.ndim != 3 or self.v.ndim != 3:
+            raise ValueError(f"u/v must be 3-D, got {tuple(self.u.shape)} and {tuple(self.v.shape)}")
+        c = self.u.shape[0]
+        if self.binary_tf.shape[0] != c or self.binary_tg.shape[0] != c or self.v.shape[0] != c:
+            raise ValueError(
+                "Batch size mismatch across factor tensors: "
+                f"u={self.u.shape[0]}, v={self.v.shape[0]}, "
+                f"binary_tf={self.binary_tf.shape[0]}, binary_tg={self.binary_tg.shape[0]}"
+            )
+
+        tf_counts = self.binary_tf.bool().sum(dim=1)
+        tg_counts = self.binary_tg.bool().sum(dim=1)
+        if not torch.all(tf_counts == self.u.shape[1]):
+            raise ValueError(
+                f"u TF dim ({self.u.shape[1]}) does not match binary_tf true-counts per sample: {tf_counts.tolist()}"
+            )
+        if not torch.all(tg_counts == self.v.shape[1]):
+            raise ValueError(
+                f"v TG dim ({self.v.shape[1]}) does not match binary_tg true-counts per sample: {tg_counts.tolist()}"
+            )
 
 
 def reparameterize(mu: torch.Tensor, sigma: torch.Tensor):

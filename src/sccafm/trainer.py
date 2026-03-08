@@ -321,8 +321,8 @@ def sfm_trainer(
                         else nullcontext()
                     )
                     with autocast_ctx:
-                        grn, b_tf, b_tg, u, v = model(batch, return_factors=True, compute_grn=False)
-                        total_loss, loss_dict = criterion(tokens=batch, grn=grn, binary_tf=b_tf, binary_tg=b_tg, u=u, v=v)
+                        _, factors = model(batch, return_factors=True, compute_grn=False)
+                        total_loss, loss_dict = criterion(tokens=batch, factors=factors)
 
                     if scaler.is_enabled():
                         scaler.scale(total_loss).backward()

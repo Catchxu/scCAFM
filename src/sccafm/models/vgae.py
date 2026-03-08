@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .utils import reparameterize, expand_grn, expand_u
+from .utils import FactorState, reparameterize, expand_grn, expand_u
 
 
 class VariationalEncoder(nn.Module):
@@ -303,7 +303,14 @@ class ELBOLoss(nn.Module):
         S = int(counts[0].item())
         return x[mask].view(C, S)
     
-    def forward(self, tokens, grn, binary_tf, binary_tg, u=None, v=None):
+    def forward(self, tokens, factors: FactorState = None, grn=None):
+        if factors is None:
+            raise ValueError("factors must be provided.")
+        factors.validate()
+        binary_tf = factors.binary_tf
+        binary_tg = factors.binary_tg
+        u = factors.u
+        v = factors.v
         x = tokens["expr"]
         mu_z, sigma_z = self.encoder(x, grn, binary_tf, binary_tg, u=u, v=v)
         mu_h, sigma_h, p_drop = self.decoder(mu_z, sigma_z, grn, binary_tf, binary_tg, u=u, v=v)
@@ -344,8 +351,8 @@ if __name__ == "__main__":
     tokens = tokenizer(adata[:Nc, :].copy())
 
     model = SFM(token_dict, tf_list=tf_list)
-    grn, binary_tf, binary_tg = model(tokens)
+    grn, factors = model(tokens, return_factors=True, compute_grn=True)
 
     loss_fn = ELBOLoss()
-    loss = loss_fn(tokens, grn, binary_tf, binary_tg)
+    loss = loss_fn(tokens, factors=factors, grn=grn)
     print("ELBO loss:", loss.item())

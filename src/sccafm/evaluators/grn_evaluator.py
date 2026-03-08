@@ -367,11 +367,11 @@ def evaluate_grn(
                 )
 
                 with autocast_ctx:
-                    grn, b_tf, b_tg = model(batch_dev, return_factors=False, compute_grn=True)
+                    grn, factors = model(batch_dev, return_factors=True, compute_grn=True)
 
                 grn = grn.detach().float().cpu()
-                b_tf = b_tf.detach().cpu().bool()
-                b_tg = b_tg.detach().cpu().bool()
+                b_tf = factors.binary_tf.detach().cpu().bool()
+                b_tg = factors.binary_tg.detach().cpu().bool()
                 genes = batch_cpu["gene"].cpu().long()
 
                 batch_n = genes.shape[0]

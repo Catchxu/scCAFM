@@ -5,6 +5,7 @@ from typing import Optional
 
 from .embedding import TomoEmbedding
 from .backbone import TomoEncoder
+from .utils import FactorState
 from ..load import load_tf_list
 
 
@@ -293,9 +294,10 @@ class SFM(nn.Module):
         grn = None
         if compute_grn:
             grn = torch.einsum('cfm,cgm->cfg', u, v)
+        factors = FactorState(binary_tf=binary_tf, binary_tg=binary_tg, u=u, v=v)
         
         if return_factors:
-            return grn, binary_tf, binary_tg, u, v
+            return grn, factors
         else:
             return grn, binary_tf, binary_tg
 
