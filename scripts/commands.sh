@@ -13,7 +13,7 @@ setsid nohup python3 scripts/run_gene_text.py --log-overwrite > /dev/null 2>&1 <
 python3 scripts/check_gene_descriptions.py
 python3 scripts/run_gene_embedding.py --log-overwrite
 
-# model training
+# model pretraining
 setsid nohup python3 scripts/run_pretrain.py --nproc-per-node 4 > /dev/null 2>&1 < /dev/null &
 
 # evaluation

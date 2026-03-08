@@ -39,6 +39,12 @@ def main() -> int:
         default=1,
         help="Number of DDP processes for torchrun.",
     )
+    parser.add_argument(
+        "--master-port",
+        type=int,
+        default=None,
+        help="Master port for torchrun rendezvous. If unset, runner auto-picks one.",
+    )
     args = parser.parse_args()
 
     project_root = Path(__file__).resolve().parent.parent
@@ -62,6 +68,8 @@ def main() -> int:
         cmd.append("--dry-run")
     if args.override:
         cmd.extend(["--override", *args.override])
+    if args.master_port is not None:
+        cmd.extend(["--master-port", str(args.master_port)])
 
     subprocess.run(cmd, check=True, env=env, cwd=project_root)
     return 0

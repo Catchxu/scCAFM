@@ -1,5 +1,6 @@
 import argparse
 import os
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -107,6 +108,13 @@ def _resolve_adata_files(raw):
     )
 
 
+def _find_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        s.listen(1)
+        return int(s.getsockname()[1])
+
+
 def main():
     parser = argparse.ArgumentParser(description="Pretrain scCAFM-SFM model")
     parser.add_argument("--config", type=str, default="meta.yaml", help="Meta config YAML path")
@@ -117,6 +125,12 @@ def main():
         type=int,
         default=1,
         help="Number of processes for DDP launch via torchrun (default: 1).",
+    )
+    parser.add_argument(
+        "--master-port",
+        type=int,
+        default=None,
+        help="Master port for torchrun rendezvous. If unset, auto-pick a free local port.",
     )
     args = parser.parse_args()
 
@@ -154,9 +168,14 @@ def main():
 
     in_torchrun = int(os.environ.get("WORLD_SIZE", "1")) > 1
     if args.nproc_per_node > 1 and not in_torchrun:
+        master_port = args.master_port
+        if master_port is None:
+            env_port = os.environ.get("MASTER_PORT") or os.environ.get("TORCHRUN_MASTER_PORT")
+            master_port = int(env_port) if env_port else _find_free_port()
         cmd = [
             "torchrun",
             f"--nproc_per_node={args.nproc_per_node}",
+            f"--master_port={master_port}",
             "-m",
             "sccafm.runners.pretrain_sfm",
             "--config",
