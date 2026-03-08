@@ -22,7 +22,7 @@ train:
   learning_rate: 1e-4
   weight_decay: 0.1
   epochs_per_file: 1
-  batch_size: 4
+  batch_size: 2
   warmup_steps: 1000
   device: cuda
   checkpoint_dir: ./checkpoints

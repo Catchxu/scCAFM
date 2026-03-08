@@ -162,6 +162,10 @@ def sfm_trainer(
 
     model_core = _unwrap_ddp(model)
     criterion_core = _unwrap_ddp(criterion)
+    embedding_mod = getattr(model_core, "embedding", None)
+    gene_emb_ckpt = getattr(embedding_mod, "loaded_gene_embedding_ckpt", None) if embedding_mod is not None else None
+    gene_emb_loaded = int(getattr(embedding_mod, "loaded_gene_embedding_count", 0)) if embedding_mod is not None else 0
+    gene_emb_total = int(getattr(embedding_mod, "loaded_gene_embedding_total", 0)) if embedding_mod is not None else 0
 
     os.makedirs(checkpoint_dir, exist_ok=True)
     checkpoint_path = os.path.join(checkpoint_dir, "sfm_latest.pt")
@@ -240,6 +244,15 @@ def sfm_trainer(
                 "Training start | files=%d | epochs_per_file=%d | batch_size=%d | device=%s | ddp=%s | amp=%s | amp_dtype=%s | warmup_steps=%d",
                 len(adata_files), epochs_per_file, batch_size, device, is_distributed, amp_enabled, amp_dtype, warmup_steps
             )
+            if gene_emb_ckpt:
+                logger.info(
+                    "Gene embedding init | ckpt=%s | loaded_rows=%d/%d",
+                    gene_emb_ckpt,
+                    gene_emb_loaded,
+                    gene_emb_total,
+                )
+            else:
+                logger.info("Gene embedding init | ckpt=none (random initialization)")
         for file_idx in range(start_file_idx, len(adata_files)):
             current_file_idx = file_idx
             file_path = adata_files[file_idx]

@@ -11,3 +11,5 @@ SFM:
     num_heads: 12
     num_factors: 256
     topk: 32
+    gene_embedding_ckpt: ./checkpoints/gene_embeddings.pt
+    freeze_loaded_gene_embeddings: false

@@ -205,13 +205,13 @@ class SFM(nn.Module):
         **kwargs
     ):
         super().__init__()
-        assert (embed_dim % 2) == 0, "embed_dim must be even"
+        assert (embed_dim % 4) == 0, "embed_dim must be divisible by 4"
 
         self.token_dict = token_dict
 
         self.embedding = TomoEmbedding(
             token_dict, 
-            D=embed_dim // 2,
+            D=embed_dim,
             expr_num_bins=expr_num_bins,
             **kwargs
         )
