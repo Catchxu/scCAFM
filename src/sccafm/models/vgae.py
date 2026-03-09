@@ -5,162 +5,183 @@ import torch.nn.functional as F
 from .utils import FactorState, reparameterize, expand_u
 
 
-class VariationalEncoder(nn.Module):
-    def __init__(self, hidden_dim=128, dropout=0.1):
+class StructureAwareGraphAttention(nn.Module):
+    def __init__(self, hidden_dim=128, num_heads=4, dropout=0.1):
         super().__init__()
+        if hidden_dim % num_heads != 0:
+            raise ValueError(
+                f"hidden_dim ({hidden_dim}) must be divisible by num_heads ({num_heads})"
+            )
 
-        # Project scalar gene expression into an E-dimensional embedding
-        self.expr_proj = nn.Sequential(
-            nn.Linear(1, hidden_dim),
-            nn.ReLU(),
+        self.hidden_dim = hidden_dim
+        self.num_heads = num_heads
+        self.head_dim = hidden_dim // num_heads
+        self.scale = self.head_dim ** -0.5
+
+        self.q_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.k_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.v_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.out_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor, edge_weight: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 3:
+            raise ValueError(f"x must be (C, S, H), got {tuple(x.shape)}")
+        if edge_weight.ndim != 3:
+            raise ValueError(
+                f"edge_weight must be (C, S, S), got {tuple(edge_weight.shape)}"
+            )
+        if edge_weight.shape[0] != x.shape[0] or edge_weight.shape[1] != x.shape[1] or edge_weight.shape[2] != x.shape[1]:
+            raise ValueError(
+                f"Shape mismatch between x={tuple(x.shape)} and edge_weight={tuple(edge_weight.shape)}"
+            )
+
+        c, s, _ = x.shape
+        q = self.q_proj(x).view(c, s, self.num_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(x).view(c, s, self.num_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(x).view(c, s, self.num_heads, self.head_dim).transpose(1, 2)
+
+        scores = torch.matmul(q, k.transpose(-1, -2)) * self.scale
+        structure = edge_weight.unsqueeze(1)
+        scores = scores + torch.log(structure.clamp_min(1e-8))
+        attn = F.softmax(scores, dim=-1)
+        attn = self.dropout(attn)
+
+        out = torch.matmul(attn, v)
+        out = out.transpose(1, 2).reshape(c, s, self.hidden_dim)
+        return self.out_proj(out)
+
+
+class GATBlock(nn.Module):
+    def __init__(self, hidden_dim=128, num_heads=4, dropout=0.1):
+        super().__init__()
+        self.norm1 = nn.RMSNorm(hidden_dim)
+        self.attn = StructureAwareGraphAttention(
+            hidden_dim=hidden_dim,
+            num_heads=num_heads,
+            dropout=dropout,
+        )
+        self.norm2 = nn.RMSNorm(hidden_dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(hidden_dim, 4 * hidden_dim),
+            nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim)
+            nn.Linear(4 * hidden_dim, hidden_dim),
         )
 
-        # Predict mean and (log) scale of the latent variable z
-        self.z_proj = nn.Linear(hidden_dim, 2)
-    
-    def _check_shape(self, expr_tf: torch.Tensor, expr_tg: torch.Tensor):
-        if expr_tf.ndim != 3:
-            raise ValueError(f"expr_tf must be (C, TF, E), got {expr_tf.shape}!")
-        if expr_tg.ndim != 3:
-            raise ValueError(f"expr_tg must be (C, TG, E), got {expr_tg.shape}!")
+    def forward(self, x: torch.Tensor, edge_weight: torch.Tensor) -> torch.Tensor:
+        x = x + self.attn(self.norm1(x), edge_weight)
+        x = x + self.ffn(self.norm2(x))
+        return x
 
-        C, TF, _ = expr_tf.shape
-        TG = expr_tg.shape[1]
-        if expr_tf.shape[0] != C or expr_tf.shape[1] != TF:
-            raise ValueError(
-                f"expr_tf first two dims must be (C, TF)=({C}, {TF}), "
-                f"got {expr_tf.shape[:2]}"
-            )
-        if expr_tg.shape[0] != C or expr_tg.shape[1] != TG:
-            raise ValueError(
-                f"expr_tg first two dims must be (C, TG)=({C}, {TG}), "
-                f"got {expr_tg.shape[:2]}"
-            )
 
-        if expr_tf.shape[2] != expr_tg.shape[2]:
-            raise ValueError(
-                f"Embedding dim mismatch: "
-                f"expr_tf E={expr_tf.shape[2]}, expr_tg E={expr_tg.shape[2]}"
-            )
-
-    def _predict_tg_from_factors(self, expr_tf: torch.Tensor, u: torch.Tensor, v: torch.Tensor):
-        # grn ~= U @ V^T, then pred_tg = grn^T @ expr_tf = V @ (U^T @ expr_tf)
-        tmp = torch.einsum("cfm,cfe->cme", u, expr_tf)      # (C, M, E)
-        pred_tg = torch.einsum("cgm,cme->cge", v, tmp)      # (C, TG, E)
-        return pred_tg
-
-    def _select_fixed_count(self, x: torch.Tensor, mask: torch.Tensor, name: str):
+class GraphStructureMixin:
+    def _masked_select_fixed_count(self, x: torch.Tensor, mask: torch.Tensor, name: str):
         if mask.dtype != torch.bool:
             mask = mask.bool()
         if mask.ndim != 2:
             raise ValueError(f"{name} mask must be (C, L), got {tuple(mask.shape)}")
-        if x.ndim != 3 or x.shape[:2] != mask.shape:
-            raise ValueError(
-                f"Shape mismatch for {name}: x={tuple(x.shape)}, mask={tuple(mask.shape)}; expected x=(C,L,E), mask=(C,L)"
-            )
+        if x.ndim == 2:
+            if x.shape != mask.shape:
+                raise ValueError(
+                    f"{name}: expected x/mask both (C, L), got {tuple(x.shape)} and {tuple(mask.shape)}"
+                )
+            c = x.shape[0]
+            counts = mask.sum(dim=1)
+            if not torch.all(counts == counts[0]):
+                raise ValueError(
+                    f"{name}: selected counts must be identical across batch for dense batching, got {counts.tolist()}"
+                )
+            s = int(counts[0].item())
+            return x[mask].view(c, s)
 
-        counts = mask.sum(dim=1)
-        if not torch.all(counts == counts[0]):
-            raise ValueError(
-                f"{name} selected counts must be identical across batch for dense batching, got {counts.tolist()}"
-            )
+        if x.ndim == 3 and x.shape[:2] == mask.shape:
+            c, _, e = x.shape
+            counts = mask.sum(dim=1)
+            if not torch.all(counts == counts[0]):
+                raise ValueError(
+                    f"{name}: selected counts must be identical across batch for dense batching, got {counts.tolist()}"
+                )
+            s = int(counts[0].item())
+            return x[mask].view(c, s, e)
 
-        C, _, E = x.shape
-        S = int(counts[0].item())
-        return x[mask].view(C, S, E)
-    
+        raise ValueError(
+            f"{name}: unsupported x/mask shapes {tuple(x.shape)} and {tuple(mask.shape)}"
+        )
+
+    def _build_selected_structure(
+        self,
+        binary_tf: torch.Tensor,
+        binary_tg: torch.Tensor,
+        u: torch.Tensor,
+        v: torch.Tensor,
+    ) -> torch.Tensor:
+        binary_tf_sel = self._masked_select_fixed_count(
+            binary_tf.float(), binary_tg, "binary_tf/binary_tg"
+        )
+        u_full = expand_u(u, binary_tf_sel)
+        edge_weight = torch.bmm(u_full, v.transpose(1, 2))
+
+        s = edge_weight.shape[-1]
+        eye = torch.eye(s, device=edge_weight.device, dtype=edge_weight.dtype).unsqueeze(0)
+        edge_weight = edge_weight + eye
+        edge_weight = edge_weight / edge_weight.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+        return edge_weight
+
+
+class VariationalEncoder(GraphStructureMixin, nn.Module):
+    def __init__(self, hidden_dim=128, dropout=0.1, num_heads=4, num_layers=2):
+        super().__init__()
+
+        self.expr_proj = nn.Sequential(
+            nn.Linear(1, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+        self.layers = nn.ModuleList(
+            [GATBlock(hidden_dim, num_heads=num_heads, dropout=dropout) for _ in range(num_layers)]
+        )
+        self.norm = nn.RMSNorm(hidden_dim)
+
+        self.z_proj = nn.Linear(hidden_dim, 2)
+
     def forward(self, x, binary_tf, binary_tg, u, v):
-        x = x.unsqueeze(-1)
-        x = self.expr_proj(x)
-        C, _, E = x.shape
-    
-        # Select TF and TG embeddings using boolean masks
-        # Assumes a fixed number of TFs / TGs per cell
-        expr_tf = self._select_fixed_count(x, binary_tf, "binary_tf")
-        expr_tg = self._select_fixed_count(x, binary_tg, "binary_tg")
+        x = self.expr_proj(x.unsqueeze(-1))
+        x = self._masked_select_fixed_count(x, binary_tg, "binary_tg")
+        edge_weight = self._build_selected_structure(binary_tf, binary_tg, u, v)
 
-        self._check_shape(expr_tf, expr_tg)
+        for layer in self.layers:
+            x = layer(x, edge_weight)
+        out = self.z_proj(self.norm(x))
 
-        if u.shape[:2] != expr_tf.shape[:2]:
-            raise ValueError(
-                f"u shape {tuple(u.shape)} incompatible with selected TF embeddings {tuple(expr_tf.shape)}"
-            )
-        if v.shape[0] != C or v.shape[1] != expr_tg.shape[1]:
-            raise ValueError(
-                f"v shape {tuple(v.shape)} incompatible with selected TG embeddings {tuple(expr_tg.shape)}"
-            )
-        pred_tg = self._predict_tg_from_factors(expr_tf, u, v)
-
-        # Encode the residual TG signal into a latent distribution
-        out = self.z_proj(expr_tg - pred_tg)
-
-        # Split into mean and scale (parameterized in log-space for stability)
         mu_z, log_sigma_z = out.unbind(dim=-1)
         sigma_z = F.softplus(log_sigma_z) + 1e-6
 
         return mu_z, sigma_z
 
 
-class ExprModeling(nn.Module):
-    def __init__(self, hidden_dim=128, dropout=0.1, fp_steps: int = 3, fp_damping: float = 0.5):
+class ExprModeling(GraphStructureMixin, nn.Module):
+    def __init__(self, hidden_dim=128, dropout=0.1, num_heads=4, num_layers=2):
         super().__init__()
         self.z_proj = nn.Linear(1, hidden_dim)
-        self.fp_steps = fp_steps
-        self.fp_damping = fp_damping
+        self.layers = nn.ModuleList(
+            [GATBlock(hidden_dim, num_heads=num_heads, dropout=dropout) for _ in range(num_layers)]
+        )
+        self.norm = nn.RMSNorm(hidden_dim)
         self.h_proj = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, 2)
+            nn.Linear(hidden_dim, 2),
         )
 
-    def _apply_a_with_factors(self, h: torch.Tensor, u_full: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-        # A @ h where A ~= U_full @ V^T.
-        # h: (C, S, H), u_full: (C, S, M), v: (C, S, M)
-        vt_h = torch.bmm(v.transpose(1, 2), h)   # (C, M, H)
-        return torch.bmm(u_full, vt_h)           # (C, S, H)
-
-    def _masked_select_fixed_count(self, x: torch.Tensor, mask: torch.Tensor, name: str):
-        if mask.dtype != torch.bool:
-            mask = mask.bool()
-        if x.ndim != 2 or mask.ndim != 2 or x.shape != mask.shape:
-            raise ValueError(
-                f"{name}: expected x/mask both (C, L), got {tuple(x.shape)} and {tuple(mask.shape)}"
-            )
-        counts = mask.sum(dim=1)
-        if not torch.all(counts == counts[0]):
-            raise ValueError(
-                f"{name}: selected counts must be identical across batch for dense batching, got {counts.tolist()}"
-            )
-        C = x.shape[0]
-        S = int(counts[0].item())
-        return x[mask].view(C, S)
-
-    def _solve_with_factors(
-        self,
-        z_proj: torch.Tensor,
-        u: torch.Tensor,
-        v: torch.Tensor,
-        binary_tf: torch.Tensor,
-        binary_tg: torch.Tensor,
-    ):
-        # Fixed-point iteration for h = z + gamma * A h.
-        # This avoids dense SxS matrix construction and solve.
-        binary_tf_sel = self._masked_select_fixed_count(binary_tf.float(), binary_tg, "binary_tf/binary_tg")
-        u_full = expand_u(u, binary_tf_sel)      # (C, S, M), S matches selected TG space
-        h = z_proj
-        for _ in range(max(1, self.fp_steps)):
-            ah = self._apply_a_with_factors(h, u_full, v)
-            h = z_proj + self.fp_damping * ah
-        return h
-
     def forward(self, z: torch.Tensor, binary_tf, binary_tg, u, v):
-        z = z.unsqueeze(-1)
-        z = self.z_proj(z)  # (C, S, H)
-        out = self._solve_with_factors(z, u, v, binary_tf, binary_tg)
-        out = self.h_proj(out)
+        x = self.z_proj(z.unsqueeze(-1))
+        edge_weight = self._build_selected_structure(binary_tf, binary_tg, u, v)
+        for layer in self.layers:
+            x = layer(x, edge_weight)
+        out = self.h_proj(self.norm(x))
 
         mu_h, log_sigma_h = out.unbind(dim=-1)
         sigma_h = F.softplus(log_sigma_h) + 1e-6
@@ -185,9 +206,14 @@ class DropModeling(nn.Module):
 
 
 class VariationalDecoder(nn.Module):
-    def __init__(self, hidden_dim=128, dropout=0.1):
+    def __init__(self, hidden_dim=128, dropout=0.1, num_heads=4, num_layers=2):
         super().__init__()
-        self.expr_model = ExprModeling(hidden_dim, dropout)
+        self.expr_model = ExprModeling(
+            hidden_dim=hidden_dim,
+            dropout=dropout,
+            num_heads=num_heads,
+            num_layers=num_layers,
+        )
         self.dropout_model = DropModeling(hidden_dim, dropout)
     
     def forward(
@@ -214,10 +240,27 @@ class VariationalDecoder(nn.Module):
 
 
 class ELBOLoss(nn.Module):
-    def __init__(self, hidden_dim=128, dropout=0.1, recon_reduction: str = "sum"):
+    def __init__(
+        self,
+        hidden_dim=128,
+        dropout=0.1,
+        recon_reduction: str = "sum",
+        num_heads: int = 4,
+        num_layers: int = 2,
+    ):
         super().__init__()
-        self.encoder = VariationalEncoder(hidden_dim, dropout)
-        self.decoder = VariationalDecoder(hidden_dim, dropout)
+        self.encoder = VariationalEncoder(
+            hidden_dim=hidden_dim,
+            dropout=dropout,
+            num_heads=num_heads,
+            num_layers=num_layers,
+        )
+        self.decoder = VariationalDecoder(
+            hidden_dim=hidden_dim,
+            dropout=dropout,
+            num_heads=num_heads,
+            num_layers=num_layers,
+        )
         if recon_reduction not in {"mean", "sum"}:
             raise ValueError(f"recon_reduction must be 'mean' or 'sum', got {recon_reduction}")
         self.recon_reduction = recon_reduction
@@ -261,9 +304,9 @@ class ELBOLoss(nn.Module):
             raise ValueError(
                 f"{name}: selected counts must be identical across batch for dense batching, got {counts.tolist()}"
             )
-        C = x.shape[0]
-        S = int(counts[0].item())
-        return x[mask].view(C, S)
+        c = x.shape[0]
+        s = int(counts[0].item())
+        return x[mask].view(c, s)
     
     def forward(self, tokens, factors: FactorState = None):
         if factors is None:

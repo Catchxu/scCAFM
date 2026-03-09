@@ -355,10 +355,9 @@ def sfm_trainer(
                             iterator.set_postfix(display_metrics)
                         if logger and log_interval > 0 and global_step % log_interval == 0:
                             metric_text = " ".join([f"{k}={loss_dict[k]:.6f}" for k in metric_keys])
-                            current_lr = optimizer.param_groups[0]["lr"]
                             logger.info(
                                 "step=%d file=%d epoch=%d lr=%.8e %s",
-                                global_step, file_idx + 1, epoch + 1, current_lr, metric_text
+                                global_step, file_idx + 1, epoch + 1, metric_text
                             )
 
             if rank0:
