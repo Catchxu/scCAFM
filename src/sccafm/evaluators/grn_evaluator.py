@@ -2,7 +2,7 @@ import gc
 import logging
 import os
 from contextlib import nullcontext
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -14,6 +14,7 @@ from torch.utils.data.distributed import DistributedSampler
 
 from ..models import SFM
 from ..tokenizer import TomeDataset, TomeTokenizer, tome_collate_fn
+from .metric import compute_selected_metrics, normalize_metric_selection, safe_nan_stats
 
 
 def _setup_logger(
@@ -112,57 +113,6 @@ def _build_labels(tf_ids: np.ndarray, tg_ids: np.ndarray, src_to_tg: Dict[int, s
     return labels
 
 
-def _safe_auroc(y_true: np.ndarray, scores: np.ndarray) -> float:
-    y = y_true.astype(np.int64)
-    pos = int(y.sum())
-    neg = int(y.shape[0] - pos)
-    if pos == 0 or neg == 0:
-        return float("nan")
-
-    order = np.argsort(scores)[::-1]
-    y_sorted = y[order]
-
-    tps = np.cumsum(y_sorted)
-    fps = np.cumsum(1 - y_sorted)
-
-    tpr = np.concatenate(([0.0], tps / max(pos, 1), [1.0]))
-    fpr = np.concatenate(([0.0], fps / max(neg, 1), [1.0]))
-    return float(np.trapz(tpr, fpr))
-
-
-def _safe_auprc(y_true: np.ndarray, scores: np.ndarray) -> float:
-    y = y_true.astype(np.int64)
-    pos = int(y.sum())
-    if pos == 0:
-        return float("nan")
-
-    order = np.argsort(scores)[::-1]
-    y_sorted = y[order]
-
-    tp = np.cumsum(y_sorted)
-    denom = np.arange(1, y_sorted.shape[0] + 1)
-    precision = tp / denom
-
-    pos_idx = np.where(y_sorted == 1)[0]
-    if pos_idx.shape[0] == 0:
-        return float("nan")
-    return float(np.mean(precision[pos_idx]))
-
-
-def _safe_nan_stats(values: List[float]) -> Tuple[float, float, int]:
-    arr = np.asarray(values, dtype=np.float64)
-    valid = arr[~np.isnan(arr)]
-    if valid.size == 0:
-        return float("nan"), float("nan"), 0
-    return float(valid.mean()), float(valid.std()), int(valid.size)
-
-
-def _safe_ratio(numer: float, denom: float) -> float:
-    if np.isnan(numer) or np.isnan(denom) or denom <= 0:
-        return float("nan")
-    return float(numer / denom)
-
-
 def _resolve_species_for_tf(adata, cond_species_key: Optional[str]) -> str:
     # 1) Prefer tokenizer species key from adata.obs if provided.
     if cond_species_key is not None and cond_species_key in adata.obs:
@@ -225,24 +175,7 @@ def evaluate_grn(
     os.makedirs(output_dir, exist_ok=True)
     logger = _setup_logger(output_dir, log_dir, log_name, log_overwrite=log_overwrite) if rank0 else None
 
-    if isinstance(metric, str):
-        selected_metrics = [metric.lower()]
-    elif isinstance(metric, list) and all(isinstance(m, str) for m in metric):
-        selected_metrics = [m.lower() for m in metric]
-    else:
-        raise ValueError("`metric` must be a string or a list of strings.")
-
-    if len(selected_metrics) == 0:
-        raise ValueError("`metric` must contain at least one metric.")
-    # Preserve user order and deduplicate.
-    selected_metrics = list(dict.fromkeys(selected_metrics))
-
-    supported_metrics = {"auprc", "auroc", "auprc_ratio", "auroc_ratio"}
-    invalid_metrics = [m for m in selected_metrics if m not in supported_metrics]
-    if invalid_metrics:
-        raise ValueError(
-            f"Unsupported metric(s) {invalid_metrics}. Use one of: {sorted(supported_metrics)}."
-        )
+    selected_metrics = normalize_metric_selection(metric)
     primary_metric = selected_metrics[0]
 
     amp_dtype = amp_dtype.lower()
@@ -403,26 +336,8 @@ def evaluate_grn(
                     y_true = labels.reshape(-1)
                     y_score = logits.reshape(-1)
 
-                    auprc = _safe_auprc(y_true, y_score)
-                    auroc = _safe_auroc(y_true, y_score)
-
                     pos_edges = int(y_true.sum())
-                    all_edges = int(y_true.shape[0])
-                    neg_edges = all_edges - pos_edges
-
-                    # Random baseline: positive prevalence for AUPRC and 0.5 for AUROC.
-                    auprc_random = float(pos_edges / all_edges) if all_edges > 0 else float("nan")
-                    auroc_random = 0.5 if pos_edges > 0 and neg_edges > 0 else float("nan")
-
-                    auprc_ratio = _safe_ratio(auprc, auprc_random)
-                    auroc_ratio = _safe_ratio(auroc, auroc_random)
-
-                    metric_map = {
-                        "auprc": auprc,
-                        "auroc": auroc,
-                        "auprc_ratio": auprc_ratio,
-                        "auroc_ratio": auroc_ratio,
-                    }
+                    metric_map = compute_selected_metrics(y_true, y_score, selected_metrics)
 
                     abs_idx = int(batch_indices[i])
                     row = {
@@ -442,7 +357,7 @@ def evaluate_grn(
                 processed += batch_n
                 if logger and log_interval > 0 and step % log_interval == 0:
                     metric_vals = [r.get(primary_metric, float("nan")) for r in records]
-                    mean_metric, _, valid_n = _safe_nan_stats(metric_vals)
+                    mean_metric, _, valid_n = safe_nan_stats(metric_vals)
                     logger.info(
                         "progress | file=%d step=%d processed_cells=%d metric=%s mean=%.6f valid=%d",
                         file_idx + 1,
@@ -488,7 +403,7 @@ def evaluate_grn(
         "per_cell_csv": cell_csv,
     }
     for m in selected_metrics:
-        mean_m, std_m, valid_m = _safe_nan_stats(df[m].tolist())
+        mean_m, std_m, valid_m = safe_nan_stats(df[m].tolist())
         summary[f"{m}_mean"] = mean_m
         summary[f"{m}_std"] = std_m
         summary[f"{m}_valid_cells"] = valid_m
