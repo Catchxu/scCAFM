@@ -16,7 +16,7 @@ tokenizer:
 
 eval:
   checkpoint_path: ./checkpoints/sfm_latest.pt
-  batch_size: 64
+  batch_size: 32
   device: cuda
   output_dir: ./results
   log_dir: ./logs

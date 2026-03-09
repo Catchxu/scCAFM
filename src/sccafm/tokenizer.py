@@ -61,7 +61,7 @@ class GeneTokenizer:
                 rearrange gene names in each row accordingly.
         """
         # ---- 1. Get gene names ----
-        if gene_key is None:
+        if gene_key is None or gene_key not in adata.var:
             gene_names = adata.var_names.tolist()
         else:
             gene_names = adata.var[gene_key].tolist()
@@ -358,10 +358,8 @@ class TomeTokenizer:
             )
     
     def _resolve_gene_names(self, adata, gene_key=None):
-        if gene_key is None:
+        if gene_key is None or gene_key not in adata.var:
             return adata.var_names.astype(str).tolist()
-        if gene_key not in adata.var:
-            raise ValueError(f"gene_key='{gene_key}' not found in adata.var.")
         return adata.var[gene_key].astype(str).tolist()
 
     def _build_mito_mask(self, gene_names):
@@ -427,11 +425,9 @@ class TomeTokenizer:
         - gene_symbol: case-insensitive
         - gene_id (ENSG*): version suffix tolerant (e.g., ENSG... .1)
         """
-        if gene_key is None:
+        if gene_key is None or gene_key not in adata.var:
             raw_names = adata.var_names.astype(str).tolist()
         else:
-            if gene_key not in adata.var:
-                raise ValueError(f"gene_key='{gene_key}' not found in adata.var.")
             raw_names = adata.var[gene_key].astype(str).tolist()
 
         keep = []
