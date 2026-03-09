@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .utils import FactorState, reparameterize, expand_u
+from .utils import FactorState, reparameterize, expand_u, RMSNorm
 
 
 class StructureAwareGraphAttention(nn.Module):
@@ -55,13 +55,13 @@ class StructureAwareGraphAttention(nn.Module):
 class GATBlock(nn.Module):
     def __init__(self, hidden_dim=128, num_heads=4, dropout=0.1):
         super().__init__()
-        self.norm1 = nn.RMSNorm(hidden_dim)
+        self.norm1 = RMSNorm(hidden_dim)
         self.attn = StructureAwareGraphAttention(
             hidden_dim=hidden_dim,
             num_heads=num_heads,
             dropout=dropout,
         )
-        self.norm2 = nn.RMSNorm(hidden_dim)
+        self.norm2 = RMSNorm(hidden_dim)
         self.ffn = nn.Sequential(
             nn.Linear(hidden_dim, 4 * hidden_dim),
             nn.GELU(),
@@ -142,7 +142,7 @@ class VariationalEncoder(GraphStructureMixin, nn.Module):
         self.layers = nn.ModuleList(
             [GATBlock(hidden_dim, num_heads=num_heads, dropout=dropout) for _ in range(num_layers)]
         )
-        self.norm = nn.RMSNorm(hidden_dim)
+        self.norm = RMSNorm(hidden_dim)
 
         self.z_proj = nn.Linear(hidden_dim, 2)
 
@@ -168,7 +168,7 @@ class ExprModeling(GraphStructureMixin, nn.Module):
         self.layers = nn.ModuleList(
             [GATBlock(hidden_dim, num_heads=num_heads, dropout=dropout) for _ in range(num_layers)]
         )
-        self.norm = nn.RMSNorm(hidden_dim)
+        self.norm = RMSNorm(hidden_dim)
         self.h_proj = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),

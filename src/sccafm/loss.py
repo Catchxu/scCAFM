@@ -210,14 +210,12 @@ class PriorLoss(nn.Module):
         filt_src_ids, filt_tgt_ids = self._filter_prior_pairs_by_used_genes(gene_tokens)
         target = self._build_gt_matrix_from_pairs(gene_tokens, filt_src_ids, filt_tgt_ids)
         
-        # 3. Compute predicted edge probabilities in selected-space dimensions (B, S, S)
+        # 3. Compute predicted edge scores in selected-space dimensions (B, S, S)
         grn_full = self._factorized_logits(u, v, model_tf_mask)
 
-        # BCEWithLogitsLoss expects unconstrained logits, not log-probabilities.
-        # Since SFM outputs bounded factor weights, convert the edge probability
-        # into a proper logit before supervision.
-        edge_prob = grn_full.clamp(1e-6, 1.0 - 1e-6)
-        edge_logit = torch.logit(edge_prob)
+        # Parameter-free existence logit.
+        # x -> 0 gives very negative logit; larger x increases edge likelihood.
+        edge_logit = torch.log(grn_full + 1e-8)
         
         # 4. Construct 2D mask (Source x Target):
         # source gene must be an active TF in selected space.
@@ -392,6 +390,8 @@ class SFMLoss(nn.Module):
                     pos_weight=kwargs.get("prior_pos_weight", 10.0),
                     neg_weight=kwargs.get("prior_neg_weight", 1.0),
                     neg_sample_ratio=kwargs.get("prior_neg_sample_ratio", None),
+                    logit_scale=kwargs.get("prior_logit_scale", 5.0),
+                    logit_center=kwargs.get("prior_logit_center", 0.5),
                 )
                 self.true_grn_df = true_grn_df # Store prior knowledge internally
             

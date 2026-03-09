@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .attention import MaskedMHA
+from .utils import RMSNorm
 
 
 class SwiGLU(nn.Module):
@@ -31,8 +32,8 @@ class TransformerLayer(nn.Module):
             use_rotary=use_rotary
         )
 
-        self.norm1 = nn.RMSNorm(embed_dim)
-        self.norm2 = nn.RMSNorm(embed_dim)
+        self.norm1 = RMSNorm(embed_dim)
+        self.norm2 = RMSNorm(embed_dim)
 
         if ffn_hidden_dim is None:
             ffn_hidden_dim = 4*embed_dim
@@ -91,7 +92,7 @@ class TomoEncoder(nn.Module):
             for _ in range(num_layers)
         ])
 
-        self.norm_out = nn.RMSNorm(embed_dim)
+        self.norm_out = RMSNorm(embed_dim)
 
     def forward(self, x, key_padding_mask=None, causal=False):
         for layer in self.layers:

@@ -1,4 +1,5 @@
 import torch
+import torch.nn as nn
 from dataclasses import dataclass
 
 
@@ -51,6 +52,20 @@ def reparameterize(mu: torch.Tensor, sigma: torch.Tensor):
         )
     eps = torch.randn_like(sigma)
     return mu + eps * sigma
+
+
+class RMSNorm(nn.Module):
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = float(eps)
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x_fp32 = x.float()
+        rms = x_fp32.pow(2).mean(dim=-1, keepdim=True)
+        x_norm = x_fp32 * torch.rsqrt(rms + self.eps)
+        out = x_norm * self.weight.float()
+        return out.to(dtype=x.dtype)
 
 
 def expand_grn(grn: torch.Tensor, binary_tf: torch.Tensor, binary_tg: torch.Tensor):

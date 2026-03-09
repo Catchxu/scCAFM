@@ -386,6 +386,17 @@ class TomeTokenizer:
         n_top_genes = self.prep_cfg["n_top_genes"]
         remove_mito_genes = self.prep_cfg["remove_mito_genes"]
 
+        # Replace non-finite expression values before any scanpy preprocessing.
+        X = adata.X
+        if isinstance(X, np.ndarray):
+            if not np.isfinite(X).all():
+                adata.X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+        else:
+            if hasattr(X, "data") and X.data is not None and not np.isfinite(X.data).all():
+                X = X.copy()
+                X.data = np.nan_to_num(X.data, nan=0.0, posinf=0.0, neginf=0.0)
+                adata.X = X
+
         # Remove mitochondrial genes before downstream filtering/normalization.
         if remove_mito_genes:
             gene_names = self._resolve_gene_names(adata, gene_key=gene_key)
