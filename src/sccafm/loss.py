@@ -14,6 +14,9 @@ class PriorLoss(nn.Module):
         self,
         tome_tokenizer: TomeTokenizer,
         true_grn_df: Optional[pd.DataFrame] = None,
+        pos_weight: float = 1.0,
+        neg_weight: float = 1.0,
+        neg_sample_ratio: Optional[float] = None,
     ):
         super().__init__()
         gt = tome_tokenizer.gene_tokenizer
@@ -26,6 +29,9 @@ class PriorLoss(nn.Module):
         if len(self.id2id) > 0:
             token_max_1 = max(token_max_1, max(int(v) for v in self.id2id.values()) + 1)
         self._pair_key_base = int(token_max_1)
+        self.pos_weight = float(pos_weight)
+        self.neg_weight = float(neg_weight)
+        self.neg_sample_ratio = None if neg_sample_ratio is None else float(neg_sample_ratio)
         self._cached_src_ids = None
         self._cached_tgt_ids = None
         self._cached_prior_ref = None
@@ -80,31 +86,6 @@ class PriorLoss(nn.Module):
 
         self._cached_prior_ref = true_grn
 
-    def _build_gt_matrix(self, gene_tokens: torch.Tensor):
-        """
-        Args:
-            gene_tokens: (B, L)
-        """
-        C, S = gene_tokens.shape
-        device = gene_tokens.device
-
-        if self._cached_src_ids is None or self._cached_tgt_ids is None:
-            raise RuntimeError("Prior cache is empty. Call with true_grn_df at least once.")
-        if self._cached_src_ids.numel() == 0:
-            return torch.zeros((C, S, S), device=device)
-
-        src_ids = self._cached_src_ids.to(device=device)
-        tgt_ids = self._cached_tgt_ids.to(device=device)
-        target = torch.zeros((C, S, S), device=device)
-
-        # Build one sample at a time to avoid allocating (B, S, P) tensors.
-        for b in range(C):
-            src_matches = (gene_tokens[b].unsqueeze(-1) == src_ids.view(1, -1)).float()  # (S, P)
-            tgt_matches = (gene_tokens[b].unsqueeze(-1) == tgt_ids.view(1, -1)).float()  # (S, P)
-            target[b] = (src_matches @ tgt_matches.transpose(0, 1) > 0).float()
-
-        return target
-
     def _filter_prior_pairs_by_used_genes(self, gene_tokens: torch.Tensor):
         """
         Explicitly filter cached prior edges to genes used in this batch.
@@ -126,53 +107,6 @@ class PriorLoss(nn.Module):
         tgt_ids = self._cached_tgt_ids.to(device=device)
         keep = torch.isin(src_ids, used_ids) & torch.isin(tgt_ids, used_ids)
         return src_ids[keep], tgt_ids[keep]
-
-    def _build_gt_matrix_from_pairs(
-        self,
-        gene_tokens: torch.Tensor,
-        src_ids: torch.Tensor,
-        tgt_ids: torch.Tensor,
-    ):
-        """
-        Build batch target matrix using already-filtered prior pairs.
-        """
-        C, S = gene_tokens.shape
-        device = gene_tokens.device
-        if src_ids.numel() == 0:
-            return torch.zeros((C, S, S), device=device)
-
-        target = torch.zeros((C, S, S), device=device)
-        for b in range(C):
-            src_matches = (gene_tokens[b].unsqueeze(-1) == src_ids.view(1, -1)).float()
-            tgt_matches = (gene_tokens[b].unsqueeze(-1) == tgt_ids.view(1, -1)).float()
-            target[b] = (src_matches @ tgt_matches.transpose(0, 1) > 0).float()
-        return target
-
-    def _build_assoc_mask_from_pairs(
-        self,
-        gene_tokens: torch.Tensor,
-        src_ids: torch.Tensor,
-        tgt_ids: torch.Tensor,
-    ):
-        """
-        Supervise only source/target genes that appear in filtered prior pairs.
-        """
-        C, S = gene_tokens.shape
-        device = gene_tokens.device
-        if src_ids.numel() == 0:
-            return torch.zeros((C, S, S), dtype=torch.bool, device=device)
-
-        src_unique = torch.unique(src_ids)
-        tgt_unique = torch.unique(tgt_ids)
-        src_assoc = (gene_tokens.unsqueeze(-1) == src_unique.view(1, 1, -1)).any(dim=-1)
-        tgt_assoc = (gene_tokens.unsqueeze(-1) == tgt_unique.view(1, 1, -1)).any(dim=-1)
-        return torch.einsum("bi,bj->bij", src_assoc, tgt_assoc).bool()
-
-    def _factorized_logits(self, u: torch.Tensor, v: torch.Tensor, model_tf_mask: torch.Tensor):
-        # Build full-source factors in selected TG space and compute dense scores lazily.
-        # scores: (C, S, S) with S = selected TG count
-        u_full = expand_u(u, model_tf_mask.bool())
-        return torch.bmm(u_full, v.transpose(1, 2))
 
     def _masked_select_fixed_count(self, x: torch.Tensor, mask: torch.Tensor, name: str):
         if mask.dtype != torch.bool:
@@ -251,30 +185,48 @@ class PriorLoss(nn.Module):
             edge_prob_sub = torch.matmul(u_full[b, src_pos, :], v[b, tgt_pos, :].transpose(0, 1))
             target_sub = torch.zeros_like(edge_prob_sub, dtype=torch.float32)
 
-            src_local_map = torch.full(
-                (self._pair_key_base,),
-                -1,
-                dtype=torch.long,
-                device=tokens_b.device,
-            )
-            tgt_local_map = torch.full(
-                (self._pair_key_base,),
-                -1,
-                dtype=torch.long,
-                device=tokens_b.device,
-            )
-            src_local_map[src_ids_b] = torch.arange(src_ids_b.numel(), device=tokens_b.device)
-            tgt_local_map[tgt_ids_b] = torch.arange(tgt_ids_b.numel(), device=tokens_b.device)
+            src_local = torch.searchsorted(src_ids_b, filt_src_ids)
+            src_in_range = src_local < src_ids_b.numel()
+            src_probe = src_ids_b[src_local.clamp(max=max(src_ids_b.numel() - 1, 0))]
+            src_valid = src_in_range & (src_probe == filt_src_ids)
 
-            src_local = src_local_map[filt_src_ids]
-            tgt_local = tgt_local_map[filt_tgt_ids]
-            pos_keep = (src_local >= 0) & (tgt_local >= 0)
+            tgt_local = torch.searchsorted(tgt_ids_b, filt_tgt_ids)
+            tgt_in_range = tgt_local < tgt_ids_b.numel()
+            tgt_probe = tgt_ids_b[tgt_local.clamp(max=max(tgt_ids_b.numel() - 1, 0))]
+            tgt_valid = tgt_in_range & (tgt_probe == filt_tgt_ids)
+            pos_keep = src_valid & tgt_valid
             if pos_keep.any():
                 target_sub[src_local[pos_keep], tgt_local[pos_keep]] = 1.0
 
             loss_sub = self._binary_cross_entropy_prob(edge_prob_sub, target_sub)
-            total_loss_sum = total_loss_sum + loss_sub.sum()
-            total_supervised = total_supervised + target_sub.new_tensor(target_sub.numel(), dtype=torch.float32)
+            weight_sub = target_sub * self.pos_weight + (1.0 - target_sub) * self.neg_weight
+
+            if self.neg_sample_ratio is not None and self.neg_sample_ratio > 0:
+                pos_mask = target_sub > 0.5
+                neg_mask = ~pos_mask
+                pos_count = int(pos_mask.sum().item())
+                neg_count = int(neg_mask.sum().item())
+                if pos_count > 0 and neg_count > 0:
+                    sample_k = min(neg_count, int(pos_count * self.neg_sample_ratio))
+                    if sample_k > 0:
+                        neg_idx = torch.nonzero(neg_mask, as_tuple=False)
+                        perm = torch.randperm(neg_idx.shape[0], device=neg_idx.device)[:sample_k]
+                        chosen = neg_idx[perm]
+                        sampled_neg = torch.zeros_like(neg_mask)
+                        sampled_neg[chosen[:, 0], chosen[:, 1]] = True
+                        supervise_mask = pos_mask | sampled_neg
+                    else:
+                        supervise_mask = pos_mask
+                else:
+                    supervise_mask = torch.ones_like(target_sub, dtype=torch.bool)
+                supervise_mask_f = supervise_mask.float()
+            else:
+                supervise_mask_f = torch.ones_like(target_sub, dtype=torch.float32)
+
+            numer = (loss_sub * weight_sub * supervise_mask_f).sum()
+            denom = (weight_sub * supervise_mask_f).sum()
+            total_loss_sum = total_loss_sum + numer
+            total_supervised = total_supervised + denom
 
         return total_loss_sum / (total_supervised + 1e-8)
 
@@ -412,6 +364,9 @@ class SFMLoss(nn.Module):
                 self.prior_criterion = PriorLoss(
                     tome_tokenizer,
                     true_grn_df=true_grn_df,
+                    pos_weight=kwargs.get("prior_pos_weight", 1.0),
+                    neg_weight=kwargs.get("prior_neg_weight", 1.0),
+                    neg_sample_ratio=kwargs.get("prior_neg_sample_ratio", None),
                 )
                 self.true_grn_df = true_grn_df # Store prior knowledge internally
             

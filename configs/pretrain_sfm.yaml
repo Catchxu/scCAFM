@@ -10,6 +10,9 @@ loss:
   kwargs:
     use_prior: True
     use_dag: False
+    prior_pos_weight: 10.0
+    prior_neg_weight: 1.0
+    prior_neg_sample_ratio: 5.0
     alpha: 0.0
     rho: 0.01
     rho_max: 1e6

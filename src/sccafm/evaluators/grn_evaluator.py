@@ -358,11 +358,12 @@ def evaluate_grn(
                 if logger and log_interval > 0 and step % log_interval == 0:
                     metric_vals = [r.get(primary_metric, float("nan")) for r in records]
                     mean_metric, _, valid_n = safe_nan_stats(metric_vals)
+                    processed_global = processed * world_size if is_distributed else processed
                     logger.info(
                         "progress | file=%d step=%d processed_cells=%d metric=%s mean=%.6f valid=%d",
                         file_idx + 1,
                         step,
-                        processed,
+                        processed_global,
                         primary_metric,
                         mean_metric,
                         valid_n,

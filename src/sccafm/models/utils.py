@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass
@@ -17,6 +18,8 @@ class FactorState:
     binary_tg: torch.Tensor
     u: torch.Tensor
     v: torch.Tensor
+    u_score: Optional[torch.Tensor] = None
+    v_score: Optional[torch.Tensor] = None
 
     def validate(self) -> None:
         if self.binary_tf.ndim != 2 or self.binary_tg.ndim != 2:
@@ -43,6 +46,16 @@ class FactorState:
             raise ValueError(
                 f"v TG dim ({self.v.shape[1]}) does not match binary_tg true-counts per sample: {tg_counts.tolist()}"
             )
+        if self.u_score is not None:
+            if self.u_score.shape != self.u.shape:
+                raise ValueError(
+                    f"u_score shape mismatch: expected {tuple(self.u.shape)}, got {tuple(self.u_score.shape)}"
+                )
+        if self.v_score is not None:
+            if self.v_score.shape != self.v.shape:
+                raise ValueError(
+                    f"v_score shape mismatch: expected {tuple(self.v.shape)}, got {tuple(self.v_score.shape)}"
+                )
 
 
 def reparameterize(mu: torch.Tensor, sigma: torch.Tensor):

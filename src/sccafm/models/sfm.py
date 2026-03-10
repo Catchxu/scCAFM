@@ -126,7 +126,7 @@ class GeneRouter(nn.Module):
             nn.Linear(embed_dim, hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, num_factors)
+            nn.Linear(hidden_dim, 2 * num_factors)
         )
 
         # Optional gating via differentiable top-k
@@ -153,6 +153,8 @@ class GeneRouter(nn.Module):
         Returns:
             probs: FloatTensor (C, S, m)
                 Assignment probabilities over m factors for selected genes (S)
+            scores: FloatTensor (C, S, m)
+                Free-strength factor scores from the second half logits.
         """
         if x.dim() != 3:
             raise ValueError("x must be shape (C, L, E)")
@@ -178,14 +180,17 @@ class GeneRouter(nn.Module):
             gene_subset = gene_subset[:, 1:]
         
         x = x[gene_subset].view(C, -1, E)   # (C, S, E)
-        logits = self.mlp(x) / temperature  # (C, S, m)
+        logits = self.mlp(x)  # (C, S, 2m)
+        prob_logits, score_logits = torch.split(logits, self.n_factors, dim=-1)
+        prob_logits = prob_logits / temperature
+        scores = score_logits
 
         if self.gating is not None:
-            probs = self.gating(logits)
+            probs = self.gating(prob_logits)
         else:
-            probs = F.softmax(logits, dim=-1)
+            probs = F.softmax(prob_logits, dim=-1)
 
-        return probs, gene_subset
+        return probs, scores, gene_subset
 
 
 class SFM(nn.Module):
@@ -288,13 +293,20 @@ class SFM(nn.Module):
         else:
             gene_subset = None
 
-        u, binary_tf = self.tfrouter(x, gene_subset, key_padding_mask, **kwargs)
-        v, binary_tg = self.tgrouter(x, None, key_padding_mask, **kwargs)
+        u, u_score, binary_tf = self.tfrouter(x, gene_subset, key_padding_mask, **kwargs)
+        v, v_score, binary_tg = self.tgrouter(x, None, key_padding_mask, **kwargs)
 
         grn = None
         if compute_grn:
             grn = torch.einsum('cfm,cgm->cfg', u, v)
-        factors = FactorState(binary_tf=binary_tf, binary_tg=binary_tg, u=u, v=v)
+        factors = FactorState(
+            binary_tf=binary_tf,
+            binary_tg=binary_tg,
+            u=u,
+            v=v,
+            u_score=u_score,
+            v_score=v_score,
+        )
         
         if return_factors:
             return grn, factors
