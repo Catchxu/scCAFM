@@ -84,33 +84,56 @@ def _build_gt_lookup(eval_grn_df: pd.DataFrame, tokenizer: TomeTokenizer):
     symbol2id = tokenizer.gene_tokenizer.symbol2id
     id2id = tokenizer.gene_tokenizer.id2id
 
-    src_to_tg: Dict[int, set] = {}
+    pair_set = set()
     mapped = 0
     for g1, g2 in zip(eval_grn_df["Gene1"].tolist(), eval_grn_df["Gene2"].tolist()):
         src = _map_gene_to_token(g1, symbol2id, id2id)
         tgt = _map_gene_to_token(g2, symbol2id, id2id)
         if src is None or tgt is None:
             continue
-        src_to_tg.setdefault(src, set()).add(tgt)
+        pair_set.add((int(src), int(tgt)))
         mapped += 1
 
-    unique_pairs = sum(len(v) for v in src_to_tg.values())
-    return src_to_tg, unique_pairs, mapped
+    gt_tf_ids = sorted({s for s, _ in pair_set})
+    gt_gene_ids = sorted({s for s, _ in pair_set} | {t for _, t in pair_set})
+    tf_to_idx = {tid: i for i, tid in enumerate(gt_tf_ids)}
+    gene_to_idx = {gid: j for j, gid in enumerate(gt_gene_ids)}
 
-
-def _build_labels(tf_ids: np.ndarray, tg_ids: np.ndarray, src_to_tg: Dict[int, set]) -> np.ndarray:
-    tf_n = tf_ids.shape[0]
-    tg_n = tg_ids.shape[0]
-    labels = np.zeros((tf_n, tg_n), dtype=np.uint8)
-    if tf_n == 0 or tg_n == 0:
-        return labels
-
-    for i, src in enumerate(tf_ids.tolist()):
-        tg_set = src_to_tg.get(int(src))
-        if not tg_set:
+    labels = np.zeros((len(gt_tf_ids) * len(gt_gene_ids),), dtype=np.uint8)
+    g_n = len(gt_gene_ids)
+    for s, t in pair_set:
+        i = tf_to_idx.get(s, None)
+        j = gene_to_idx.get(t, None)
+        if i is None or j is None:
             continue
-        labels[i, :] = np.isin(tg_ids, np.fromiter(tg_set, dtype=np.int64), assume_unique=False)
-    return labels
+        labels[i * g_n + j] = 1
+
+    unique_pairs = len(pair_set)
+    return pair_set, mapped, gt_tf_ids, gt_gene_ids, tf_to_idx, gene_to_idx, labels, unique_pairs
+
+
+def _compute_metrics_from_output_table(
+    output_df: pd.DataFrame,
+    labels: np.ndarray,
+    tf_to_idx: Dict[int, int],
+    gene_to_idx: Dict[int, int],
+    selected_metrics: List[str],
+) -> Dict[str, float]:
+    # Keep only edges in GT TF/Gene universe.
+    output_df = output_df[
+        output_df["Gene1"].isin(tf_to_idx.keys()) & output_df["Gene2"].isin(gene_to_idx.keys())
+    ]
+
+    preds = np.full(labels.shape, -1.0, dtype=np.float64)
+    g_n = len(gene_to_idx)
+    for row in output_df.itertuples(index=False):
+        i = tf_to_idx.get(int(row.Gene1), None)
+        j = gene_to_idx.get(int(row.Gene2), None)
+        if i is None or j is None:
+            continue
+        preds[i * g_n + j] = float(row.EdgeWeight)
+
+    return compute_selected_metrics(labels, preds, selected_metrics)
 
 
 def _resolve_species_for_tf(adata, cond_species_key: Optional[str]) -> str:
@@ -176,7 +199,6 @@ def evaluate_grn(
     logger = _setup_logger(output_dir, log_dir, log_name, log_overwrite=log_overwrite) if rank0 else None
 
     selected_metrics = normalize_metric_selection(metric)
-    primary_metric = selected_metrics[0]
 
     amp_dtype = amp_dtype.lower()
     if amp_dtype not in {"bf16", "fp16"}:
@@ -203,31 +225,28 @@ def evaluate_grn(
         disease_key=disease_key,
     )
 
-    src_to_tg, unique_pairs, mapped_pairs = _build_gt_lookup(eval_grn_df, tokenizer)
+    (
+        _,
+        mapped_pairs,
+        gt_tf_ids,
+        gt_gene_ids,
+        tf_to_idx,
+        gene_to_idx,
+        gt_labels,
+        unique_pairs,
+    ) = _build_gt_lookup(eval_grn_df, tokenizer)
     if logger:
         logger.info(
-            (
-                "GRN eval start | files=%d | batch_size=%d | device=%s | ddp=%s | world_size=%d | metrics=%s | "
-                "gt_mapped_edges=%d | gt_unique_edges=%d | tokenizer_keys="
-                "gene=%s platform=%s cond_species=%s tissue=%s disease=%s"
-            ),
+            "GRN eval start | files=%d | batch_size=%d | device=%s | ddp=%s | world_size=%d | metrics=%s",
             len(adata_files),
             batch_size,
             device,
             is_distributed,
             world_size,
             ",".join(selected_metrics),
-            mapped_pairs,
-            unique_pairs,
-            gene_key,
-            platform_key,
-            cond_species_key,
-            tissue_key,
-            disease_key,
         )
 
     records = []
-    processed = 0
 
     for file_idx, file_path in enumerate(adata_files):
         if logger:
@@ -332,12 +351,31 @@ def evaluate_grn(
                     tg_ids = genes[i][tg_mask].numpy().astype(np.int64, copy=False)
                     logits = np.abs(grn[i].numpy().astype(np.float64, copy=False))
 
-                    labels = _build_labels(tf_ids, tg_ids, src_to_tg)
-                    y_true = labels.reshape(-1)
-                    y_score = logits.reshape(-1)
+                    # Convert estimated dense matrix to edge table: Gene1, Gene2, EdgeWeight.
+                    tf_rep = np.repeat(tf_ids, tg_ids.shape[0])
+                    tg_tile = np.tile(tg_ids, tf_ids.shape[0])
+                    output_df = pd.DataFrame(
+                        {
+                            "Gene1": tf_rep,
+                            "Gene2": tg_tile,
+                            "EdgeWeight": logits.reshape(-1),
+                        }
+                    )
 
-                    pos_edges = int(y_true.sum())
-                    metric_map = compute_selected_metrics(y_true, y_score, selected_metrics)
+                    metric_map = _compute_metrics_from_output_table(
+                        output_df=output_df,
+                        labels=gt_labels,
+                        tf_to_idx=tf_to_idx,
+                        gene_to_idx=gene_to_idx,
+                        selected_metrics=selected_metrics,
+                    )
+                    pos_edges = int(gt_labels.sum())
+                    pred_kept = int(
+                        (
+                            output_df["Gene1"].isin(tf_to_idx.keys())
+                            & output_df["Gene2"].isin(gene_to_idx.keys())
+                        ).sum()
+                    )
 
                     abs_idx = int(batch_indices[i])
                     row = {
@@ -345,28 +383,29 @@ def evaluate_grn(
                         "file_path": file_path,
                         "cell_index_in_file": abs_idx,
                         "cell_name": obs_names[abs_idx] if abs_idx < len(obs_names) else str(abs_idx),
-                        "num_tf": tf_n,
-                        "num_tg": tg_n,
-                        "num_edges": int(tf_n * tg_n),
+                        "raw_num_tf": tf_n,
+                        "raw_num_tg": tg_n,
+                        "num_tf": int(len(gt_tf_ids)),
+                        "num_tg": int(len(gt_gene_ids)),
+                        "num_edges": int(gt_labels.shape[0]),
                         "num_pos_edges": pos_edges,
+                        "num_pred_edges": pred_kept,
                     }
                     for m in selected_metrics:
                         row[m] = metric_map[m]
                     records.append(row)
 
-                processed += batch_n
                 if logger and log_interval > 0 and step % log_interval == 0:
-                    metric_vals = [r.get(primary_metric, float("nan")) for r in records]
-                    mean_metric, _, valid_n = safe_nan_stats(metric_vals)
-                    processed_global = processed * world_size if is_distributed else processed
+                    metric_log_parts = []
+                    for m in selected_metrics:
+                        metric_vals = [r.get(m, float("nan")) for r in records]
+                        mean_metric, _, _ = safe_nan_stats(metric_vals)
+                        metric_log_parts.append(f"{m}_mean={mean_metric:.6f}")
                     logger.info(
-                        "progress | file=%d step=%d processed_cells=%d metric=%s mean=%.6f valid=%d",
+                        "progress | file=%d step=%d %s",
                         file_idx + 1,
                         step,
-                        processed_global,
-                        primary_metric,
-                        mean_metric,
-                        valid_n,
+                        " | ".join(metric_log_parts),
                     )
 
         del adata, tokens_dict, dataset, loader

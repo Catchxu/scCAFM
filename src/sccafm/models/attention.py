@@ -40,7 +40,6 @@ class MaskedMHA(nn.Module):
         """
         # ensure head_dim is even
         assert (self.head_dim % 2) == 0, "head_dim must be even for rotary"
-        half_dim = self.head_dim // 2
 
         L = q.shape[2]
         device = q.device

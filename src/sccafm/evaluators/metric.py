@@ -26,8 +26,30 @@ def normalize_metric_selection(metric) -> List[str]:
     return selected_metrics
 
 
+def _validate_metric_inputs(y_true: np.ndarray, y_score: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    y_true = np.asarray(y_true).reshape(-1)
+    y_score = np.asarray(y_score).reshape(-1)
+
+    if y_true.shape[0] != y_score.shape[0]:
+        raise ValueError(
+            f"y_true and y_score must have the same number of entries, got "
+            f"{y_true.shape[0]} and {y_score.shape[0]}"
+        )
+    if y_true.shape[0] == 0:
+        raise ValueError("y_true and y_score must be non-empty.")
+
+    if not np.isfinite(y_score).all():
+        raise ValueError("y_score contains non-finite values (nan/inf).")
+
+    y_int = y_true.astype(np.int64)
+    uniq = np.unique(y_int)
+    if not np.isin(uniq, np.array([0, 1], dtype=np.int64)).all():
+        raise ValueError(f"y_true must be binary (0/1), got values: {uniq.tolist()}")
+    return y_int, y_score.astype(np.float64, copy=False)
+
+
 def safe_auroc(y_true: np.ndarray, scores: np.ndarray) -> float:
-    y = y_true.astype(np.int64)
+    y, scores = _validate_metric_inputs(y_true, scores)
     pos = int(y.sum())
     neg = int(y.shape[0] - pos)
     if pos == 0 or neg == 0:
@@ -35,32 +57,49 @@ def safe_auroc(y_true: np.ndarray, scores: np.ndarray) -> float:
 
     order = np.argsort(scores)[::-1]
     y_sorted = y[order]
+    s_sorted = scores[order]
 
     tps = np.cumsum(y_sorted)
     fps = np.cumsum(1 - y_sorted)
 
-    tpr = np.concatenate(([0.0], tps / max(pos, 1), [1.0]))
-    fpr = np.concatenate(([0.0], fps / max(neg, 1), [1.0]))
-    return float(np.trapz(tpr, fpr))
+    # Keep points at distinct thresholds (last index of each score block).
+    distinct_idx = np.where(np.diff(s_sorted) != 0)[0]
+    keep_idx = np.concatenate((distinct_idx, np.array([y_sorted.shape[0] - 1])))
+    tpr = tps[keep_idx] / pos
+    fpr = fps[keep_idx] / neg
+
+    # Add curve endpoints.
+    tpr = np.concatenate(([0.0], tpr, [1.0]))
+    fpr = np.concatenate(([0.0], fpr, [1.0]))
+    return float(np.trapezoid(tpr, fpr))
 
 
 def safe_auprc(y_true: np.ndarray, scores: np.ndarray) -> float:
-    y = y_true.astype(np.int64)
+    y, scores = _validate_metric_inputs(y_true, scores)
     pos = int(y.sum())
     if pos == 0:
         return float("nan")
 
     order = np.argsort(scores)[::-1]
     y_sorted = y[order]
+    s_sorted = scores[order]
 
     tp = np.cumsum(y_sorted)
-    denom = np.arange(1, y_sorted.shape[0] + 1)
-    precision = tp / denom
+    fp = np.cumsum(1 - y_sorted)
 
-    pos_idx = np.where(y_sorted == 1)[0]
-    if pos_idx.shape[0] == 0:
-        return float("nan")
-    return float(np.mean(precision[pos_idx]))
+    # Keep points at distinct thresholds (last index of each score block).
+    distinct_idx = np.where(np.diff(s_sorted) != 0)[0]
+    keep_idx = np.concatenate((distinct_idx, np.array([y_sorted.shape[0] - 1])))
+
+    tp_k = tp[keep_idx]
+    fp_k = fp[keep_idx]
+    precision = tp_k / np.maximum(tp_k + fp_k, 1)
+    recall = tp_k / pos
+
+    # Start point: recall=0, precision=1 (conventional PR curve anchor).
+    precision = np.concatenate(([1.0], precision))
+    recall = np.concatenate(([0.0], recall))
+    return float(np.trapezoid(precision, recall))
 
 
 def safe_nan_stats(values: Iterable[float]) -> Tuple[float, float, int]:
