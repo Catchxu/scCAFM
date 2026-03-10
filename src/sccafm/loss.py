@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 import pandas as pd
 from typing import Optional
@@ -37,16 +38,6 @@ class PriorLoss(nn.Module):
         self._cached_prior_ref = None
         if true_grn_df is not None:
             self._prepare_prior_cache(true_grn_df)
-
-    def _binary_cross_entropy_prob(
-        self,
-        prob: torch.Tensor,
-        target: torch.Tensor,
-        eps: float = 1e-8,
-    ) -> torch.Tensor:
-        prob = prob.float().clamp(eps, 1.0 - eps)
-        target = target.float()
-        return -(target * torch.log(prob) + (1.0 - target) * torch.log1p(-prob))
 
     def _map_gene_to_token(self, name: str) -> Optional[int]:
         """
@@ -137,6 +128,8 @@ class PriorLoss(nn.Module):
         binary_tg = factors.binary_tg
         u = factors.u
         v = factors.v
+        u_score = factors.u_score if factors.u_score is not None else torch.ones_like(u)
+        v_score = factors.v_score if factors.v_score is not None else torch.ones_like(v)
         gene_tokens = tokens["gene"]
 
         # 1. Project everything to the same TG-selected space used by GRN prediction.
@@ -151,59 +144,63 @@ class PriorLoss(nn.Module):
         if filt_src_ids.numel() == 0:
             return gene_tokens.new_zeros((), dtype=torch.float32)
 
-        # 3. Build dense source factors once, then supervise only relevant submatrices.
-        u_full = expand_u(u, model_tf_mask.bool())  # (C, S, M)
+        # 3. Build dense source factors once.
+        u_eff = u * u_score
+        v_eff = v * v_score
+        tf_mask = model_tf_mask.bool()
+        u_full = expand_u(u_eff, tf_mask)  # (C, S, M)
         src_unique = torch.unique(filt_src_ids)
         tgt_unique = torch.unique(filt_tgt_ids)
 
-        total_loss_sum = gene_tokens.new_zeros((), dtype=torch.float32)
-        total_supervised = gene_tokens.new_zeros((), dtype=torch.float32)
+        # 4. Vectorized edge logits and supervision region in selected TG space.
+        edge_raw = torch.bmm(u_full, v_eff.transpose(1, 2))  # (C, S, S)
+        edge_logit = torch.log(edge_raw.float().abs() + 1e-8)
 
-        for b in range(gene_tokens.shape[0]):
-            tokens_b = gene_tokens[b]
-            tf_mask_b = model_tf_mask[b].bool()
-            pos_map = torch.full(
-                (self._pair_key_base,),
-                -1,
-                dtype=torch.long,
-                device=tokens_b.device,
-            )
-            pos_map[tokens_b] = torch.arange(tokens_b.shape[0], device=tokens_b.device)
+        src_assoc = torch.isin(gene_tokens, src_unique) & tf_mask
+        tgt_assoc = torch.isin(gene_tokens, tgt_unique)
+        supervise_mask = torch.einsum("bi,bj->bij", src_assoc, tgt_assoc).bool()
 
-            src_ids_b = src_unique[pos_map[src_unique] >= 0]
-            tgt_ids_b = tgt_unique[pos_map[tgt_unique] >= 0]
-            if src_ids_b.numel() == 0 or tgt_ids_b.numel() == 0:
-                continue
-            src_pos = pos_map[src_ids_b]
-            tgt_pos = pos_map[tgt_ids_b]
-            src_tf_keep = tf_mask_b[src_pos]
-            src_ids_b = src_ids_b[src_tf_keep]
-            src_pos = src_pos[src_tf_keep]
-            if src_pos.numel() == 0:
-                continue
+        # 5. Vectorized positive target construction from filtered prior pairs.
+        C, S = gene_tokens.shape
+        P = int(filt_src_ids.numel())
+        target = torch.zeros_like(edge_logit, dtype=torch.float32)
 
-            edge_prob_sub = torch.matmul(u_full[b, src_pos, :], v[b, tgt_pos, :].transpose(0, 1))
-            target_sub = torch.zeros_like(edge_prob_sub, dtype=torch.float32)
+        sorted_tokens, sort_idx = torch.sort(gene_tokens, dim=1)
+        src_vals = filt_src_ids.view(1, -1).expand(C, -1)
+        tgt_vals = filt_tgt_ids.view(1, -1).expand(C, -1)
 
-            src_local = torch.searchsorted(src_ids_b, filt_src_ids)
-            src_in_range = src_local < src_ids_b.numel()
-            src_probe = src_ids_b[src_local.clamp(max=max(src_ids_b.numel() - 1, 0))]
-            src_valid = src_in_range & (src_probe == filt_src_ids)
+        src_loc = torch.searchsorted(sorted_tokens, src_vals)
+        src_in = src_loc < S
+        src_loc_safe = src_loc.clamp(max=max(S - 1, 0))
+        src_hit = src_in & (sorted_tokens.gather(1, src_loc_safe) == src_vals)
+        src_pos = sort_idx.gather(1, src_loc_safe)
 
-            tgt_local = torch.searchsorted(tgt_ids_b, filt_tgt_ids)
-            tgt_in_range = tgt_local < tgt_ids_b.numel()
-            tgt_probe = tgt_ids_b[tgt_local.clamp(max=max(tgt_ids_b.numel() - 1, 0))]
-            tgt_valid = tgt_in_range & (tgt_probe == filt_tgt_ids)
-            pos_keep = src_valid & tgt_valid
-            if pos_keep.any():
-                target_sub[src_local[pos_keep], tgt_local[pos_keep]] = 1.0
+        tgt_loc = torch.searchsorted(sorted_tokens, tgt_vals)
+        tgt_in = tgt_loc < S
+        tgt_loc_safe = tgt_loc.clamp(max=max(S - 1, 0))
+        tgt_hit = tgt_in & (sorted_tokens.gather(1, tgt_loc_safe) == tgt_vals)
+        tgt_pos = sort_idx.gather(1, tgt_loc_safe)
 
-            loss_sub = self._binary_cross_entropy_prob(edge_prob_sub, target_sub)
-            weight_sub = target_sub * self.pos_weight + (1.0 - target_sub) * self.neg_weight
+        src_tf_valid = tf_mask.gather(1, src_pos)
+        pair_valid = src_hit & tgt_hit & src_tf_valid
+        if pair_valid.any():
+            b_idx = torch.arange(C, device=gene_tokens.device).view(C, 1).expand(C, P)
+            target[b_idx[pair_valid], src_pos[pair_valid], tgt_pos[pair_valid]] = 1.0
 
-            if self.neg_sample_ratio is not None and self.neg_sample_ratio > 0:
-                pos_mask = target_sub > 0.5
-                neg_mask = ~pos_mask
+        # 6. Weighted BCE-with-logits with optional per-sample negative sampling.
+        loss = F.binary_cross_entropy_with_logits(
+            edge_logit.float(),
+            target.float(),
+            reduction="none",
+        )
+        weight = target * self.pos_weight + (1.0 - target) * self.neg_weight
+
+        if self.neg_sample_ratio is not None and self.neg_sample_ratio > 0:
+            sampled_mask = torch.zeros_like(supervise_mask, dtype=torch.bool)
+            for b in range(C):
+                mask_b = supervise_mask[b]
+                pos_mask = (target[b] > 0.5) & mask_b
+                neg_mask = (~(target[b] > 0.5)) & mask_b
                 pos_count = int(pos_mask.sum().item())
                 neg_count = int(neg_mask.sum().item())
                 if pos_count > 0 and neg_count > 0:
@@ -214,21 +211,18 @@ class PriorLoss(nn.Module):
                         chosen = neg_idx[perm]
                         sampled_neg = torch.zeros_like(neg_mask)
                         sampled_neg[chosen[:, 0], chosen[:, 1]] = True
-                        supervise_mask = pos_mask | sampled_neg
+                        sampled_mask[b] = pos_mask | sampled_neg
                     else:
-                        supervise_mask = pos_mask
+                        sampled_mask[b] = pos_mask
                 else:
-                    supervise_mask = torch.ones_like(target_sub, dtype=torch.bool)
-                supervise_mask_f = supervise_mask.float()
-            else:
-                supervise_mask_f = torch.ones_like(target_sub, dtype=torch.float32)
+                    sampled_mask[b] = mask_b
+            supervise_mask_f = sampled_mask.float()
+        else:
+            supervise_mask_f = supervise_mask.float()
 
-            numer = (loss_sub * weight_sub * supervise_mask_f).sum()
-            denom = (weight_sub * supervise_mask_f).sum()
-            total_loss_sum = total_loss_sum + numer
-            total_supervised = total_supervised + denom
-
-        return total_loss_sum / (total_supervised + 1e-8)
+        numer = (loss * weight * supervise_mask_f).sum()
+        denom = (weight * supervise_mask_f).sum()
+        return numer / (denom + 1e-8)
 
 
 class DAGLoss(nn.Module):

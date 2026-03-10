@@ -105,6 +105,7 @@ class GeneRouter(nn.Module):
         dropout: float = 0.1,
         topk: Optional[int] = None,   # if specified, apply Top-K selection
         tau: float = 1.0,   # temperature for GumbelTopK
+        score_clip: float = 10.0,
         **kwargs
     ):
         """
@@ -120,6 +121,7 @@ class GeneRouter(nn.Module):
         self.embed_dim = embed_dim
         self.n_factors = num_factors
         self.hidden_dim = hidden_dim
+        self.score_clip = float(score_clip)
 
         # MLP mapping gene embeddings -> logits over factors
         self.mlp = nn.Sequential(
@@ -181,9 +183,9 @@ class GeneRouter(nn.Module):
         
         x = x[gene_subset].view(C, -1, E)   # (C, S, E)
         logits = self.mlp(x)  # (C, S, 2m)
-        prob_logits, score_logits = torch.split(logits, self.n_factors, dim=-1)
+        prob_logits, scores = torch.split(logits, self.n_factors, dim=-1)
+        scores = scores.clamp(min=-self.score_clip, max=self.score_clip)
         prob_logits = prob_logits / temperature
-        scores = score_logits
 
         if self.gating is not None:
             probs = self.gating(prob_logits)
@@ -299,8 +301,8 @@ class SFM(nn.Module):
         grn = None
         if compute_grn:
             # Effective GRN: structure (u, v) weighted by free score branch.
-            u_eff = u * torch.tanh(u_score)
-            v_eff = v * torch.tanh(v_score)
+            u_eff = u * u_score
+            v_eff = v * v_score
             grn = torch.einsum('cfm,cgm->cfg', u_eff, v_eff)
         factors = FactorState(
             binary_tf=binary_tf,

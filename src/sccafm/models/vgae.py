@@ -45,11 +45,6 @@ class VariationalEncoder(nn.Module):
                 f"expr_tf E={expr_tf.shape[2]}, expr_tg E={expr_tg.shape[2]}"
             )
 
-    @staticmethod
-    def _strength_from_score(score: torch.Tensor) -> torch.Tensor:
-        # Keep free scores differentiable but bounded to avoid exploding factors.
-        return torch.tanh(score)
-
     def _predict_tg_from_factors(
         self,
         expr_tf: torch.Tensor,
@@ -59,8 +54,8 @@ class VariationalEncoder(nn.Module):
         v_score: torch.Tensor,
     ):
         # Structure from u/v (support), strength from free scores.
-        u_eff = u * self._strength_from_score(u_score)
-        v_eff = v * self._strength_from_score(v_score)
+        u_eff = u * u_score
+        v_eff = v * v_score
         tmp = torch.einsum("cfm,cfe->cme", u_eff, expr_tf)      # (C, M, E)
         pred_tg = torch.einsum("cgm,cme->cge", v_eff, tmp)      # (C, TG, E)
         return pred_tg
@@ -130,10 +125,6 @@ class ExprModeling(nn.Module):
             nn.Linear(hidden_dim, 2)
         )
 
-    @staticmethod
-    def _strength_from_score(score: torch.Tensor) -> torch.Tensor:
-        return torch.tanh(score)
-
     def _apply_a_with_factors(self, h: torch.Tensor, u_full: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         # A^T @ h where A ~= U_full @ V^T and A[src, tgt] = edge src->tgt.
         # This keeps SEM-style target update aligned with source->target convention.
@@ -170,8 +161,8 @@ class ExprModeling(nn.Module):
         # Fixed-point iteration for h = z + gamma * A h.
         # This avoids dense SxS matrix construction and solve.
         binary_tf_sel = self._masked_select_fixed_count(binary_tf.float(), binary_tg, "binary_tf/binary_tg")
-        u_full = expand_u(u * self._strength_from_score(u_score), binary_tf_sel)      # (C, S, M), S matches selected TG space
-        v_eff = v * self._strength_from_score(v_score)
+        u_full = expand_u(u * u_score, binary_tf_sel)      # (C, S, M), S matches selected TG space
+        v_eff = v * v_score
         h = z_proj
         for _ in range(max(1, self.fp_steps)):
             ah = self._apply_a_with_factors(h, u_full, v_eff)
