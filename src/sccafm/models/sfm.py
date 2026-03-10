@@ -298,7 +298,10 @@ class SFM(nn.Module):
 
         grn = None
         if compute_grn:
-            grn = torch.einsum('cfm,cgm->cfg', u, v)
+            # Effective GRN: structure (u, v) weighted by free score branch.
+            u_eff = u * torch.tanh(u_score)
+            v_eff = v * torch.tanh(v_score)
+            grn = torch.einsum('cfm,cgm->cfg', u_eff, v_eff)
         factors = FactorState(
             binary_tf=binary_tf,
             binary_tg=binary_tg,

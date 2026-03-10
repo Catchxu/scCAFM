@@ -45,6 +45,11 @@ class VariationalEncoder(nn.Module):
                 f"expr_tf E={expr_tf.shape[2]}, expr_tg E={expr_tg.shape[2]}"
             )
 
+    @staticmethod
+    def _strength_from_score(score: torch.Tensor) -> torch.Tensor:
+        # Keep free scores differentiable but bounded to avoid exploding factors.
+        return torch.tanh(score)
+
     def _predict_tg_from_factors(
         self,
         expr_tf: torch.Tensor,
@@ -54,8 +59,8 @@ class VariationalEncoder(nn.Module):
         v_score: torch.Tensor,
     ):
         # Structure from u/v (support), strength from free scores.
-        u_eff = u * u_score
-        v_eff = v * v_score
+        u_eff = u * self._strength_from_score(u_score)
+        v_eff = v * self._strength_from_score(v_score)
         tmp = torch.einsum("cfm,cfe->cme", u_eff, expr_tf)      # (C, M, E)
         pred_tg = torch.einsum("cgm,cme->cge", v_eff, tmp)      # (C, TG, E)
         return pred_tg
@@ -125,11 +130,16 @@ class ExprModeling(nn.Module):
             nn.Linear(hidden_dim, 2)
         )
 
+    @staticmethod
+    def _strength_from_score(score: torch.Tensor) -> torch.Tensor:
+        return torch.tanh(score)
+
     def _apply_a_with_factors(self, h: torch.Tensor, u_full: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-        # A @ h where A ~= U_full @ V^T.
+        # A^T @ h where A ~= U_full @ V^T and A[src, tgt] = edge src->tgt.
+        # This keeps SEM-style target update aligned with source->target convention.
         # h: (C, S, H), u_full: (C, S, M), v: (C, S, M)
-        vt_h = torch.bmm(v.transpose(1, 2), h)   # (C, M, H)
-        return torch.bmm(u_full, vt_h)           # (C, S, H)
+        ut_h = torch.bmm(u_full.transpose(1, 2), h)  # (C, M, H)
+        return torch.bmm(v, ut_h)                    # (C, S, H)
 
     def _masked_select_fixed_count(self, x: torch.Tensor, mask: torch.Tensor, name: str):
         if mask.dtype != torch.bool:
@@ -160,8 +170,8 @@ class ExprModeling(nn.Module):
         # Fixed-point iteration for h = z + gamma * A h.
         # This avoids dense SxS matrix construction and solve.
         binary_tf_sel = self._masked_select_fixed_count(binary_tf.float(), binary_tg, "binary_tf/binary_tg")
-        u_full = expand_u(u * u_score, binary_tf_sel)      # (C, S, M), S matches selected TG space
-        v_eff = v * v_score
+        u_full = expand_u(u * self._strength_from_score(u_score), binary_tf_sel)      # (C, S, M), S matches selected TG space
+        v_eff = v * self._strength_from_score(v_score)
         h = z_proj
         for _ in range(max(1, self.fp_steps)):
             ah = self._apply_a_with_factors(h, u_full, v_eff)
@@ -203,11 +213,11 @@ class VariationalDecoder(nn.Module):
         self.dropout_model = DropModeling(hidden_dim, dropout)
     
     def forward(
-            self, 
-            mu_z: torch.Tensor, 
-            sigma_z: torch.Tensor,
-            binary_tf, binary_tg,
-            u, v, u_score, v_score
+        self, 
+        mu_z: torch.Tensor, 
+        sigma_z: torch.Tensor,
+        binary_tf, binary_tg,
+        u, v, u_score, v_score
     ):
         # Sample latent regulator state z ~ q(z)
         z = reparameterize(mu_z, sigma_z)   # (C, TG)
@@ -246,6 +256,10 @@ class ELBOLoss(nn.Module):
         """
         Zero-inflated Gaussian log-likelihood (stable broadcasting)
         """
+        x = x.float()
+        mu = mu.float()
+        sigma = sigma.float().clamp_min(1e-5)
+        p_drop = p_drop.float().clamp(min=1e-5, max=1.0 - 1e-5)
         normal = torch.distributions.Normal(mu, sigma)
         
         # Compute log-probability of zero for all genes
@@ -264,6 +278,8 @@ class ELBOLoss(nn.Module):
         return log_prob.sum(dim=-1)
 
     def kl_normal(self, mu, sigma):
+        mu = mu.float()
+        sigma = sigma.float().clamp_min(1e-5)
         return 0.5 * torch.sum(
             mu.pow(2) + sigma.pow(2) - 1 - torch.log(sigma.pow(2)),
             dim=-1
@@ -293,8 +309,8 @@ class ELBOLoss(nn.Module):
         binary_tg = factors.binary_tg
         u = factors.u
         v = factors.v
-        u_score = factors.u_score if factors.u_score is not None else u
-        v_score = factors.v_score if factors.v_score is not None else v
+        u_score = factors.u_score if factors.u_score is not None else torch.ones_like(u)
+        v_score = factors.v_score if factors.v_score is not None else torch.ones_like(v)
         x = tokens["expr"]
         mu_z, sigma_z = self.encoder(
             x,

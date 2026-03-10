@@ -330,7 +330,7 @@ def evaluate_grn(
 
                     tf_ids = genes[i][tf_mask].numpy().astype(np.int64, copy=False)
                     tg_ids = genes[i][tg_mask].numpy().astype(np.int64, copy=False)
-                    logits = grn[i].numpy().astype(np.float64, copy=False)
+                    logits = np.abs(grn[i].numpy().astype(np.float64, copy=False))
 
                     labels = _build_labels(tf_ids, tg_ids, src_to_tg)
                     y_true = labels.reshape(-1)
