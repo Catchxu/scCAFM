@@ -354,10 +354,10 @@ def sfm_trainer(
                         if use_tqdm:
                             iterator.set_postfix(display_metrics)
                         if logger and log_interval > 0 and global_step % log_interval == 0:
-                            metric_text = " ".join([f"{k}={loss_dict[k]:.6f}" for k in metric_keys])
+                            loss_text = " ".join([f"{k}={loss_dict[k]:.6f}" for k in metric_keys])
                             logger.info(
-                                "step=%d file=%d epoch=%d lr=%.8e %s",
-                                global_step, file_idx + 1, epoch + 1, metric_text
+                                "step=%d file=%d epoch=%d %s",
+                                global_step, file_idx + 1, epoch + 1, loss_text
                             )
 
             if rank0:
