@@ -15,6 +15,7 @@ python3 scripts/run_gene_embedding.py --log-overwrite
 
 # model pretraining
 setsid nohup python3 scripts/run_pretrain.py --nproc-per-node 4 > /dev/null 2>&1 < /dev/null &
+setsid nohup python3 scripts/run_pretrain.py --nproc-per-node 4 --override train.resume=true > /dev/null 2>&1 < /dev/null &
 
 # evaluation
 setsid nohup python3 scripts/run_eval_grn.py --nproc-per-node 4 > /dev/null 2>&1 < /dev/null &
