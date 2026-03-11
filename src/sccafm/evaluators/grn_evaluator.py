@@ -2,7 +2,7 @@ import gc
 import logging
 import os
 from contextlib import nullcontext
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -14,7 +14,7 @@ from torch.utils.data.distributed import DistributedSampler
 
 from ..models import SFM
 from ..tokenizer import TomeDataset, TomeTokenizer, tome_collate_fn
-from .metric import compute_selected_metrics, normalize_metric_selection, safe_nan_stats
+from .metric import compute_selected_metrics, normalize_metric_selection
 
 
 def _setup_logger(
@@ -85,6 +85,7 @@ def _build_gt_lookup(eval_grn_df: pd.DataFrame, tokenizer: TomeTokenizer):
     id2id = tokenizer.gene_tokenizer.id2id
 
     pair_set = set()
+    token_to_name: Dict[int, str] = {}
     mapped = 0
     for g1, g2 in zip(eval_grn_df["Gene1"].tolist(), eval_grn_df["Gene2"].tolist()):
         src = _map_gene_to_token(g1, symbol2id, id2id)
@@ -92,6 +93,8 @@ def _build_gt_lookup(eval_grn_df: pd.DataFrame, tokenizer: TomeTokenizer):
         if src is None or tgt is None:
             continue
         pair_set.add((int(src), int(tgt)))
+        token_to_name.setdefault(int(src), str(g1))
+        token_to_name.setdefault(int(tgt), str(g2))
         mapped += 1
 
     gt_tf_ids = sorted({s for s, _ in pair_set})
@@ -109,31 +112,52 @@ def _build_gt_lookup(eval_grn_df: pd.DataFrame, tokenizer: TomeTokenizer):
         labels[i * g_n + j] = 1
 
     unique_pairs = len(pair_set)
-    return pair_set, mapped, gt_tf_ids, gt_gene_ids, tf_to_idx, gene_to_idx, labels, unique_pairs
+    return (
+        mapped,
+        gt_tf_ids,
+        gt_gene_ids,
+        labels,
+        unique_pairs,
+        token_to_name,
+    )
 
 
-def _compute_metrics_from_output_table(
-    output_df: pd.DataFrame,
-    labels: np.ndarray,
-    tf_to_idx: Dict[int, int],
-    gene_to_idx: Dict[int, int],
-    selected_metrics: List[str],
-) -> Dict[str, float]:
-    # Keep only edges in GT TF/Gene universe.
-    output_df = output_df[
-        output_df["Gene1"].isin(tf_to_idx.keys()) & output_df["Gene2"].isin(gene_to_idx.keys())
-    ]
+def _map_ids_to_sorted_universe(ids: np.ndarray, universe: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    if ids.ndim != 1:
+        ids = ids.reshape(-1)
+    if universe.shape[0] == 0:
+        return np.zeros_like(ids, dtype=np.int64), np.zeros_like(ids, dtype=bool)
+    idx = np.searchsorted(universe, ids)
+    valid = (idx >= 0) & (idx < universe.shape[0])
+    valid &= universe[idx] == ids
+    return idx, valid
 
-    preds = np.full(labels.shape, -1.0, dtype=np.float64)
-    g_n = len(gene_to_idx)
-    for row in output_df.itertuples(index=False):
-        i = tf_to_idx.get(int(row.Gene1), None)
-        j = gene_to_idx.get(int(row.Gene2), None)
-        if i is None or j is None:
-            continue
-        preds[i * g_n + j] = float(row.EdgeWeight)
 
-    return compute_selected_metrics(labels, preds, selected_metrics)
+def _accumulate_dense_edges(
+    tf_ids: np.ndarray,
+    tg_ids: np.ndarray,
+    edge_scores: np.ndarray,
+    gt_tf_ids_arr: np.ndarray,
+    gt_gene_ids_arr: np.ndarray,
+    score_sum: np.ndarray,
+    score_cnt: np.ndarray,
+) -> None:
+    if edge_scores.shape != (tf_ids.shape[0], tg_ids.shape[0]):
+        raise ValueError(
+            f"edge_scores shape mismatch: expected {(tf_ids.shape[0], tg_ids.shape[0])}, got {edge_scores.shape}"
+        )
+
+    tf_idx, tf_keep = _map_ids_to_sorted_universe(tf_ids, gt_tf_ids_arr)
+    tg_idx, tg_keep = _map_ids_to_sorted_universe(tg_ids, gt_gene_ids_arr)
+
+    g_n = int(gt_gene_ids_arr.shape[0])
+    if tf_keep.any() and tg_keep.any():
+        tf_idx_kept = tf_idx[tf_keep]
+        tg_idx_kept = tg_idx[tg_keep]
+        flat_idx = (tf_idx_kept[:, None] * g_n + tg_idx_kept[None, :]).reshape(-1)
+        vals = edge_scores[np.ix_(tf_keep, tg_keep)].reshape(-1)
+        np.add.at(score_sum, flat_idx, vals)
+        np.add.at(score_cnt, flat_idx, 1)
 
 
 def _resolve_species_for_tf(adata, cond_species_key: Optional[str]) -> str:
@@ -226,15 +250,23 @@ def evaluate_grn(
     )
 
     (
-        _,
         mapped_pairs,
         gt_tf_ids,
         gt_gene_ids,
-        tf_to_idx,
-        gene_to_idx,
         gt_labels,
         unique_pairs,
+        token_to_name,
     ) = _build_gt_lookup(eval_grn_df, tokenizer)
+    gt_tf_ids_arr = np.asarray(gt_tf_ids, dtype=np.int64)
+    gt_gene_ids_arr = np.asarray(gt_gene_ids, dtype=np.int64)
+    g_n = int(gt_gene_ids_arr.shape[0])
+    n_edges = int(gt_labels.shape[0])
+    if n_edges == 0:
+        raise RuntimeError("No mapped GT edges/universe after token mapping; cannot evaluate.")
+
+    score_sum = np.zeros((n_edges,), dtype=np.float64)
+    score_cnt = np.zeros((n_edges,), dtype=np.int64)
+    processed_cells = 0
     if logger:
         logger.info(
             "GRN eval start | files=%d | batch_size=%d | device=%s | ddp=%s | world_size=%d | metrics=%s",
@@ -246,8 +278,6 @@ def evaluate_grn(
             ",".join(selected_metrics),
         )
 
-    records = []
-
     for file_idx, file_path in enumerate(adata_files):
         if logger:
             logger.info("[File %d/%d] Loading: %s", file_idx + 1, len(adata_files), file_path)
@@ -256,7 +286,7 @@ def evaluate_grn(
         raw_cells, raw_genes = int(adata.n_obs), int(adata.n_vars)
 
         with torch.no_grad():
-            tokens_dict, obs_names = tokenizer(adata, preprocess=preprocess, return_obs_names=True)
+            tokens_dict = tokenizer(adata, preprocess=preprocess)
         token_cells = int(tokens_dict["gene"].shape[0])
         if token_cells > 0:
             token_genes = int((~tokens_dict["pad"][0].bool()).sum().item())
@@ -274,7 +304,6 @@ def evaluate_grn(
 
         dataset = TomeDataset(tokens_dict)
         sampler = None
-        sample_indices = list(range(len(dataset)))
         if is_distributed:
             sampler = DistributedSampler(
                 dataset,
@@ -283,7 +312,6 @@ def evaluate_grn(
                 shuffle=False,
                 drop_last=False,
             )
-            sample_indices = list(iter(sampler))
         loader = DataLoader(
             dataset,
             batch_size=batch_size,
@@ -327,8 +355,6 @@ def evaluate_grn(
                 genes = batch_cpu["gene"].cpu().long()
 
                 batch_n = genes.shape[0]
-                batch_indices = sample_indices[sample_ptr: sample_ptr + batch_n]
-                sample_ptr += batch_n
                 for i in range(batch_n):
                     tf_mask = b_tf[i]
                     tg_mask = b_tg[i]
@@ -340,7 +366,7 @@ def evaluate_grn(
                             logger.warning(
                                 "Skip cell due to shape mismatch | file=%s cell_index=%d grn_shape=%s tf_n=%d tg_n=%d",
                                 file_path,
-                                int(batch_indices[i]),
+                                int(sample_ptr + i),
                                 tuple(grn[i].shape),
                                 tf_n,
                                 tg_n,
@@ -351,61 +377,24 @@ def evaluate_grn(
                     tg_ids = genes[i][tg_mask].numpy().astype(np.int64, copy=False)
                     logits = np.abs(grn[i].numpy().astype(np.float64, copy=False))
 
-                    # Convert estimated dense matrix to edge table: Gene1, Gene2, EdgeWeight.
-                    tf_rep = np.repeat(tf_ids, tg_ids.shape[0])
-                    tg_tile = np.tile(tg_ids, tf_ids.shape[0])
-                    output_df = pd.DataFrame(
-                        {
-                            "Gene1": tf_rep,
-                            "Gene2": tg_tile,
-                            "EdgeWeight": logits.reshape(-1),
-                        }
+                    _accumulate_dense_edges(
+                        tf_ids=tf_ids,
+                        tg_ids=tg_ids,
+                        edge_scores=logits,
+                        gt_tf_ids_arr=gt_tf_ids_arr,
+                        gt_gene_ids_arr=gt_gene_ids_arr,
+                        score_sum=score_sum,
+                        score_cnt=score_cnt,
                     )
-
-                    metric_map = _compute_metrics_from_output_table(
-                        output_df=output_df,
-                        labels=gt_labels,
-                        tf_to_idx=tf_to_idx,
-                        gene_to_idx=gene_to_idx,
-                        selected_metrics=selected_metrics,
-                    )
-                    pos_edges = int(gt_labels.sum())
-                    pred_kept = int(
-                        (
-                            output_df["Gene1"].isin(tf_to_idx.keys())
-                            & output_df["Gene2"].isin(gene_to_idx.keys())
-                        ).sum()
-                    )
-
-                    abs_idx = int(batch_indices[i])
-                    row = {
-                        "file_idx": file_idx,
-                        "file_path": file_path,
-                        "cell_index_in_file": abs_idx,
-                        "cell_name": obs_names[abs_idx] if abs_idx < len(obs_names) else str(abs_idx),
-                        "raw_num_tf": tf_n,
-                        "raw_num_tg": tg_n,
-                        "num_tf": int(len(gt_tf_ids)),
-                        "num_tg": int(len(gt_gene_ids)),
-                        "num_edges": int(gt_labels.shape[0]),
-                        "num_pos_edges": pos_edges,
-                        "num_pred_edges": pred_kept,
-                    }
-                    for m in selected_metrics:
-                        row[m] = metric_map[m]
-                    records.append(row)
+                    processed_cells += 1
+                sample_ptr += batch_n
 
                 if logger and log_interval > 0 and step % log_interval == 0:
-                    metric_log_parts = []
-                    for m in selected_metrics:
-                        metric_vals = [r.get(m, float("nan")) for r in records]
-                        mean_metric, _, _ = safe_nan_stats(metric_vals)
-                        metric_log_parts.append(f"{m}_mean={mean_metric:.6f}")
                     logger.info(
-                        "progress | file=%d step=%d %s",
+                        "progress | file=%d step=%d processed_cells=%d",
                         file_idx + 1,
                         step,
-                        " | ".join(metric_log_parts),
+                        processed_cells * world_size if is_distributed else processed_cells,
                     )
 
         del adata, tokens_dict, dataset, loader
@@ -414,39 +403,59 @@ def evaluate_grn(
             torch.cuda.empty_cache()
 
     if is_distributed:
-        gathered_records: List[List[Dict[str, Union[int, str, float]]]] = [None] * world_size
-        dist.all_gather_object(gathered_records, records)
+        gathered = [None] * world_size
+        dist.all_gather_object(
+            gathered,
+            {"sum": score_sum, "cnt": score_cnt, "cells": processed_cells},
+        )
         if not rank0:
             if initialized_here:
                 dist.destroy_process_group()
             return {}, pd.DataFrame()
-        parts = [pd.DataFrame(part) for part in gathered_records if part]
-    else:
-        parts = [pd.DataFrame(records)] if records else []
+        total_sum = np.zeros_like(score_sum)
+        total_cnt = np.zeros_like(score_cnt)
+        total_cells = 0
+        for part in gathered:
+            total_sum += part["sum"]
+            total_cnt += part["cnt"]
+            total_cells += int(part["cells"])
+        score_sum = total_sum
+        score_cnt = total_cnt
+        processed_cells = total_cells
 
-    if len(parts) == 0:
-        raise RuntimeError("No valid cells were evaluated. Please check your data and model outputs.")
+    preds = np.full((n_edges,), -1.0, dtype=np.float64)
+    observed = score_cnt > 0
+    preds[observed] = score_sum[observed] / np.maximum(score_cnt[observed], 1)
+    metric_map = compute_selected_metrics(gt_labels, preds, selected_metrics)
 
-    df = pd.concat(parts, ignore_index=True)
-    # DistributedSampler may pad data on some ranks. Keep one record per cell.
-    df = df.sort_values(["file_idx", "cell_index_in_file"]).drop_duplicates(
-        subset=["file_idx", "cell_index_in_file"], keep="first"
-    ).reset_index(drop=True)
-    cell_csv = os.path.join(output_dir, "grn_eval_per_cell.csv")
-    df.to_csv(cell_csv, index=False)
+    tf_idx = np.repeat(np.arange(len(gt_tf_ids_arr), dtype=np.int64), g_n)
+    tg_idx = np.tile(np.arange(g_n, dtype=np.int64), len(gt_tf_ids_arr))
+    edge_df = pd.DataFrame(
+        {
+            "Gene1": [token_to_name.get(int(gt_tf_ids_arr[i]), str(int(gt_tf_ids_arr[i]))) for i in tf_idx],
+            "Gene2": [token_to_name.get(int(gt_gene_ids_arr[j]), str(int(gt_gene_ids_arr[j]))) for j in tg_idx],
+            "EdgeWeight": preds,
+            "ObservedCount": score_cnt.astype(np.int64),
+        }
+    )
+    edge_df = edge_df[edge_df["ObservedCount"] > 0].copy()
+    edge_df = edge_df.sort_values("EdgeWeight", ascending=False).reset_index(drop=True)
+    edge_df = edge_df[["Gene1", "Gene2", "EdgeWeight"]]
+    edge_tsv = os.path.join(output_dir, "grn_estimated.tsv")
+    edge_df.to_csv(edge_tsv, sep="\t", index=False)
 
     summary = {
-        "num_cells": int(df.shape[0]),
+        "num_cells": int(processed_cells),
         "metrics": ",".join(selected_metrics),
         "gt_unique_edges_mapped": int(unique_pairs),
         "gt_edges_total_mapped_rows": int(mapped_pairs),
-        "per_cell_csv": cell_csv,
+        "estimated_grn_tsv": edge_tsv,
     }
     for m in selected_metrics:
-        mean_m, std_m, valid_m = safe_nan_stats(df[m].tolist())
-        summary[f"{m}_mean"] = mean_m
-        summary[f"{m}_std"] = std_m
-        summary[f"{m}_valid_cells"] = valid_m
+        val = float(metric_map[m])
+        summary[f"{m}_mean"] = val
+        summary[f"{m}_std"] = 0.0
+        summary[f"{m}_valid_cells"] = 1
 
     if len(selected_metrics) == 1:
         only = selected_metrics[0]
@@ -465,10 +474,10 @@ def evaluate_grn(
             summary["num_cells"],
             " | ".join(metric_log_parts),
         )
-        logger.info("Saved per-cell metrics: %s", cell_csv)
+        logger.info("Saved estimated GRN: %s", edge_tsv)
         logger.info("Saved summary metrics: %s", summary_csv)
 
     if initialized_here:
         dist.destroy_process_group()
 
-    return summary, df
+    return summary, edge_df
