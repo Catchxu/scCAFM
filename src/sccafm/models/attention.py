@@ -1,11 +1,12 @@
 import torch
 import torch.nn as nn
 from torch.nn.functional import scaled_dot_product_attention
+from flash_attn import flash_attn_func, flash_attn_varlen_func
 
 
 class MaskedMHA(nn.Module):
     """
-    Multi-head attention with scaled dot-product attention.
+    Multi-head attention backed by FlashAttention.
 
     Args:
         embed_dim: total embedding dimension (2D)
@@ -77,34 +78,88 @@ class MaskedMHA(nn.Module):
         k = self.k_proj(x)
         v = self.v_proj(x)
 
-        # ---- Reshape to (C, num_heads, L, head_dim) ----
-        q = q.view(C, L, self.num_heads, self.head_dim).transpose(1, 2)  # (C, num_heads, L, head_dim)
-        k = k.view(C, L, self.num_heads, self.head_dim).transpose(1, 2)
-        v = v.view(C, L, self.num_heads, self.head_dim).transpose(1, 2)
+        # ---- Reshape ----
+        q_flash = q.view(C, L, self.num_heads, self.head_dim)  # (C, L, H, Dh)
+        k_flash = k.view(C, L, self.num_heads, self.head_dim)
+        v_flash = v.view(C, L, self.num_heads, self.head_dim)
 
         # ---- Apply rotary positional embedding if enabled ----
         if self.use_rotary:
-            q, k = self.apply_rotary_pos_emb(q, k)
-
-        # ---- Prepare mask ----
-        attn_mask = None
-        if key_padding_mask is not None and key_padding_mask.any():
-            # key_padding_mask: (C, L) -> (C, num_heads, L, L)
-            kp = key_padding_mask.unsqueeze(1)
-            kp = kp.expand(-1, self.num_heads, -1)
-            kp = kp.unsqueeze(2).expand(-1, -1, L, -1)
-            attn_mask = kp  # bool mask
+            q_rot = q_flash.transpose(1, 2)  # (C, H, L, Dh)
+            k_rot = k_flash.transpose(1, 2)
+            q_rot, k_rot = self.apply_rotary_pos_emb(q_rot, k_rot)
+            q_flash = q_rot.transpose(1, 2).contiguous()
+            k_flash = k_rot.transpose(1, 2).contiguous()
 
         # ---- Attention ----
-        out = scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, is_causal=causal)
+        if key_padding_mask is None or not key_padding_mask.any():
+            out = flash_attn_func(
+                q_flash,
+                k_flash,
+                v_flash,
+                dropout_p=0.0,
+                softmax_scale=None,
+                causal=causal,
+                window_size=(-1, -1),
+                alibi_slopes=None,
+                deterministic=False,
+            )  # (C, L, H, Dh)
+            out = out.reshape(C, L, self.embed_dim)
+        else:
+            # flash_attn_varlen_func assumes each sequence has contiguous valid tokens.
+            # For non-contiguous masks, fallback to SDPA to preserve semantics.
+            has_true_to_false = (~key_padding_mask[:, 1:] & key_padding_mask[:, :-1]).any()
+            if has_true_to_false:
+                q = q_flash.transpose(1, 2)  # (C, H, L, Dh)
+                k = k_flash.transpose(1, 2)
+                v = v_flash.transpose(1, 2)
+                kp = key_padding_mask.unsqueeze(1)
+                kp = kp.expand(-1, self.num_heads, -1)
+                kp = kp.unsqueeze(2).expand(-1, -1, L, -1)
+                out = scaled_dot_product_attention(q, k, v, attn_mask=kp, is_causal=causal)
+                out = out.transpose(1, 2).reshape(C, L, self.embed_dim)
+            else:
+                valid_mask = ~key_padding_mask
+                seqlens = valid_mask.sum(dim=1, dtype=torch.int32)  # (C,)
+                total_tokens = int(seqlens.sum().item())
+                if total_tokens == 0:
+                    out = q_flash.new_zeros(C, L, self.embed_dim)
+                else:
+                    q_unpad = q_flash[valid_mask]  # (total, H, Dh)
+                    k_unpad = k_flash[valid_mask]
+                    v_unpad = v_flash[valid_mask]
+
+                    cu_seqlens = torch.zeros(C + 1, device=x.device, dtype=torch.int32)
+                    cu_seqlens[1:] = torch.cumsum(seqlens, dim=0)
+                    max_seqlen = int(seqlens.max().item())
+
+                    out_unpad = flash_attn_varlen_func(
+                        q_unpad,
+                        k_unpad,
+                        v_unpad,
+                        cu_seqlens,
+                        cu_seqlens,
+                        max_seqlen,
+                        max_seqlen,
+                        dropout_p=0.0,
+                        softmax_scale=None,
+                        causal=causal,
+                        window_size=(-1, -1),
+                        softcap=0.0,
+                        alibi_slopes=None,
+                        deterministic=False,
+                        return_attn_probs=False,
+                        block_table=None,
+                    )  # (total, H, Dh)
+
+                    out_padded = out_unpad.new_zeros(C, L, self.num_heads, self.head_dim)
+                    out_padded[valid_mask] = out_unpad
+                    out = out_padded.reshape(C, L, self.embed_dim)
 
         # ---- Merge heads ----
-        out = out.transpose(1, 2).reshape(C, L, self.embed_dim)  # (C, L, embed_dim)
         out = self.out_proj(out)
 
         return out
-
-
 
 
 if __name__ == "__main__":
