@@ -441,15 +441,16 @@ def evaluate_grn(
     edge_df = edge_df[edge_df["ObservedCount"] > 0].copy()
     edge_df = edge_df.sort_values("EdgeWeight", ascending=False).reset_index(drop=True)
     edge_df = edge_df[["Gene1", "Gene2", "EdgeWeight"]]
-    edge_tsv = os.path.join(output_dir, "grn_estimated.tsv")
-    edge_df.to_csv(edge_tsv, sep="\t", index=False)
+    edge_csv = os.path.join(output_dir, "grn_estimated.csv")
+    edge_df.to_csv(edge_csv, index=False)
 
     summary = {
         "num_cells": int(processed_cells),
         "metrics": ",".join(selected_metrics),
         "gt_unique_edges_mapped": int(unique_pairs),
         "gt_edges_total_mapped_rows": int(mapped_pairs),
-        "estimated_grn_tsv": edge_tsv,
+        "estimated_grn_csv": edge_csv,
+        "estimated_grn_tsv": edge_csv,
     }
     for m in selected_metrics:
         val = float(metric_map[m])
@@ -468,13 +469,13 @@ def evaluate_grn(
     summary_df.to_csv(summary_csv, index=False)
 
     if logger:
-        metric_log_parts = [f"{m}_mean={summary[f'{m}_mean']:.6f}" for m in selected_metrics]
+        metric_log_parts = [f"{m}={summary[f'{m}_mean']:.6f}" for m in selected_metrics]
         logger.info(
             "GRN eval done | cells=%d | %s",
             summary["num_cells"],
             " | ".join(metric_log_parts),
         )
-        logger.info("Saved estimated GRN: %s", edge_tsv)
+        logger.info("Saved estimated GRN: %s", edge_csv)
         logger.info("Saved summary metrics: %s", summary_csv)
 
     if initialized_here:

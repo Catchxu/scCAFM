@@ -144,15 +144,33 @@ def main():
     data_cfg = pretrain_cfg["datasets"]
     loss_cfg = pretrain_cfg["loss"]
     train_cfg = pretrain_cfg["train"]
+    cfg_root = {"datasets": data_cfg, "loss": loss_cfg, "train": train_cfg}
 
     for item in args.override:
-        key, value = item.split("=")
+        key, value = item.split("=", 1)
         keys = key.split(".")
-    
+
+        # Prefer full rooted paths (e.g., train.resume=true).
+        d = cfg_root
+        try:
+            for k in keys[:-1]:
+                d = d[k]
+            old_val = d[keys[-1]]
+            if isinstance(old_val, bool):
+                value = value.lower() == "true"
+            elif isinstance(old_val, int):
+                value = int(value)
+            elif isinstance(old_val, float):
+                value = float(value)
+            d[keys[-1]] = value
+            continue
+        except Exception:
+            pass
+
+        # Backward compatible fallback: allow train-local keys (e.g., resume=true).
         d = train_cfg
         for k in keys[:-1]:
             d = d[k]
-
         old_val = d[keys[-1]]
         if isinstance(old_val, bool):
             value = value.lower() == "true"
