@@ -37,6 +37,8 @@ pip install .[server]
 ```
 where exact versions of dependencies are specified.
 
+For better attention efficiency, we strongly recommend installing FlashAttention for your specific hardware/software environment by following the official guide: https://flashattn.dev/. After installation, please run the upstream validation tests from the FlashAttention repository to confirm everything is working correctly: https://github.com/Dao-AILab/flash-attention.
+
 
 ## Data Download
 You can build and download Cellxgene-based pretraining data with one command:
