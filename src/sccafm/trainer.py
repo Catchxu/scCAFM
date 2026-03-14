@@ -338,7 +338,10 @@ def sfm_trainer(
                             display_metrics = {k: f"{avg_loss_dict[k]:.3f}" for k in metric_keys}
                             if use_tqdm:
                                 iterator.set_postfix(display_metrics)
-                            if logger and log_interval > 0 and global_step % log_interval == 0:
+                            should_log = (
+                                log_interval > 0 and global_step % log_interval == 0
+                            ) or (batch_idx == num_batches)
+                            if logger and should_log:
                                 loss_text = " ".join([f"{k}={avg_loss_dict[k]:.6f}" for k in metric_keys])
                                 logger.info(
                                     "step=%d file=%d epoch=%d %s",

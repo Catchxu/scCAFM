@@ -31,7 +31,7 @@ eval:
   batch_size: 64
   # GPU ids to expose to the run. Examples: [3] for single GPU, [2,3] for multi-GPU.
   # Set to [] to force CPU.
-  devices: [3]
+  devices: [0,1,2,3]
   output_dir: ./results
   log_dir: ./logs
   log_name: grn_eval.log
