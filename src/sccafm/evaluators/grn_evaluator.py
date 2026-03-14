@@ -1,6 +1,6 @@
 import gc
 import os
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -173,6 +173,7 @@ def evaluate_grn(
     finetune_learning_rate: float = 1e-5,
     finetune_weight_decay: float = 1e-2,
     finetune_batch_size: Optional[int] = None,
+    finetune_grad_accum_steps: int = 1,
     finetune_log_interval: int = 100,
     finetune_use_amp: bool = True,
     finetune_amp_dtype: str = "bf16",
@@ -216,6 +217,10 @@ def evaluate_grn(
     if finetune_amp_enabled and finetune_amp_dtype == "bf16" and not torch.cuda.is_bf16_supported():
         raise ValueError(
             "finetune.use_amp=True with finetune.amp_dtype='bf16' requires CUDA bf16 support on this GPU/runtime."
+        )
+    if finetune_grad_accum_steps < 1:
+        raise ValueError(
+            f"finetune_grad_accum_steps must be >= 1, got {finetune_grad_accum_steps}"
         )
 
     model = model.to(device)
@@ -271,6 +276,7 @@ def evaluate_grn(
     score_sum = np.zeros((n_edges,), dtype=np.float64)
     score_cnt = np.zeros((n_edges,), dtype=np.int64)
     processed_cells = 0
+    finetune_global_step = 0
     if logger:
         logger.info(
             "GRN eval start | files=%d | batch_size=%d | device=%s | ddp=%s | world_size=%d | metrics=%s",
@@ -341,10 +347,11 @@ def evaluate_grn(
             criterion_core.train()
             if logger:
                 logger.info(
-                    "Fine-tune start | file=%d | epochs=%d | batch_size=%d | device=%s | ddp=%s | amp=%s | amp_dtype=%s",
+                    "Fine-tune start | file=%d | epochs=%d | batch_size=%d | grad_accum_steps=%d | device=%s | ddp=%s | amp=%s | amp_dtype=%s",
                     file_idx + 1,
                     finetune_epochs,
                     ft_batch_size,
+                    finetune_grad_accum_steps,
                     device,
                     is_distributed,
                     finetune_amp_enabled,
@@ -353,9 +360,23 @@ def evaluate_grn(
             for epoch in range(finetune_epochs):
                 if sampler is not None:
                     sampler.set_epoch(file_idx * max(finetune_epochs, 1) + epoch)
+                optimizer.zero_grad()
+                num_ft_batches = len(ft_loader)
+                accum_elbo_sum = 0.0
+                accum_loss_count = 0
                 for step, batch in enumerate(ft_loader, start=1):
                     batch = {k: v.to(device) for k, v in batch.items()}
-                    optimizer.zero_grad()
+                    accum_micro_step = ((step - 1) % finetune_grad_accum_steps) + 1
+                    current_accum_steps = min(
+                        finetune_grad_accum_steps,
+                        num_ft_batches - step + accum_micro_step,
+                    )
+                    should_step = (step % finetune_grad_accum_steps == 0) or (step == num_ft_batches)
+                    accum_context = nullcontext()
+                    if is_distributed and not should_step:
+                        accum_context = ExitStack()
+                        accum_context.enter_context(model.no_sync())
+                        accum_context.enter_context(criterion.no_sync())
                     autocast_ctx = (
                         torch.autocast(
                             device_type="cuda",
@@ -364,26 +385,39 @@ def evaluate_grn(
                         if finetune_amp_enabled
                         else nullcontext()
                     )
-                    with autocast_ctx:
-                        _, factors = model(batch, return_factors=True, compute_grn=False)
-                        total_loss, loss_dict = criterion(tokens=batch, factors=factors)
+                    with accum_context:
+                        with autocast_ctx:
+                            _, factors = model(batch, return_factors=True, compute_grn=False)
+                            total_loss, loss_dict = criterion(tokens=batch, factors=factors)
 
-                    if scaler.is_enabled():
-                        scaler.scale(total_loss).backward()
-                        scaler.step(optimizer)
-                        scaler.update()
-                    else:
-                        total_loss.backward()
-                        optimizer.step()
+                        loss_for_backward = total_loss / current_accum_steps
+                        if scaler.is_enabled():
+                            scaler.scale(loss_for_backward).backward()
+                        else:
+                            loss_for_backward.backward()
 
-                    if logger and finetune_log_interval > 0 and step % finetune_log_interval == 0 and rank0:
-                        logger.info(
-                            "fine-tune | file=%d epoch=%d step=%d elbo=%.6f",
-                            file_idx + 1,
-                            epoch + 1,
-                            step,
-                            float(loss_dict["elbo"]),
-                        )
+                    accum_elbo_sum += float(loss_dict["elbo"])
+                    accum_loss_count += 1
+
+                    if should_step:
+                        if scaler.is_enabled():
+                            scaler.step(optimizer)
+                            scaler.update()
+                        else:
+                            optimizer.step()
+                        optimizer.zero_grad()
+                        finetune_global_step += 1
+
+                        if logger and finetune_log_interval > 0 and finetune_global_step % finetune_log_interval == 0 and rank0:
+                            logger.info(
+                                "fine-tune | file=%d epoch=%d step=%d elbo=%.6f",
+                                file_idx + 1,
+                                epoch + 1,
+                                finetune_global_step,
+                                accum_elbo_sum / accum_loss_count,
+                            )
+                        accum_elbo_sum = 0.0
+                        accum_loss_count = 0
             del ft_loader
             if is_distributed:
                 dist.barrier()

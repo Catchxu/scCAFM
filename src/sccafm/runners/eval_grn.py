@@ -149,6 +149,9 @@ def _normalize_finetune_cfg(finetune_cfg, default_log_interval: int):
     finetune_cfg["batch_size"] = None if finetune_batch_size is None else _as_int(
         finetune_batch_size, "finetune.batch_size"
     )
+    finetune_cfg["grad_accum_steps"] = _as_int(
+        finetune_cfg.get("grad_accum_steps", 1), "finetune.grad_accum_steps"
+    )
     finetune_cfg["log_interval"] = _as_int(
         finetune_cfg.get("log_interval", default_log_interval),
         "finetune.log_interval",
@@ -329,6 +332,7 @@ def main():
         finetune_learning_rate=finetune_cfg["learning_rate"],
         finetune_weight_decay=finetune_cfg["weight_decay"],
         finetune_batch_size=finetune_cfg["batch_size"],
+        finetune_grad_accum_steps=finetune_cfg["grad_accum_steps"],
         finetune_log_interval=finetune_cfg["log_interval"],
         finetune_use_amp=finetune_cfg["use_amp"],
         finetune_amp_dtype=finetune_cfg["amp_dtype"],

@@ -278,8 +278,15 @@ def sfm_trainer(
                 iterator = tqdm(loader, desc=f"Epoch {epoch+1}/{epochs_per_file}", mininterval=tqdm_mininterval) if (rank0 and use_tqdm) else loader
                 optimizer.zero_grad()
                 num_batches = len(loader)
+                accum_loss_sums = {}
+                accum_loss_count = 0
                 for batch_idx, batch in enumerate(iterator, start=1):
                     batch = {k: v.to(device) for k, v in batch.items()}
+                    accum_micro_step = ((batch_idx - 1) % grad_accum_steps) + 1
+                    current_accum_steps = min(
+                        grad_accum_steps,
+                        num_batches - batch_idx + accum_micro_step,
+                    )
                     should_step = (batch_idx % grad_accum_steps == 0) or (batch_idx == num_batches)
                     accum_context = nullcontext()
                     if is_distributed and not should_step:
@@ -299,11 +306,15 @@ def sfm_trainer(
                             _, factors = model(batch, return_factors=True, compute_grn=False)
                             total_loss, loss_dict = criterion(tokens=batch, factors=factors)
 
-                        loss_for_backward = total_loss / grad_accum_steps
+                        loss_for_backward = total_loss / current_accum_steps
                         if scaler.is_enabled():
                             scaler.scale(loss_for_backward).backward()
                         else:
                             loss_for_backward.backward()
+
+                    accum_loss_count += 1
+                    for key, value in loss_dict.items():
+                        accum_loss_sums[key] = accum_loss_sums.get(key, 0.0) + float(value)
 
                     if should_step:
                         if scaler.is_enabled():
@@ -316,17 +327,29 @@ def sfm_trainer(
                             scheduler.step()
                         global_step += 1
 
-                    if rank0:
-                        metric_keys = [k for k in ("elbo", "prior", "dag") if k in loss_dict]
-                        display_metrics = {k: f"{loss_dict[k]:.3f}" for k in metric_keys}
-                        if use_tqdm:
-                            iterator.set_postfix(display_metrics)
-                        if logger and log_interval > 0 and global_step % log_interval == 0:
-                            loss_text = " ".join([f"{k}={loss_dict[k]:.6f}" for k in metric_keys])
-                            logger.info(
-                                "step=%d file=%d epoch=%d %s",
-                                global_step, file_idx + 1, epoch + 1, loss_text
-                            )
+                        avg_loss_dict = {
+                            key: value / accum_loss_count for key, value in accum_loss_sums.items()
+                        }
+                        accum_loss_sums = {}
+                        accum_loss_count = 0
+
+                        if rank0:
+                            metric_keys = [k for k in ("elbo", "prior", "dag") if k in avg_loss_dict]
+                            display_metrics = {k: f"{avg_loss_dict[k]:.3f}" for k in metric_keys}
+                            if use_tqdm:
+                                iterator.set_postfix(display_metrics)
+                            if logger and log_interval > 0 and global_step % log_interval == 0:
+                                loss_text = " ".join([f"{k}={avg_loss_dict[k]:.6f}" for k in metric_keys])
+                                logger.info(
+                                    "step=%d file=%d epoch=%d %s",
+                                    global_step, file_idx + 1, epoch + 1, loss_text
+                                )
+                    elif rank0 and use_tqdm:
+                        metric_keys = [k for k in ("elbo", "prior", "dag") if k in accum_loss_sums]
+                        display_metrics = {
+                            k: f"{(accum_loss_sums[k] / accum_loss_count):.3f}" for k in metric_keys
+                        }
+                        iterator.set_postfix(display_metrics)
 
             if rank0:
                 torch.save({
