@@ -128,8 +128,11 @@ def _map_ids_to_sorted_universe(ids: np.ndarray, universe: np.ndarray) -> Tuple[
     if universe.shape[0] == 0:
         return np.zeros_like(ids, dtype=np.int64), np.zeros_like(ids, dtype=bool)
     idx = np.searchsorted(universe, ids)
-    valid = (idx >= 0) & (idx < universe.shape[0])
-    valid &= universe[idx] == ids
+    valid = idx < universe.shape[0]
+    matched = np.zeros_like(valid, dtype=bool)
+    if valid.any():
+        matched[valid] = universe[idx[valid]] == ids[valid]
+    valid &= matched
     return idx, valid
 
 
@@ -334,7 +337,7 @@ def evaluate_grn(
         sample_ptr = 0
         with torch.no_grad():
             for step, batch in enumerate(loader, start=1):
-                batch_cpu = {k: v.clone() for k, v in batch.items()}
+                genes = batch["gene"].long()
                 batch_dev = {k: v.to(device) for k, v in batch.items()}
 
                 autocast_ctx = (
@@ -347,12 +350,17 @@ def evaluate_grn(
                 )
 
                 with autocast_ctx:
-                    grn, factors = model(batch_dev, return_factors=True, compute_grn=True)
+                    _, factors = model(batch_dev, return_factors=True, compute_grn=False)
 
-                grn = grn.detach().float().cpu()
                 b_tf = factors.binary_tf.detach().cpu().bool()
                 b_tg = factors.binary_tg.detach().cpu().bool()
-                genes = batch_cpu["gene"].cpu().long()
+                u_cpu = factors.u.detach().float().cpu()
+                v_cpu = factors.v.detach().float().cpu()
+                u_score_cpu = factors.u_score.detach().float().cpu()
+                v_score_cpu = factors.v_score.detach().float().cpu()
+                del factors, batch_dev
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
                 batch_n = genes.shape[0]
                 for i in range(batch_n):
@@ -361,21 +369,30 @@ def evaluate_grn(
                     tf_n = int(tf_mask.sum().item())
                     tg_n = int(tg_mask.sum().item())
 
-                    if grn[i].shape != (tf_n, tg_n):
+                    tf_ids = genes[i][tf_mask].numpy().astype(np.int64, copy=False)
+                    tg_ids = genes[i][tg_mask].numpy().astype(np.int64, copy=False)
+                    u = u_cpu[i]
+                    v = v_cpu[i]
+                    u_score = u_score_cpu[i]
+                    v_score = v_score_cpu[i]
+
+                    if u.shape[0] != tf_n or v.shape[0] != tg_n:
                         if logger:
                             logger.warning(
-                                "Skip cell due to shape mismatch | file=%s cell_index=%d grn_shape=%s tf_n=%d tg_n=%d",
+                                "Skip cell due to factor shape mismatch | file=%s cell_index=%d u_shape=%s v_shape=%s tf_n=%d tg_n=%d",
                                 file_path,
                                 int(sample_ptr + i),
-                                tuple(grn[i].shape),
+                                tuple(u.shape),
+                                tuple(v.shape),
                                 tf_n,
                                 tg_n,
                             )
                         continue
 
-                    tf_ids = genes[i][tf_mask].numpy().astype(np.int64, copy=False)
-                    tg_ids = genes[i][tg_mask].numpy().astype(np.int64, copy=False)
-                    logits = np.abs(grn[i].numpy().astype(np.float64, copy=False))
+                    logits = torch.abs((u * u_score) @ (v * v_score).transpose(0, 1)).numpy().astype(
+                        np.float64,
+                        copy=False,
+                    )
 
                     _accumulate_dense_edges(
                         tf_ids=tf_ids,
@@ -388,6 +405,7 @@ def evaluate_grn(
                     )
                     processed_cells += 1
                 sample_ptr += batch_n
+                del b_tf, b_tg, u_cpu, v_cpu, u_score_cpu, v_score_cpu
 
                 if logger and log_interval > 0 and step % log_interval == 0:
                     logger.info(
@@ -454,22 +472,18 @@ def evaluate_grn(
     }
     for m in selected_metrics:
         val = float(metric_map[m])
-        summary[f"{m}_mean"] = val
-        summary[f"{m}_std"] = 0.0
-        summary[f"{m}_valid_cells"] = 1
+        summary[m] = val
 
     if len(selected_metrics) == 1:
         only = selected_metrics[0]
         summary["metric_name"] = only
-        summary["metric_mean"] = summary[f"{only}_mean"]
-        summary["metric_std"] = summary[f"{only}_std"]
-        summary["metric_valid_cells"] = summary[f"{only}_valid_cells"]
+        summary["metric"] = summary[only]
     summary_df = pd.DataFrame([summary])
     summary_csv = os.path.join(output_dir, "grn_eval_summary.csv")
     summary_df.to_csv(summary_csv, index=False)
 
     if logger:
-        metric_log_parts = [f"{m}={summary[f'{m}_mean']:.6f}" for m in selected_metrics]
+        metric_log_parts = [f"{m}={summary[m]:.6f}" for m in selected_metrics]
         logger.info(
             "GRN eval done | cells=%d | %s",
             summary["num_cells"],

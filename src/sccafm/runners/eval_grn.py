@@ -1,5 +1,6 @@
 import argparse
 import os
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -85,6 +86,13 @@ def _resolve_adata_files(raw):
     raise ValueError("`datasets.adata_files` must be a string path or a list of string paths.")
 
 
+def _find_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        s.listen(1)
+        return int(s.getsockname()[1])
+
+
 def _normalize_eval_cfg(eval_cfg):
     eval_cfg["batch_size"] = _as_int(eval_cfg.get("batch_size", 32), "eval.batch_size")
     eval_cfg["log_interval"] = _as_int(eval_cfg.get("log_interval", 100), "eval.log_interval")
@@ -167,9 +175,11 @@ def main():
 
     in_torchrun = int(os.environ.get("WORLD_SIZE", "1")) > 1
     if args.nproc_per_node > 1 and not in_torchrun:
+        master_port = _find_free_port()
         cmd = [
             "torchrun",
             f"--nproc_per_node={args.nproc_per_node}",
+            f"--master_port={master_port}",
             "-m",
             "sccafm.runners.eval_grn",
             "--config",
@@ -240,10 +250,7 @@ def main():
         print("GRN evaluation finished.")
         metrics = eval_task_cfg["metric"]
         for m in metrics:
-            print(
-                f"{m} mean={summary[f'{m}_mean']:.6f} "
-                f"std={summary[f'{m}_std']:.6f} valid_cells={summary[f'{m}_valid_cells']}"
-            )
+            print(f"{m} value={summary[m]:.6f}")
 
 
 if __name__ == "__main__":

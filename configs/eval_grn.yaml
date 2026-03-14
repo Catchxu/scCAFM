@@ -1,30 +1,30 @@
 datasets:
-  adata_files: /data1021/xukaichen/data/CTA/pbmc.h5ad
+  adata_files: /data1021/xukaichen/data/GRN/datasets/hHep.h5ad
   token_dict: token_dict.csv
   human_tfs: human_tfs.csv
   mouse_tfs: mouse_tfs.csv
-  eval_grn: /data1021/xukaichen/data/GRN/networks/hSTRING.csv
+  eval_grn: /data1021/xukaichen/data/GRN/networks/hChIP-seq.csv
 
 tokenizer:
   # Gene column in adata.var to use for token mapping.
   # null -> use adata.var_names
   gene_key: null
-  platform_key: assay
+  platform_key: null
   species_key: null
-  tissue_key: tissue
-  disease_key: disease
+  tissue_key: null
+  disease_key: null
 
 eval:
   checkpoint_path: ./checkpoints/sfm_latest.pt
-  batch_size: 32
-  device: cuda
+  batch_size: 64
+  device: cuda:3
   output_dir: ./results
   log_dir: ./logs
   log_name: grn_eval.log
   log_overwrite: True
   log_interval: 100
   # Can be a single metric string or a list, e.g. [auprc_ratio, auroc_ratio].
-  metric: [auprc_ratio, auroc]
+  metric: [auprc_ratio, auroc_ratio]
   preprocess: True
   use_amp: True
   amp_dtype: bf16
