@@ -14,11 +14,11 @@ python3 scripts/check_gene_descriptions.py
 python3 scripts/run_gene_embedding.py --log-overwrite
 
 # model pretraining
-setsid nohup python3 scripts/run_pretrain.py --nproc-per-node 4 > /dev/null 2>&1 < /dev/null &
-setsid nohup python3 scripts/run_pretrain.py --nproc-per-node 4 --override train.resume=true > /dev/null 2>&1 < /dev/null &
+setsid nohup python3 scripts/run_pretrain.py > /dev/null 2>&1 < /dev/null &
+setsid nohup python3 scripts/run_pretrain.py --override train.resume=true > /dev/null 2>&1 < /dev/null &
 
 # evaluation
-setsid nohup python3 scripts/run_eval_grn.py --nproc-per-node 4 > /dev/null 2>&1 < /dev/null &
+setsid nohup python3 scripts/run_eval_grn.py > /dev/null 2>&1 < /dev/null &
 
 # pipeline
 setsid nohup bash scripts/run_grn.sh > /dev/null 2>&1 < /dev/null &

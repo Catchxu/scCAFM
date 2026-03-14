@@ -1,4 +1,5 @@
-from .losses import ELBOLoss, PriorLoss, DAGLoss, SFMLoss
+from .vgae import ELBOLoss
+from .core import PriorLoss, DAGLoss, SFMLoss
 
 __all__ = [
     "ELBOLoss",

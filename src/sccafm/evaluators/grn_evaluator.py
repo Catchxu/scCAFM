@@ -1,5 +1,4 @@
 import gc
-import logging
 import os
 from contextlib import nullcontext
 from typing import Dict, List, Optional, Tuple, Union
@@ -14,62 +13,10 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
 from ..models import SFM
-from ..loss import SFMLoss
+from ..losses import SFMLoss
+from ..runtime import resolve_device, setup_distributed, setup_logger, unwrap_ddp
 from ..tokenizer import TomeDataset, TomeTokenizer, tome_collate_fn
 from .metric import compute_selected_metrics, normalize_metric_selection
-
-
-def _setup_logger(
-    output_dir: str,
-    log_dir: Optional[str],
-    log_name: str,
-    log_overwrite: bool = True,
-):
-    if log_dir is None:
-        log_dir = output_dir
-    os.makedirs(log_dir, exist_ok=True)
-    log_path = os.path.join(log_dir, log_name)
-
-    logger = logging.getLogger("sccafm.eval.grn")
-    logger.setLevel(logging.INFO)
-    logger.handlers.clear()
-    logger.propagate = False
-
-    formatter = logging.Formatter(
-        fmt="%(asctime)s | %(levelname)s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-    fh = logging.FileHandler(log_path, mode="w" if log_overwrite else "a")
-    fh.setFormatter(formatter)
-    sh = logging.StreamHandler()
-    sh.setFormatter(formatter)
-    logger.addHandler(fh)
-    logger.addHandler(sh)
-    return logger
-
-
-def _setup_distributed(device: str):
-    world_size = int(os.environ.get("WORLD_SIZE", "1"))
-    is_distributed = world_size > 1
-    initialized_here = False
-    rank = 0
-    local_rank = 0
-
-    if is_distributed:
-        rank = int(os.environ.get("RANK", "0"))
-        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-        if device.startswith("cuda") and torch.cuda.is_available():
-            torch.cuda.set_device(local_rank)
-        if not dist.is_initialized():
-            backend = "nccl" if torch.cuda.is_available() else "gloo"
-            dist.init_process_group(backend=backend)
-            initialized_here = True
-        rank = dist.get_rank()
-    return is_distributed, initialized_here, rank, local_rank, world_size
-
-
-def _unwrap_ddp(module):
-    return module.module if isinstance(module, DDP) else module
 
 
 def _map_gene_to_token(name: str, symbol2id: Dict[str, int], id2id: Dict[str, int]) -> Optional[int]:
@@ -234,11 +181,18 @@ def evaluate_grn(
     if isinstance(adata_files, str):
         adata_files = [adata_files]
 
-    is_distributed, initialized_here, rank, local_rank, world_size = _setup_distributed(device)
+    is_distributed, initialized_here, rank, local_rank, world_size = setup_distributed(device)
     rank0 = rank == 0
 
     os.makedirs(output_dir, exist_ok=True)
-    logger = _setup_logger(output_dir, log_dir, log_name, log_overwrite=log_overwrite) if rank0 else None
+    logger = setup_logger(
+        "sccafm.eval.grn",
+        output_dir,
+        log_dir,
+        log_name,
+        log_overwrite=log_overwrite,
+        enabled=rank0,
+    )
 
     selected_metrics = normalize_metric_selection(metric)
 
@@ -246,10 +200,7 @@ def evaluate_grn(
     if amp_dtype not in {"bf16", "fp16"}:
         raise ValueError(f"Unsupported amp_dtype: {amp_dtype}. Use 'bf16' or 'fp16'.")
 
-    if device.startswith("cuda") and torch.cuda.is_available():
-        device = f"cuda:{local_rank}" if is_distributed else device
-    else:
-        device = "cpu"
+    device = resolve_device(device, is_distributed, local_rank)
 
     amp_enabled = bool(use_amp and device.startswith("cuda"))
     if amp_enabled and amp_dtype == "bf16" and not torch.cuda.is_bf16_supported():
@@ -292,8 +243,8 @@ def evaluate_grn(
             lr=finetune_learning_rate,
             weight_decay=finetune_weight_decay,
         )
-    model_core = _unwrap_ddp(model)
-    criterion_core = _unwrap_ddp(criterion) if criterion is not None else None
+    model_core = unwrap_ddp(model)
+    criterion_core = unwrap_ddp(criterion) if criterion is not None else None
     tokenizer.set_gene_key(gene_key)
     tokenizer.set_condition_keys(
         platform_key=platform_key,

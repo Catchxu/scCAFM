@@ -34,12 +34,6 @@ def main() -> int:
         help="Validate config and paths without training.",
     )
     parser.add_argument(
-        "--nproc-per-node",
-        type=int,
-        default=1,
-        help="Number of DDP processes for torchrun.",
-    )
-    parser.add_argument(
         "--master-port",
         type=int,
         default=None,
@@ -61,8 +55,6 @@ def main() -> int:
         "sccafm.runners.pretrain_sfm",
         "--config",
         args.meta_config,
-        "--nproc-per-node",
-        str(args.nproc_per_node),
     ]
     if args.dry_run:
         cmd.append("--dry-run")

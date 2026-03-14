@@ -9,8 +9,9 @@ except PackageNotFoundError:
 from .load import load_resources
 from .trainer import sfm_trainer
 from .evaluators import evaluate_grn
+from .runtime import summarize_model_size, print_model_size
 
 # Modules
 from .models import SFM
 from .tokenizer import TomeTokenizer
-from .loss import SFMLoss
+from .losses import SFMLoss

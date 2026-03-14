@@ -1,6 +1,5 @@
 import argparse
 import os
-import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -10,6 +9,7 @@ import torch
 from sccafm.builder import build_model, build_tokenizer
 from sccafm.evaluators import evaluate_grn
 from sccafm.load import load_cfg, load_resources
+from sccafm.runtime import find_free_port, print_model_size
 
 
 def _as_int(v, key):
@@ -58,6 +58,36 @@ def _as_str(v, key):
     raise ValueError(f"`{key}` must be a string, got: {v}")
 
 
+def _normalize_devices(v, key):
+    if v is None:
+        return None
+    if isinstance(v, int):
+        if v < 0:
+            raise ValueError(f"`{key}` GPU ids must be non-negative, got: {v}")
+        return [v]
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if not s:
+            return None
+        if s == "cpu":
+            return []
+        if s.startswith("cuda:"):
+            s = s.split(":", 1)[1]
+        parts = [p.strip() for p in s.split(",") if p.strip()]
+        try:
+            out = [int(p) for p in parts]
+        except ValueError as e:
+            raise ValueError(f"`{key}` must be GPU ids like [0,1] or '0,1', got: {v}") from e
+        if any(x < 0 for x in out):
+            raise ValueError(f"`{key}` GPU ids must be non-negative, got: {v}")
+        return out
+    if isinstance(v, list):
+        if not all(isinstance(x, int) and x >= 0 for x in v):
+            raise ValueError(f"`{key}` must be a list of non-negative ints, got: {v}")
+        return list(v)
+    raise ValueError(f"`{key}` must be an int, string, list of ints, or null, got: {type(v).__name__}")
+
+
 def _as_metric_list(v, key):
     if isinstance(v, str):
         out = [v.strip().lower()]
@@ -98,14 +128,6 @@ def _resolve_adata_files(raw):
         return out
     raise ValueError("`datasets.adata_files` must be a string path or a list of string paths.")
 
-
-def _find_free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        s.listen(1)
-        return int(s.getsockname()[1])
-
-
 def _normalize_finetune_cfg(finetune_cfg, default_log_interval: int):
     if isinstance(finetune_cfg, bool):
         finetune_cfg = {"enabled": finetune_cfg}
@@ -138,7 +160,10 @@ def _normalize_eval_cfg(eval_cfg):
     eval_cfg["batch_size"] = _as_int(eval_cfg.get("batch_size", 32), "eval.batch_size")
     eval_cfg["log_interval"] = _as_int(eval_cfg.get("log_interval", 100), "eval.log_interval")
     eval_cfg["metric"] = _as_metric_list(eval_cfg.get("metric", "auprc"), "eval.metric")
-    eval_cfg["device"] = _as_str(eval_cfg.get("device", "cuda"), "eval.device")
+    devices = eval_cfg.get("devices", None)
+    if devices is None and "device" in eval_cfg:
+        devices = eval_cfg["device"]
+    eval_cfg["devices"] = _normalize_devices(devices, "eval.devices")
     eval_cfg["output_dir"] = _as_str(eval_cfg.get("output_dir", "./eval/grn"), "eval.output_dir")
     eval_cfg["log_name"] = _as_str(eval_cfg.get("log_name", "grn_eval.log"), "eval.log_name")
     eval_cfg["use_amp"] = _as_bool(eval_cfg.get("use_amp", False), "eval.use_amp")
@@ -176,12 +201,6 @@ def main():
     parser.add_argument("--config", type=str, default="meta.yaml", help="Meta config YAML path")
     parser.add_argument("--override", nargs="*", default=[], help="Optional overrides: key=value")
     parser.add_argument("--dry-run", action="store_true", help="Validate config and paths without evaluation.")
-    parser.add_argument(
-        "--nproc-per-node",
-        type=int,
-        default=1,
-        help="Number of processes for DDP evaluation via torchrun (default: 1).",
-    )
     args = parser.parse_args()
 
     meta_cfg = load_cfg(args.config)
@@ -223,13 +242,18 @@ def main():
     _normalize_tokenizer_eval_cfg(eval_tokenizer_cfg)
 
     adata_files = _resolve_adata_files(data_cfg["adata_files"])
+    visible_devices = eval_task_cfg.pop("devices", None)
+    runtime_device = "cpu" if visible_devices == [] else "cuda"
+    nproc_per_node = 1 if visible_devices in (None, []) else max(1, len(visible_devices))
+    if visible_devices not in (None, []):
+        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(x) for x in visible_devices)
 
     in_torchrun = int(os.environ.get("WORLD_SIZE", "1")) > 1
-    if args.nproc_per_node > 1 and not in_torchrun:
-        master_port = _find_free_port()
+    if nproc_per_node > 1 and not in_torchrun:
+        master_port = find_free_port()
         cmd = [
             "torchrun",
-            f"--nproc_per_node={args.nproc_per_node}",
+            f"--nproc_per_node={nproc_per_node}",
             f"--master_port={master_port}",
             "-m",
             "sccafm.runners.eval_grn",
@@ -239,6 +263,8 @@ def main():
         if args.override:
             cmd.extend(["--override", *args.override])
         print(f"Resolved dataset files: {len(adata_files)}")
+        if visible_devices is not None:
+            print(f"Visible devices: {visible_devices} | nproc_per_node={nproc_per_node}")
         print("Command:", " ".join(cmd))
         if args.dry_run:
             return
@@ -247,6 +273,8 @@ def main():
 
     if args.dry_run:
         print(f"Resolved dataset files: {len(adata_files)}")
+        if visible_devices is not None:
+            print(f"Visible devices: {visible_devices} | nproc_per_node={nproc_per_node}")
         print("Command:", " ".join([sys.executable, "-m", "sccafm.runners.eval_grn", "--config", args.config]))
         return
 
@@ -257,6 +285,7 @@ def main():
     eval_grn_df = load_resources(data_cfg[eval_grn_key])
 
     model = build_model(model_cfg["SFM"], token_dict=token_dict)
+    print_model_size(model, prefix="SFM size")
     tokenizer = build_tokenizer(tokenizer_cfg["Tome"], token_dict=token_dict)
     finetune_loss_state_dict = None
 
@@ -280,7 +309,7 @@ def main():
         human_tfs=human_tfs,
         mouse_tfs=mouse_tfs,
         batch_size=eval_task_cfg["batch_size"],
-        device=eval_task_cfg["device"],
+        device=runtime_device,
         output_dir=eval_task_cfg["output_dir"],
         log_dir=eval_task_cfg.get("log_dir"),
         log_name=eval_task_cfg["log_name"],

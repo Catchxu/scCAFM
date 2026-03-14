@@ -1,6 +1,6 @@
 # src/sccafm/builder.py
-from .models import SFM, ELBOLoss
-from .loss import SFMLoss, DAGLoss, PriorLoss
+from .models import SFM
+from .losses import ELBOLoss, SFMLoss, DAGLoss, PriorLoss
 from .tokenizer import TomeTokenizer, GeneTokenizer, ExprTokenizer, CondTokenizer
 
 

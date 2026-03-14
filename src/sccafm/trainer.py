@@ -1,8 +1,7 @@
 import os
 import gc
-import logging
 import signal
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 import pandas as pd
 import scanpy as sc
 from tqdm import tqdm
@@ -15,63 +14,9 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 
 from .models import SFM
-from .loss import SFMLoss
+from .losses import SFMLoss
+from .runtime import resolve_device, setup_distributed, setup_logger, unwrap_ddp
 from .tokenizer import TomeTokenizer, TomeDataset, tome_collate_fn
-
-
-def _unwrap_ddp(module):
-    return module.module if isinstance(module, DDP) else module
-
-
-def _setup_distributed(device: str):
-    world_size = int(os.environ.get("WORLD_SIZE", "1"))
-    is_distributed = world_size > 1
-    initialized_here = False
-    rank = 0
-    local_rank = 0
-
-    if is_distributed:
-        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-        if device.startswith("cuda"):
-            torch.cuda.set_device(local_rank)
-        if not dist.is_initialized():
-            backend = "nccl" if torch.cuda.is_available() else "gloo"
-            dist.init_process_group(backend=backend)
-            initialized_here = True
-        rank = dist.get_rank()
-    return is_distributed, initialized_here, rank, local_rank, world_size
-
-
-def _setup_logger(
-    rank0: bool,
-    checkpoint_dir: str,
-    log_dir: Optional[str],
-    log_name: str,
-    log_overwrite: bool = True,
-):
-    if not rank0:
-        return None
-    if log_dir is None:
-        log_dir = checkpoint_dir
-    os.makedirs(log_dir, exist_ok=True)
-    log_path = os.path.join(log_dir, log_name)
-
-    logger = logging.getLogger("sccafm.train")
-    logger.setLevel(logging.INFO)
-    logger.handlers.clear()
-    logger.propagate = False
-
-    formatter = logging.Formatter(
-        fmt="%(asctime)s | %(levelname)s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-    fh = logging.FileHandler(log_path, mode="w" if log_overwrite else "a")
-    fh.setFormatter(formatter)
-    sh = logging.StreamHandler()
-    sh.setFormatter(formatter)
-    logger.addHandler(fh)
-    logger.addHandler(sh)
-    return logger
 
 
 def _resolve_species_for_tf(
@@ -127,6 +72,7 @@ def sfm_trainer(
     use_amp: bool = False,
     amp_dtype: str = "bf16",
     warmup_steps: int = 1000,
+    grad_accum_steps: int = 1,
 ):
     """
     Complete training pipeline for SFM model.
@@ -134,18 +80,26 @@ def sfm_trainer(
     if isinstance(adata_files, str):
         adata_files = [adata_files]
 
-    is_distributed, initialized_here, rank, local_rank, world_size = _setup_distributed(device)
-    if device.startswith("cuda") and torch.cuda.is_available():
-        device = f"cuda:{local_rank}" if is_distributed else device
+    is_distributed, initialized_here, rank, local_rank, world_size = setup_distributed(device)
+    device = resolve_device(device, is_distributed, local_rank)
     rank0 = rank == 0
 
     model.to(device)
     criterion.to(device)
-    logger = _setup_logger(rank0, checkpoint_dir, log_dir, log_name, log_overwrite=log_overwrite)
+    logger = setup_logger(
+        "sccafm.train",
+        checkpoint_dir,
+        log_dir,
+        log_name,
+        log_overwrite=log_overwrite,
+        enabled=rank0,
+    )
 
     amp_dtype = amp_dtype.lower()
     if amp_dtype not in {"bf16", "fp16"}:
         raise ValueError(f"Unsupported amp_dtype: {amp_dtype}. Use 'bf16' or 'fp16'.")
+    if grad_accum_steps < 1:
+        raise ValueError(f"grad_accum_steps must be >= 1, got {grad_accum_steps}")
     amp_enabled = bool(use_amp and device.startswith("cuda"))
     if amp_enabled and amp_dtype == "bf16" and not torch.cuda.is_bf16_supported():
         raise ValueError(
@@ -160,8 +114,8 @@ def sfm_trainer(
         model = DDP(model, **ddp_kwargs)
         criterion = DDP(criterion, **ddp_kwargs)
 
-    model_core = _unwrap_ddp(model)
-    criterion_core = _unwrap_ddp(criterion)
+    model_core = unwrap_ddp(model)
+    criterion_core = unwrap_ddp(criterion)
     embedding_mod = getattr(model_core, "embedding", None)
     gene_emb_ckpt = getattr(embedding_mod, "loaded_gene_embedding_ckpt", None) if embedding_mod is not None else None
     gene_emb_loaded = int(getattr(embedding_mod, "loaded_gene_embedding_count", 0)) if embedding_mod is not None else 0
@@ -241,8 +195,8 @@ def sfm_trainer(
         criterion.train()
         if rank0 and logger:
             logger.info(
-                "Training start | files=%d | epochs_per_file=%d | batch_size=%d | device=%s | ddp=%s | amp=%s | amp_dtype=%s | warmup_steps=%d",
-                len(adata_files), epochs_per_file, batch_size, device, is_distributed, amp_enabled, amp_dtype, warmup_steps
+                "Training start | files=%d | epochs_per_file=%d | batch_size=%d | grad_accum_steps=%d | device=%s | ddp=%s | amp=%s | amp_dtype=%s | warmup_steps=%d",
+                len(adata_files), epochs_per_file, batch_size, grad_accum_steps, device, is_distributed, amp_enabled, amp_dtype, warmup_steps
             )
             if gene_emb_ckpt:
                 logger.info(
@@ -322,9 +276,16 @@ def sfm_trainer(
                     )
 
                 iterator = tqdm(loader, desc=f"Epoch {epoch+1}/{epochs_per_file}", mininterval=tqdm_mininterval) if (rank0 and use_tqdm) else loader
-                for batch in iterator:
+                optimizer.zero_grad()
+                num_batches = len(loader)
+                for batch_idx, batch in enumerate(iterator, start=1):
                     batch = {k: v.to(device) for k, v in batch.items()}
-                    optimizer.zero_grad()
+                    should_step = (batch_idx % grad_accum_steps == 0) or (batch_idx == num_batches)
+                    accum_context = nullcontext()
+                    if is_distributed and not should_step:
+                        accum_context = ExitStack()
+                        accum_context.enter_context(model.no_sync())
+                        accum_context.enter_context(criterion.no_sync())
                     autocast_ctx = (
                         torch.autocast(
                             device_type="cuda",
@@ -333,20 +294,27 @@ def sfm_trainer(
                         if amp_enabled
                         else nullcontext()
                     )
-                    with autocast_ctx:
-                        _, factors = model(batch, return_factors=True, compute_grn=False)
-                        total_loss, loss_dict = criterion(tokens=batch, factors=factors)
+                    with accum_context:
+                        with autocast_ctx:
+                            _, factors = model(batch, return_factors=True, compute_grn=False)
+                            total_loss, loss_dict = criterion(tokens=batch, factors=factors)
 
-                    if scaler.is_enabled():
-                        scaler.scale(total_loss).backward()
-                        scaler.step(optimizer)
-                        scaler.update()
-                    else:
-                        total_loss.backward()
-                        optimizer.step()
-                    if scheduler is not None:
-                        scheduler.step()
-                    global_step += 1
+                        loss_for_backward = total_loss / grad_accum_steps
+                        if scaler.is_enabled():
+                            scaler.scale(loss_for_backward).backward()
+                        else:
+                            loss_for_backward.backward()
+
+                    if should_step:
+                        if scaler.is_enabled():
+                            scaler.step(optimizer)
+                            scaler.update()
+                        else:
+                            optimizer.step()
+                        optimizer.zero_grad()
+                        if scheduler is not None:
+                            scheduler.step()
+                        global_step += 1
 
                     if rank0:
                         metric_keys = [k for k in ("elbo", "prior", "dag") if k in loss_dict]
