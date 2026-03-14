@@ -134,7 +134,7 @@ class PriorLoss(nn.Module):
 
         # 1. Project everything to the same TG-selected space used by GRN prediction.
         gene_tokens = self._masked_select_fixed_count(gene_tokens, binary_tg, "gene_tokens/binary_tg")
-        model_tf_mask = self._masked_select_fixed_count(binary_tf.float(), binary_tg, "binary_tf/binary_tg")
+        model_tf_mask = self._masked_select_fixed_count(binary_tf.to(u.dtype), binary_tg, "binary_tf/binary_tg")
 
         if true_grn_df is not None and true_grn_df is not self._cached_prior_ref:
             self._prepare_prior_cache(true_grn_df)
@@ -142,7 +142,7 @@ class PriorLoss(nn.Module):
         # 2. Explicitly filter prior by used genes.
         filt_src_ids, filt_tgt_ids = self._filter_prior_pairs_by_used_genes(gene_tokens)
         if filt_src_ids.numel() == 0:
-            return gene_tokens.new_zeros((), dtype=torch.float32)
+            return u.new_zeros(())
 
         # 3. Build dense source factors once.
         u_eff = u * u_score
@@ -154,7 +154,7 @@ class PriorLoss(nn.Module):
 
         # 4. Vectorized edge logits and supervision region in selected TG space.
         edge_raw = torch.bmm(u_full, v_eff.transpose(1, 2))  # (C, S, S)
-        edge_logit = torch.log(edge_raw.float().abs() + 1e-8)
+        edge_logit = torch.log(edge_raw.abs() + 1e-8)
 
         src_assoc = torch.isin(gene_tokens, src_unique) & tf_mask
         tgt_assoc = torch.isin(gene_tokens, tgt_unique)
@@ -163,7 +163,7 @@ class PriorLoss(nn.Module):
         # 5. Vectorized positive target construction from filtered prior pairs.
         C, S = gene_tokens.shape
         P = int(filt_src_ids.numel())
-        target = torch.zeros_like(edge_logit, dtype=torch.float32)
+        target = torch.zeros_like(edge_logit)
 
         sorted_tokens, sort_idx = torch.sort(gene_tokens, dim=1)
         src_vals = filt_src_ids.view(1, -1).expand(C, -1).contiguous()
@@ -189,8 +189,8 @@ class PriorLoss(nn.Module):
 
         # 6. Weighted BCE-with-logits with optional per-sample negative sampling.
         loss = F.binary_cross_entropy_with_logits(
-            edge_logit.float(),
-            target.float(),
+            edge_logit,
+            target,
             reduction="none",
         )
         weight = target * self.pos_weight + (1.0 - target) * self.neg_weight
@@ -216,9 +216,9 @@ class PriorLoss(nn.Module):
                         sampled_mask[b] = pos_mask
                 else:
                     sampled_mask[b] = mask_b
-            supervise_mask_f = sampled_mask.float()
+            supervise_mask_f = sampled_mask.to(loss.dtype)
         else:
-            supervise_mask_f = supervise_mask.float()
+            supervise_mask_f = supervise_mask.to(loss.dtype)
 
         numer = (loss * weight * supervise_mask_f).sum()
         denom = (weight * supervise_mask_f).sum()
@@ -303,7 +303,7 @@ class DAGLoss(nn.Module):
         binary_tf = factors.binary_tf
         binary_tg = factors.binary_tg
         if binary_tg is not None:
-            binary_tf = self._masked_select_fixed_count(binary_tf.float(), binary_tg, "binary_tf/binary_tg")
+            binary_tf = self._masked_select_fixed_count(binary_tf.to(u.dtype), binary_tg, "binary_tf/binary_tg")
         u_full = expand_u(u, binary_tf)
         adj_factor = torch.bmm(v.transpose(1, 2), u_full)
         

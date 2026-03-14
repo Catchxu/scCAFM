@@ -58,7 +58,7 @@ class ExprMapping(nn.Module):
 
         out = None
         if nonzero_mask.any():
-            nonzero_values = expr_tokens[nonzero_mask].float().unsqueeze(-1)
+            nonzero_values = expr_tokens[nonzero_mask].to(self.bin_embeddings.dtype).unsqueeze(-1)
             encoded = self.encoder(nonzero_values)
 
             bin_embs = self.bin_embeddings[1:]
@@ -119,7 +119,7 @@ class BatchMapping(nn.Module):
             if pad_mask.dtype != torch.bool:
                 pad_mask = pad_mask.bool()
 
-        x = expr_tokens.float().unsqueeze(-1)     # (C, L, 1)
+        x = expr_tokens.to(self.bin_embeddings.dtype).unsqueeze(-1)     # (C, L, 1)
         h = self.token_encoder(x)                 # (C, L, D)
         if pad_mask is None:
             encoded = h.mean(dim=1)               # (C, D)

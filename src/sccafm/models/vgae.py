@@ -160,7 +160,7 @@ class ExprModeling(nn.Module):
     ):
         # Fixed-point iteration for h = z + gamma * A h.
         # This avoids dense SxS matrix construction and solve.
-        binary_tf_sel = self._masked_select_fixed_count(binary_tf.float(), binary_tg, "binary_tf/binary_tg")
+        binary_tf_sel = self._masked_select_fixed_count(binary_tf.to(u.dtype), binary_tg, "binary_tf/binary_tg")
         u_full = expand_u(u * u_score, binary_tf_sel)      # (C, S, M), S matches selected TG space
         v_eff = v * v_score
         h = z_proj
@@ -247,10 +247,9 @@ class ELBOLoss(nn.Module):
         """
         Zero-inflated Gaussian log-likelihood (stable broadcasting)
         """
-        x = x.float()
-        mu = mu.float()
-        sigma = sigma.float().clamp_min(1e-5)
-        p_drop = p_drop.float().clamp(min=1e-5, max=1.0 - 1e-5)
+        x = x.to(mu.dtype)
+        sigma = sigma.clamp_min(1e-5)
+        p_drop = p_drop.clamp(min=1e-5, max=1.0 - 1e-5)
         normal = torch.distributions.Normal(mu, sigma)
         
         # Compute log-probability of zero for all genes
@@ -269,8 +268,7 @@ class ELBOLoss(nn.Module):
         return log_prob.sum(dim=-1)
 
     def kl_normal(self, mu, sigma):
-        mu = mu.float()
-        sigma = sigma.float().clamp_min(1e-5)
+        sigma = sigma.clamp_min(1e-5)
         return 0.5 * torch.sum(
             mu.pow(2) + sigma.pow(2) - 1 - torch.log(sigma.pow(2)),
             dim=-1
