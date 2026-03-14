@@ -27,6 +27,19 @@ def _as_int(v, key):
     raise ValueError(f"`{key}` must be an int, got type: {type(v).__name__}")
 
 
+def _as_float(v, key):
+    if isinstance(v, bool):
+        raise ValueError(f"`{key}` must be a float, got bool: {v}")
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str):
+        try:
+            return float(v)
+        except ValueError as e:
+            raise ValueError(f"`{key}` must be a float, got: {v}") from e
+    raise ValueError(f"`{key}` must be a float, got type: {type(v).__name__}")
+
+
 def _as_bool(v, key):
     if isinstance(v, bool):
         return v
@@ -93,6 +106,34 @@ def _find_free_port() -> int:
         return int(s.getsockname()[1])
 
 
+def _normalize_finetune_cfg(finetune_cfg, default_log_interval: int):
+    if isinstance(finetune_cfg, bool):
+        finetune_cfg = {"enabled": finetune_cfg}
+    if finetune_cfg is None:
+        finetune_cfg = {}
+    if not isinstance(finetune_cfg, dict):
+        raise ValueError("`finetune` must be a bool or a mapping.")
+    finetune_cfg["enabled"] = _as_bool(finetune_cfg.get("enabled", False), "finetune.enabled")
+    finetune_cfg["epochs"] = _as_int(finetune_cfg.get("epochs", 1), "finetune.epochs")
+    finetune_cfg["learning_rate"] = _as_float(
+        finetune_cfg.get("learning_rate", 1e-5), "finetune.learning_rate"
+    )
+    finetune_cfg["weight_decay"] = _as_float(
+        finetune_cfg.get("weight_decay", 1e-2), "finetune.weight_decay"
+    )
+    finetune_cfg["use_amp"] = _as_bool(finetune_cfg.get("use_amp", True), "finetune.use_amp")
+    finetune_cfg["amp_dtype"] = _as_str(finetune_cfg.get("amp_dtype", "bf16"), "finetune.amp_dtype").lower()
+    finetune_batch_size = finetune_cfg.get("batch_size", None)
+    finetune_cfg["batch_size"] = None if finetune_batch_size is None else _as_int(
+        finetune_batch_size, "finetune.batch_size"
+    )
+    finetune_cfg["log_interval"] = _as_int(
+        finetune_cfg.get("log_interval", default_log_interval),
+        "finetune.log_interval",
+    )
+    return finetune_cfg
+
+
 def _normalize_eval_cfg(eval_cfg):
     eval_cfg["batch_size"] = _as_int(eval_cfg.get("batch_size", 32), "eval.batch_size")
     eval_cfg["log_interval"] = _as_int(eval_cfg.get("log_interval", 100), "eval.log_interval")
@@ -124,7 +165,10 @@ def _load_checkpoint(model, checkpoint_path: str, map_location: str = "cpu"):
         raise ValueError(f"Unsupported checkpoint format at {checkpoint_path}")
 
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
-    return missing, unexpected
+    criterion_state_dict = None
+    if isinstance(ckpt, dict):
+        criterion_state_dict = ckpt.get("criterion_state_dict")
+    return missing, unexpected, criterion_state_dict
 
 
 def main():
@@ -148,9 +192,15 @@ def main():
 
     data_cfg = eval_cfg["datasets"]
     eval_tokenizer_cfg = eval_cfg.get("tokenizer", {})
+    finetune_cfg = eval_cfg.get("finetune", {})
     eval_task_cfg = eval_cfg["eval"]
 
-    cfg_root = {"datasets": data_cfg, "tokenizer": eval_tokenizer_cfg, "eval": eval_task_cfg}
+    cfg_root = {
+        "datasets": data_cfg,
+        "tokenizer": eval_tokenizer_cfg,
+        "finetune": finetune_cfg,
+        "eval": eval_task_cfg,
+    }
     for item in args.override:
         key, value = item.split("=", 1)
         keys = key.split(".")
@@ -169,6 +219,7 @@ def main():
         d[keys[-1]] = value
 
     _normalize_eval_cfg(eval_task_cfg)
+    finetune_cfg = _normalize_finetune_cfg(finetune_cfg, default_log_interval=eval_task_cfg["log_interval"])
     _normalize_tokenizer_eval_cfg(eval_tokenizer_cfg)
 
     adata_files = _resolve_adata_files(data_cfg["adata_files"])
@@ -207,13 +258,14 @@ def main():
 
     model = build_model(model_cfg["SFM"], token_dict=token_dict)
     tokenizer = build_tokenizer(tokenizer_cfg["Tome"], token_dict=token_dict)
+    finetune_loss_state_dict = None
 
     checkpoint_path = eval_task_cfg.get("checkpoint_path")
     if checkpoint_path:
         ckpt_path = Path(checkpoint_path).expanduser()
         if not ckpt_path.exists():
             raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
-        missing, unexpected = _load_checkpoint(model, str(ckpt_path), map_location="cpu")
+        missing, unexpected, finetune_loss_state_dict = _load_checkpoint(model, str(ckpt_path), map_location="cpu")
         print(f"Loaded checkpoint: {ckpt_path}")
         if missing:
             print(f"Missing keys ({len(missing)}): {missing[:10]}")
@@ -243,6 +295,15 @@ def main():
         use_amp=eval_task_cfg["use_amp"],
         amp_dtype=eval_task_cfg["amp_dtype"],
         log_overwrite=eval_task_cfg["log_overwrite"],
+        finetune=finetune_cfg["enabled"],
+        finetune_epochs=finetune_cfg["epochs"],
+        finetune_learning_rate=finetune_cfg["learning_rate"],
+        finetune_weight_decay=finetune_cfg["weight_decay"],
+        finetune_batch_size=finetune_cfg["batch_size"],
+        finetune_log_interval=finetune_cfg["log_interval"],
+        finetune_use_amp=finetune_cfg["use_amp"],
+        finetune_amp_dtype=finetune_cfg["amp_dtype"],
+        finetune_loss_state_dict=finetune_loss_state_dict,
     )
 
     rank = int(os.environ.get("RANK", "0"))

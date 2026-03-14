@@ -9,10 +9,12 @@ import pandas as pd
 import scanpy as sc
 import torch
 import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
 from ..models import SFM
+from ..loss import SFMLoss
 from ..tokenizer import TomeDataset, TomeTokenizer, tome_collate_fn
 from .metric import compute_selected_metrics, normalize_metric_selection
 
@@ -64,6 +66,10 @@ def _setup_distributed(device: str):
             initialized_here = True
         rank = dist.get_rank()
     return is_distributed, initialized_here, rank, local_rank, world_size
+
+
+def _unwrap_ddp(module):
+    return module.module if isinstance(module, DDP) else module
 
 
 def _map_gene_to_token(name: str, symbol2id: Dict[str, int], id2id: Dict[str, int]) -> Optional[int]:
@@ -215,6 +221,15 @@ def evaluate_grn(
     use_amp: bool = False,
     amp_dtype: str = "bf16",
     log_overwrite: bool = True,
+    finetune: bool = False,
+    finetune_epochs: int = 1,
+    finetune_learning_rate: float = 1e-5,
+    finetune_weight_decay: float = 1e-2,
+    finetune_batch_size: Optional[int] = None,
+    finetune_log_interval: int = 100,
+    finetune_use_amp: bool = True,
+    finetune_amp_dtype: str = "bf16",
+    finetune_loss_state_dict: Optional[dict] = None,
 ):
     if isinstance(adata_files, str):
         adata_files = [adata_files]
@@ -232,7 +247,7 @@ def evaluate_grn(
         raise ValueError(f"Unsupported amp_dtype: {amp_dtype}. Use 'bf16' or 'fp16'.")
 
     if device.startswith("cuda") and torch.cuda.is_available():
-        device = f"cuda:{local_rank}" if is_distributed else "cuda"
+        device = f"cuda:{local_rank}" if is_distributed else device
     else:
         device = "cpu"
 
@@ -241,9 +256,44 @@ def evaluate_grn(
         raise ValueError(
             "use_amp=True with amp_dtype='bf16' requires CUDA bf16 support on this GPU/runtime."
         )
+    finetune_amp_dtype = finetune_amp_dtype.lower()
+    if finetune_amp_dtype not in {"bf16", "fp16"}:
+        raise ValueError(
+            f"Unsupported finetune_amp_dtype: {finetune_amp_dtype}. Use 'bf16' or 'fp16'."
+        )
+    finetune_amp_enabled = bool(finetune_use_amp and device.startswith("cuda"))
+    if finetune_amp_enabled and finetune_amp_dtype == "bf16" and not torch.cuda.is_bf16_supported():
+        raise ValueError(
+            "finetune.use_amp=True with finetune.amp_dtype='bf16' requires CUDA bf16 support on this GPU/runtime."
+        )
 
     model = model.to(device)
     model.eval()
+    criterion = None
+    optimizer = None
+    scaler = torch.amp.GradScaler("cuda", enabled=finetune_amp_enabled and finetune_amp_dtype == "fp16")
+    if finetune:
+        criterion = SFMLoss(use_prior=False, use_dag=False).to(device)
+        if finetune_loss_state_dict is not None:
+            missing, unexpected = criterion.load_state_dict(finetune_loss_state_dict, strict=False)
+            if logger:
+                if missing:
+                    logger.info("Fine-tune loss missing keys (%d): %s", len(missing), missing[:10])
+                if unexpected:
+                    logger.info("Fine-tune loss unexpected keys (%d): %s", len(unexpected), unexpected[:10])
+        if is_distributed:
+            ddp_kwargs = {}
+            if device.startswith("cuda"):
+                ddp_kwargs = {"device_ids": [local_rank], "output_device": local_rank}
+            model = DDP(model, **ddp_kwargs)
+            criterion = DDP(criterion, **ddp_kwargs)
+        optimizer = torch.optim.AdamW(
+            list(model.parameters()) + list(criterion.parameters()),
+            lr=finetune_learning_rate,
+            weight_decay=finetune_weight_decay,
+        )
+    model_core = _unwrap_ddp(model)
+    criterion_core = _unwrap_ddp(criterion) if criterion is not None else None
     tokenizer.set_gene_key(gene_key)
     tokenizer.set_condition_keys(
         platform_key=platform_key,
@@ -306,9 +356,92 @@ def evaluate_grn(
             )
 
         dataset = TomeDataset(tokens_dict)
-        sampler = None
+
+        species = _resolve_species_for_tf(adata, cond_species_key)
+
+        if species == "human":
+            model_core.update_tfs(human_tfs)
+        elif species == "mouse":
+            model_core.update_tfs(mouse_tfs)
+        else:
+            raise ValueError(f"{species} isn't supported!")
+
+        if finetune:
+            ft_batch_size = finetune_batch_size if finetune_batch_size is not None else batch_size
+            sampler = None
+            if is_distributed:
+                sampler = DistributedSampler(
+                    dataset,
+                    num_replicas=world_size,
+                    rank=rank,
+                    shuffle=True,
+                    drop_last=False,
+                )
+            ft_loader = DataLoader(
+                dataset,
+                batch_size=ft_batch_size,
+                shuffle=sampler is None,
+                sampler=sampler,
+                collate_fn=tome_collate_fn,
+                num_workers=0,
+                pin_memory=True,
+            )
+            model.train()
+            criterion_core.train()
+            if logger:
+                logger.info(
+                    "Fine-tune start | file=%d | epochs=%d | batch_size=%d | device=%s | ddp=%s | amp=%s | amp_dtype=%s",
+                    file_idx + 1,
+                    finetune_epochs,
+                    ft_batch_size,
+                    device,
+                    is_distributed,
+                    finetune_amp_enabled,
+                    finetune_amp_dtype if finetune_amp_enabled else "disabled",
+                )
+            for epoch in range(finetune_epochs):
+                if sampler is not None:
+                    sampler.set_epoch(file_idx * max(finetune_epochs, 1) + epoch)
+                for step, batch in enumerate(ft_loader, start=1):
+                    batch = {k: v.to(device) for k, v in batch.items()}
+                    optimizer.zero_grad()
+                    autocast_ctx = (
+                        torch.autocast(
+                            device_type="cuda",
+                            dtype=torch.bfloat16 if finetune_amp_dtype == "bf16" else torch.float16,
+                        )
+                        if finetune_amp_enabled
+                        else nullcontext()
+                    )
+                    with autocast_ctx:
+                        _, factors = model(batch, return_factors=True, compute_grn=False)
+                        total_loss, loss_dict = criterion(tokens=batch, factors=factors)
+
+                    if scaler.is_enabled():
+                        scaler.scale(total_loss).backward()
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        total_loss.backward()
+                        optimizer.step()
+
+                    if logger and finetune_log_interval > 0 and step % finetune_log_interval == 0 and rank0:
+                        logger.info(
+                            "fine-tune | file=%d epoch=%d step=%d elbo=%.6f",
+                            file_idx + 1,
+                            epoch + 1,
+                            step,
+                            float(loss_dict["elbo"]),
+                        )
+            del ft_loader
+            if is_distributed:
+                dist.barrier()
+            model.eval()
+            criterion_core.eval()
+
+        eval_sampler = None
         if is_distributed:
-            sampler = DistributedSampler(
+            eval_sampler = DistributedSampler(
                 dataset,
                 num_replicas=world_size,
                 rank=rank,
@@ -318,21 +451,12 @@ def evaluate_grn(
         loader = DataLoader(
             dataset,
             batch_size=batch_size,
-            shuffle=sampler is None,
-            sampler=sampler,
+            shuffle=eval_sampler is None,
+            sampler=eval_sampler,
             collate_fn=tome_collate_fn,
             num_workers=0,
             pin_memory=True,
         )
-
-        species = _resolve_species_for_tf(adata, cond_species_key)
-
-        if species == "human":
-            model.update_tfs(human_tfs)
-        elif species == "mouse":
-            model.update_tfs(mouse_tfs)
-        else:
-            raise ValueError(f"{species} isn't supported!")
 
         sample_ptr = 0
         with torch.no_grad():

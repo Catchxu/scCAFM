@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from dataclasses import dataclass
 from typing import Optional
 
@@ -68,17 +69,25 @@ def reparameterize(mu: torch.Tensor, sigma: torch.Tensor):
 
 
 class RMSNorm(nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-6):
+    def __init__(self, dim, eps=1e-6):
         super().__init__()
-        self.eps = float(eps)
         self.weight = nn.Parameter(torch.ones(dim))
+        self.eps = eps
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x_fp32 = x.float()
-        rms = x_fp32.pow(2).mean(dim=-1, keepdim=True)
-        x_norm = x_fp32 * torch.rsqrt(rms + self.eps)
-        out = x_norm * self.weight.float()
-        return out.to(dtype=x.dtype)
+    def forward(self, x):
+        norm = x.pow(2).mean(-1, keepdim=True)
+        x = x * torch.rsqrt(norm + self.eps)
+        return self.weight * x
+
+
+class SwiGLU(nn.Module):
+    def __init__(self, dim, hidden_dim):
+        super().__init__()
+        self.proj = nn.Linear(dim, hidden_dim * 2)
+
+    def forward(self, x):
+        x1, x2 = self.proj(x).chunk(2, dim=-1)
+        return x1 * F.silu(x2)
 
 
 def expand_u(u: torch.Tensor, binary_tf: torch.Tensor):

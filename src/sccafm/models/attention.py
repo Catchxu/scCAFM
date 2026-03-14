@@ -1,165 +1,168 @@
 import torch
 import torch.nn as nn
-from torch.nn.functional import scaled_dot_product_attention
 from flash_attn import flash_attn_func, flash_attn_varlen_func
 
 
 class MaskedMHA(nn.Module):
     """
-    Multi-head attention backed by FlashAttention.
+    FlashAttention-backed multi-head attention (modern implementation).
 
-    Args:
-        embed_dim: total embedding dimension (2D)
-        num_heads: number of attention heads
-        use_rotary: whether to apply rotary positional encoding on query/key
+    Improvements implemented:
+    1. Fused QKV projection
+    2. RoPE applied without transposes
+    3. Precomputed RoPE cache
+    4. Removed SDPA fallback
+    5. Safe reshape instead of view
+    6. Attention dropout
+    8. Removed .any() GPU sync
     """
-    def __init__(self, embed_dim, num_heads=8, use_rotary=False):
+
+    def __init__(
+        self,
+        embed_dim,
+        num_heads=8,
+        use_rotary=False,
+        max_seq_len=2048,
+        attn_dropout=0.0,
+    ):
         super().__init__()
+
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
-        assert self.head_dim * num_heads == embed_dim, "embed_dim must be divisible by num_heads"
+        assert self.head_dim * num_heads == embed_dim
 
-        # Linear projections for Q, K, V
-        self.q_proj = nn.Linear(embed_dim, embed_dim)
-        self.k_proj = nn.Linear(embed_dim, embed_dim)
-        self.v_proj = nn.Linear(embed_dim, embed_dim)
+        # ---- fused qkv projection ----
+        self.qkv_proj = nn.Linear(embed_dim, 3 * embed_dim)
+
         self.out_proj = nn.Linear(embed_dim, embed_dim)
 
         self.use_rotary = use_rotary
+        self.attn_dropout = attn_dropout
+        self.softmax_scale = self.head_dim ** -0.5
+
         if use_rotary:
-            # Precompute rotary frequencies for max L=2048, can be extended
-            self.max_seq_len = 2048
-            inv_freq = 1.0 / (10000 ** (torch.arange(0, self.head_dim, 2).float() / self.head_dim))
-            self.register_buffer("inv_freq", inv_freq, persistent=False)
+            self._build_rope_cache(max_seq_len)
 
-    def apply_rotary_pos_emb(self, q, k):
+    def _build_rope_cache(self, max_seq_len):
+        half_dim = self.head_dim // 2
+
+        inv_freq = 1.0 / (
+            10000 ** (torch.arange(0, half_dim).float() / half_dim)
+        )
+
+        t = torch.arange(max_seq_len, dtype=torch.float32)
+
+        freqs = torch.outer(t, inv_freq)
+
+        cos = freqs.cos()
+        sin = freqs.sin()
+
+        self.register_buffer("rope_cos", cos, persistent=False)
+        self.register_buffer("rope_sin", sin, persistent=False)
+
+    def apply_rotary(self, q, k):
         """
-        Apply rotary positional embedding to query and key.
-        q, k: (C, num_heads, L, head_dim)
-        Returns rotated q, k with same shape.
+        q,k: (B, L, H, Dh)
         """
-        # ensure head_dim is even
-        assert (self.head_dim % 2) == 0, "head_dim must be even for rotary"
 
-        L = q.shape[2]
-        device = q.device
-        # freqs: (L, half_dim)
-        freqs = torch.einsum("i,j->ij", torch.arange(L, device=device).float(), self.inv_freq.to(device))
-        cos = freqs.cos()[None, None, :, :]   # (1,1,L, half_dim)
-        sin = freqs.sin()[None, None, :, :]   # (1,1,L, half_dim)
+        L = q.shape[1]
 
-        # split even / odd -> shape (..., half_dim)
+        cos = self.rope_cos[:L].unsqueeze(0).unsqueeze(2)
+        sin = self.rope_sin[:L].unsqueeze(0).unsqueeze(2)
+
         q1, q2 = q[..., ::2], q[..., 1::2]
         k1, k2 = k[..., ::2], k[..., 1::2]
 
-        # apply rotation on halves
-        q_rot_even = q1 * cos - q2 * sin
-        q_rot_odd  = q1 * sin + q2 * cos
-        k_rot_even = k1 * cos - k2 * sin
-        k_rot_odd  = k1 * sin + k2 * cos
+        q = torch.stack([q1 * cos - q2 * sin, q1 * sin + q2 * cos], dim=-1).flatten(-2)
+        k = torch.stack([k1 * cos - k2 * sin, k1 * sin + k2 * cos], dim=-1).flatten(-2)
 
-        # interleave even/odd back to last dim
-        q_rot = torch.stack([q_rot_even, q_rot_odd], dim=-1).flatten(-2)
-        k_rot = torch.stack([k_rot_even, k_rot_odd], dim=-1).flatten(-2)
+        return q, k
 
-        return q_rot, k_rot
-
-    def forward(self, x: torch.Tensor, key_padding_mask=None, causal=False):
+    def forward(self, x, key_padding_mask=None, causal=False):
         """
-        x: (C, L, 2D)
-        key_padding_mask: (C, L) bool tensor, True for positions to mask
-        causal: if True, apply causal mask
+        x: (B, L, D)
+        key_padding_mask: (B, L) bool
         """
-        C, L, _ = x.shape
 
-        # ---- Linear projections ----
-        q = self.q_proj(x)
-        k = self.k_proj(x)
-        v = self.v_proj(x)
+        B, L, _ = x.shape
 
-        # ---- Reshape ----
-        q_flash = q.view(C, L, self.num_heads, self.head_dim)  # (C, L, H, Dh)
-        k_flash = k.view(C, L, self.num_heads, self.head_dim)
-        v_flash = v.view(C, L, self.num_heads, self.head_dim)
+        # ---- fused projection ----
+        qkv = self.qkv_proj(x)
 
-        # ---- Apply rotary positional embedding if enabled ----
+        q, k, v = qkv.chunk(3, dim=-1)
+
+        # ---- reshape to flash layout ----
+        q = q.reshape(B, L, self.num_heads, self.head_dim)
+        k = k.reshape(B, L, self.num_heads, self.head_dim)
+        v = v.reshape(B, L, self.num_heads, self.head_dim)
+
+        # ---- rotary embedding ----
         if self.use_rotary:
-            q_rot = q_flash.transpose(1, 2)  # (C, H, L, Dh)
-            k_rot = k_flash.transpose(1, 2)
-            q_rot, k_rot = self.apply_rotary_pos_emb(q_rot, k_rot)
-            q_flash = q_rot.transpose(1, 2).contiguous()
-            k_flash = k_rot.transpose(1, 2).contiguous()
+            q, k = self.apply_rotary(q, k)
 
-        # ---- Attention ----
-        if key_padding_mask is None or not key_padding_mask.any():
+        # ---- attention ----
+        if key_padding_mask is None:
+
             out = flash_attn_func(
-                q_flash,
-                k_flash,
-                v_flash,
-                dropout_p=0.0,
-                softmax_scale=None,
+                q,
+                k,
+                v,
+                dropout_p=self.attn_dropout if self.training else 0.0,
+                softmax_scale=self.softmax_scale,
                 causal=causal,
-                window_size=(-1, -1),
-                alibi_slopes=None,
-                deterministic=False,
-            )  # (C, L, H, Dh)
-            out = out.reshape(C, L, self.embed_dim)
+            )
+
         else:
-            # flash_attn_varlen_func assumes each sequence has contiguous valid tokens.
-            # For non-contiguous masks, fallback to SDPA to preserve semantics.
-            has_true_to_false = (~key_padding_mask[:, 1:] & key_padding_mask[:, :-1]).any()
-            if has_true_to_false:
-                q = q_flash.transpose(1, 2)  # (C, H, L, Dh)
-                k = k_flash.transpose(1, 2)
-                v = v_flash.transpose(1, 2)
-                kp = key_padding_mask.unsqueeze(1)
-                kp = kp.expand(-1, self.num_heads, -1)
-                kp = kp.unsqueeze(2).expand(-1, -1, L, -1)
-                out = scaled_dot_product_attention(q, k, v, attn_mask=kp, is_causal=causal)
-                out = out.transpose(1, 2).reshape(C, L, self.embed_dim)
+            # assume contiguous valid tokens
+            valid_mask = ~key_padding_mask
+
+            seqlens = valid_mask.sum(dim=1, dtype=torch.int32)
+
+            total = int(seqlens.sum().item())
+
+            if total == 0:
+                out = x.new_zeros(B, L, self.embed_dim)
+
             else:
-                valid_mask = ~key_padding_mask
-                seqlens = valid_mask.sum(dim=1, dtype=torch.int32)  # (C,)
-                total_tokens = int(seqlens.sum().item())
-                if total_tokens == 0:
-                    out = q_flash.new_zeros(C, L, self.embed_dim)
-                else:
-                    q_unpad = q_flash[valid_mask]  # (total, H, Dh)
-                    k_unpad = k_flash[valid_mask]
-                    v_unpad = v_flash[valid_mask]
+                q_unpad = q[valid_mask]
+                k_unpad = k[valid_mask]
+                v_unpad = v[valid_mask]
 
-                    cu_seqlens = torch.zeros(C + 1, device=x.device, dtype=torch.int32)
-                    cu_seqlens[1:] = torch.cumsum(seqlens, dim=0)
-                    max_seqlen = int(seqlens.max().item())
+                cu_seqlens = torch.zeros(
+                    B + 1, device=x.device, dtype=torch.int32
+                )
+                cu_seqlens[1:] = torch.cumsum(seqlens, dim=0)
 
-                    out_unpad = flash_attn_varlen_func(
-                        q_unpad,
-                        k_unpad,
-                        v_unpad,
-                        cu_seqlens,
-                        cu_seqlens,
-                        max_seqlen,
-                        max_seqlen,
-                        dropout_p=0.0,
-                        softmax_scale=None,
-                        causal=causal,
-                        window_size=(-1, -1),
-                        softcap=0.0,
-                        alibi_slopes=None,
-                        deterministic=False,
-                        return_attn_probs=False,
-                        block_table=None,
-                    )  # (total, H, Dh)
+                max_seqlen = int(seqlens.max().item())
 
-                    out_padded = out_unpad.new_zeros(C, L, self.num_heads, self.head_dim)
-                    out_padded[valid_mask] = out_unpad
-                    out = out_padded.reshape(C, L, self.embed_dim)
+                out_unpad = flash_attn_varlen_func(
+                    q_unpad,
+                    k_unpad,
+                    v_unpad,
+                    cu_seqlens,
+                    cu_seqlens,
+                    max_seqlen,
+                    max_seqlen,
+                    dropout_p=self.attn_dropout if self.training else 0.0,
+                    softmax_scale=self.softmax_scale,
+                    causal=causal,
+                )
 
-        # ---- Merge heads ----
+                out_padded = q.new_zeros(B, L, self.num_heads, self.head_dim)
+
+                out_padded[valid_mask] = out_unpad
+
+                out = out_padded
+
+        # ---- merge heads ----
+        out = out.reshape(B, L, self.embed_dim)
+
         out = self.out_proj(out)
 
         return out
+
+
 
 
 if __name__ == "__main__":

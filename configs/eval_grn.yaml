@@ -14,6 +14,17 @@ tokenizer:
   tissue_key: null
   disease_key: null
 
+finetune:
+  enabled: True
+  # finetuning setting only use elbo loss
+  epochs: 4
+  learning_rate: 1e-5
+  weight_decay: 1e-2
+  batch_size: 4
+  log_interval: 100
+  use_amp: True
+  amp_dtype: bf16
+
 eval:
   checkpoint_path: ./checkpoints/sfm_latest.pt
   batch_size: 64
@@ -24,7 +35,7 @@ eval:
   log_overwrite: True
   log_interval: 100
   # Can be a single metric string or a list, e.g. [auprc_ratio, auroc_ratio].
-  metric: [auprc_ratio, auroc_ratio]
+  metric: [auprc_ratio, auroc]
   preprocess: True
   use_amp: True
   amp_dtype: bf16

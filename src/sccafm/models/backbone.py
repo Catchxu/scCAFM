@@ -1,20 +1,8 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from .attention import MaskedMHA
-from .utils import RMSNorm
-
-
-class SwiGLU(nn.Module):
-    def __init__(self, dim, hidden_dim):
-        super().__init__()
-        self.w1 = nn.Linear(dim, hidden_dim)
-        self.w2 = nn.Linear(dim, hidden_dim)
-
-    def forward(self, x):
-        # SwiGLU: (x * sigmoid(gate)) projected back later
-        return self.w1(x) * F.silu(self.w2(x))
+from .utils import RMSNorm, SwiGLU
 
 
 class TransformerLayer(nn.Module):
@@ -24,39 +12,41 @@ class TransformerLayer(nn.Module):
         num_heads,
         ffn_hidden_dim=None,
         use_rotary=False,
+        dropout=0.0,
+        res_scale=1.0,
     ):
         super().__init__()
+
+        self.res_scale = res_scale
+
         self.attn = MaskedMHA(
             embed_dim=embed_dim,
             num_heads=num_heads,
-            use_rotary=use_rotary
+            use_rotary=use_rotary,
+            attn_dropout=dropout
         )
 
         self.norm1 = RMSNorm(embed_dim)
         self.norm2 = RMSNorm(embed_dim)
 
         if ffn_hidden_dim is None:
-            ffn_hidden_dim = 4*embed_dim
+            ffn_hidden_dim = int(8 * embed_dim / 3)
 
         self.ffn = nn.Sequential(
             SwiGLU(embed_dim, ffn_hidden_dim),
-            nn.Linear(ffn_hidden_dim, embed_dim)
+            nn.Dropout(dropout),
+            nn.Linear(ffn_hidden_dim, embed_dim),
         )
 
     def forward(self, x, key_padding_mask=None, causal=False):
-        """
-        x: (C, L, E)
-        key_padding_mask: (C, L)
-        """
-        # ---- MHA block ----
+
         h = self.norm1(x)
         h = self.attn(h, key_padding_mask=key_padding_mask, causal=causal)
-        x = x + h
+        x = x + self.res_scale * h
 
-        # ---- FFN block ----
         h = self.norm2(x)
         h = self.ffn(h)
-        x = x + h
+        x = x + self.res_scale * h
 
         return x
 
