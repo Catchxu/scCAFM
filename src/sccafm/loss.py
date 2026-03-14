@@ -166,8 +166,8 @@ class PriorLoss(nn.Module):
         target = torch.zeros_like(edge_logit, dtype=torch.float32)
 
         sorted_tokens, sort_idx = torch.sort(gene_tokens, dim=1)
-        src_vals = filt_src_ids.view(1, -1).expand(C, -1)
-        tgt_vals = filt_tgt_ids.view(1, -1).expand(C, -1)
+        src_vals = filt_src_ids.view(1, -1).expand(C, -1).contiguous()
+        tgt_vals = filt_tgt_ids.view(1, -1).expand(C, -1).contiguous()
 
         src_loc = torch.searchsorted(sorted_tokens, src_vals)
         src_in = src_loc < S
