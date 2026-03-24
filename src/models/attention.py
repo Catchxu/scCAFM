@@ -10,6 +10,9 @@ class FlashMHA(nn.Module):
     """
     FlashAttention-backed multi-head self-attention with optional rotary embedding.
 
+    Shape convention:
+    - `L`: full sequence length
+
     Upgrades:
     1. Uses flash_attn_qkvpacked_func in the no-padding path
     2. Uses flash_attn.bert_padding unpad/pad utilities in the masked path

@@ -39,6 +39,9 @@ class SwiGLUMLP(nn.Module):
 class TransformerBlock(nn.Module):
     """
     Pre-norm Transformer block with FlashAttention and SwiGLU MLP.
+
+    Shape convention:
+    - `L`: full sequence length
     """
 
     def __init__(
@@ -98,6 +101,9 @@ class TransformerBlock(nn.Module):
 class TransformerBackbone(nn.Module):
     """
     Transformer backbone built from FlashAttention blocks.
+
+    Shape convention:
+    - `L`: full sequence length
     """
 
     def __init__(

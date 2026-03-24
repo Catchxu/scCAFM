@@ -14,27 +14,29 @@ from typing import Optional, Sequence, Dict, Any
 class BasicTokenizer:
     """
     Shared utilities for padded tokenizer implementations.
+
+    Shape convention:
+    - `G`: gene-token length after reserving one prefix slot in the full model sequence
     """
+
+    RESERVED_TOKENS = 1
 
     def __init__(
         self,
         max_length: int = 2048,
-        reserved_tokens: int = 1,
     ) -> None:
-        self._validate_sequence_config(max_length, reserved_tokens)
+        self._validate_sequence_config(max_length)
         self.max_length = max_length
-        self.reserved_tokens = reserved_tokens
-        self.sequence_length = max_length - reserved_tokens
+        self.sequence_length = max_length - self.RESERVED_TOKENS
 
     @staticmethod
-    def _validate_sequence_config(max_length: int, reserved_tokens: int) -> None:
+    def _validate_sequence_config(max_length: int) -> None:
         if max_length <= 0:
             raise ValueError(f"`max_length` must be positive, got {max_length}.")
-        if reserved_tokens < 0:
-            raise ValueError(f"`reserved_tokens` must be >= 0, got {reserved_tokens}.")
-        if reserved_tokens >= max_length:
+        if BasicTokenizer.RESERVED_TOKENS >= max_length:
             raise ValueError(
-                f"`reserved_tokens` ({reserved_tokens}) must be smaller than "
+                f"The reserved prefix token count ({BasicTokenizer.RESERVED_TOKENS}) "
+                f"must be smaller than "
                 f"`max_length` ({max_length})."
             )
 
@@ -81,9 +83,9 @@ class GeneTokenizer(BasicTokenizer):
 
     Design:
     - Input genes can be gene symbols or Ensembl gene IDs.
-    - Output is a padded token matrix of shape (C, L), where:
+    - Output is a padded token matrix of shape (C, G), where:
         C = number of cells
-        L = max_length - reserved_tokens
+        G = max_length - 1
     - Unknown genes are mapped to `pad_index`.
 
     Expected token_dict columns:
@@ -102,9 +104,8 @@ class GeneTokenizer(BasicTokenizer):
         human_tfs: Optional[pd.DataFrame] = None,
         mouse_tfs: Optional[pd.DataFrame] = None,
         max_length: int = 2048,
-        reserved_tokens: int = 1,
     ) -> None:
-        super().__init__(max_length=max_length, reserved_tokens=reserved_tokens)
+        super().__init__(max_length=max_length)
         self._validate_token_dict(token_dict)
 
         token_df = token_dict.copy()
@@ -351,8 +352,8 @@ class GeneTokenizer(BasicTokenizer):
 
         Returns:
             GeneTokenizerOutput with:
-            - input_ids:      (C, L)
-            - padding_mask:   (C, L), True where padded
+            - input_ids:      (C, G)
+            - padding_mask:   (C, G), True where padded
             - gene_name_type: inferred or provided type
         """
         self._validate_adata(adata)
@@ -418,8 +419,8 @@ class ExprTokenizer(BasicTokenizer):
     - Input is `adata.X` with shape (C, G), where:
         C = number of cells
         G = number of genes
-    - Output is padded to shape (C, L), where:
-        L = max_length - reserved_tokens
+    - Output is padded to shape (C, G), where:
+        G = max_length - 1
     - Padding values are filled with `pad_value` (default: 0.0)
 
     Notes:
@@ -430,11 +431,10 @@ class ExprTokenizer(BasicTokenizer):
     def __init__(
         self,
         max_length: int = 2048,
-        reserved_tokens: int = 1,
         pad_value: float = 0.0,
         dtype: np.dtype = np.float32,
     ) -> None:
-        super().__init__(max_length=max_length, reserved_tokens=reserved_tokens)
+        super().__init__(max_length=max_length)
         self.pad_value = float(pad_value)
         self.dtype = dtype
 
@@ -484,8 +484,8 @@ class ExprTokenizer(BasicTokenizer):
 
         Returns:
             ExprTokenizerOutput with:
-            - expression_values: (C, L)
-            - padding_mask:      (C, L), True where padded
+            - expression_values: (C, G)
+            - padding_mask:      (C, G), True where padded
         """
         self._validate_adata(adata)
 
@@ -694,6 +694,9 @@ class ScTokenizer:
     - `GeneTokenizer`
     - `ExprTokenizer`
     - `CondTokenizer`
+
+    Shape convention:
+    - `G`: gene-token length
     """
 
     def __init__(
@@ -705,7 +708,6 @@ class ScTokenizer:
         human_tfs: Optional[pd.DataFrame] = None,
         mouse_tfs: Optional[pd.DataFrame] = None,
         max_length: int = 2048,
-        reserved_tokens: int = 1,
         expr_pad_value: float = 0.0,
         expr_dtype: np.dtype = np.float32,
         platform_key: Optional[str] = None,
@@ -722,11 +724,9 @@ class ScTokenizer:
             human_tfs=human_tfs,
             mouse_tfs=mouse_tfs,
             max_length=max_length,
-            reserved_tokens=reserved_tokens,
         )
         self.expr_tokenizer = expr_tokenizer or ExprTokenizer(
             max_length=max_length,
-            reserved_tokens=reserved_tokens,
             pad_value=expr_pad_value,
             dtype=expr_dtype,
         )
@@ -825,7 +825,6 @@ if __name__ == "__main__":
         tissue_key="tissue",
         disease_key="disease",
         max_length=3,
-        reserved_tokens=1,
     )
     output = tokenizer(
         adata,

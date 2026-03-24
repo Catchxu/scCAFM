@@ -97,7 +97,6 @@ if __name__ == "__main__":
         tissue_key="tissue",
         disease_key="disease",
         max_length=5,
-        reserved_tokens=1,
     )
     dataset = ScDataset(adata=adata, tokenizer=tokenizer)
 

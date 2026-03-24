@@ -13,7 +13,16 @@ from typing import Optional
 
 @dataclass
 class ScEmbeddingOutput:
+    """
+    Embedding outputs for the full model sequence.
+
+    Shape convention:
+    - `G`: gene-token length
+    - `L`: full sequence length, where `L = G + 1`
+    """
+
     embeddings: torch.Tensor
+    padding_mask: Optional[torch.BoolTensor]
     key_padding_mask: Optional[torch.BoolTensor]
 
 
@@ -49,7 +58,7 @@ class ExpressionValueEmbedding(nn.Module):
     def forward(self, expression_values: torch.Tensor) -> torch.Tensor:
         if expression_values.ndim != 2:
             raise ValueError(
-                f"`expression_values` must have shape (C, L), got {tuple(expression_values.shape)}."
+                f"`expression_values` must have shape (C, G), got {tuple(expression_values.shape)}."
             )
 
         values = expression_values.to(torch.float32).unsqueeze(-1) / self.value_scale
@@ -83,7 +92,7 @@ class ExpressionFeatureModulator(nn.Module):
     def forward(self, expression_values: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if expression_values.ndim != 2:
             raise ValueError(
-                f"`expression_values` must have shape (C, L), got {tuple(expression_values.shape)}."
+                f"`expression_values` must have shape (C, G), got {tuple(expression_values.shape)}."
             )
 
         mod = self.proj(expression_values.to(torch.float32).unsqueeze(-1))
@@ -133,7 +142,7 @@ class ConditionEncoder(nn.Module):
 
 class CellContextEncoder(nn.Module):
     """
-    Pool token-level information into a learned cell context token.
+    Pool gene-token information into a learned cell context token.
     """
 
     def __init__(
@@ -157,7 +166,7 @@ class CellContextEncoder(nn.Module):
     ) -> torch.Tensor:
         if token_embeddings.ndim != 3:
             raise ValueError(
-                f"`token_embeddings` must have shape (C, L, D), got {tuple(token_embeddings.shape)}."
+                f"`token_embeddings` must have shape (C, G, D), got {tuple(token_embeddings.shape)}."
             )
 
         if padding_mask is None:
@@ -174,16 +183,21 @@ class ScEmbedding(nn.Module):
     """
     Unified embedding module for single-cell tokens.
 
+    Shape convention:
+    - `G`: gene-token length
+    - `L`: full sequence length, where `L = G + 1`
+
     Inputs:
-    - `input_ids`: (C, L)
-    - `expression_values`: (C, L)
+    - `input_ids`: (C, G)
+    - `expression_values`: (C, G)
     - `condition_ids`: (C, 4)
-    - `padding_mask`: optional (C, L), True where padded
-    - `non_tf_mask`: (C, L), True for non-TF and False for TF
+    - `padding_mask`: optional (C, G), True where padded
+    - `non_tf_mask`: (C, G), True for non-TF and False for TF
 
     Outputs:
-    - `embeddings`: (C, L + 1, D)
-    - `key_padding_mask`: optional (C, L + 1)
+    - `embeddings`: (C, L, D)
+    - `padding_mask`: optional (C, G), gene-token padding mask
+    - `key_padding_mask`: optional (C, L), attention padding mask including prefix
     """
 
     REQUIRED_TOKEN_COLUMNS = ("token_index", "gene_id")
@@ -288,7 +302,7 @@ class ScEmbedding(nn.Module):
         return torch.arange(seq_len, device=device, dtype=torch.long).unsqueeze(0).expand(batch_size, -1)
 
     @staticmethod
-    def _build_prefix_padding_mask(
+    def _build_key_padding_mask(
         padding_mask: Optional[torch.BoolTensor],
         batch_size: int,
         device: torch.device,
@@ -308,7 +322,7 @@ class ScEmbedding(nn.Module):
         non_tf_mask: torch.BoolTensor,
     ) -> None:
         if input_ids.ndim != 2:
-            raise ValueError(f"`input_ids` must have shape (C, L), got {tuple(input_ids.shape)}.")
+            raise ValueError(f"`input_ids` must have shape (C, G), got {tuple(input_ids.shape)}.")
         if expression_values.shape != input_ids.shape:
             raise ValueError(
                 "`expression_values` must match `input_ids` shape, "
@@ -474,7 +488,7 @@ class ScEmbedding(nn.Module):
         full_embeddings = self.final_norm(full_embeddings)
         full_embeddings = self.dropout(full_embeddings)
 
-        key_padding_mask = self._build_prefix_padding_mask(
+        key_padding_mask = self._build_key_padding_mask(
             padding_mask=padding_mask,
             batch_size=batch_size,
             device=device,
@@ -484,6 +498,7 @@ class ScEmbedding(nn.Module):
 
         return ScEmbeddingOutput(
             embeddings=full_embeddings,
+            padding_mask=padding_mask,
             key_padding_mask=key_padding_mask,
         )
 
@@ -529,7 +544,6 @@ if __name__ == "__main__":
         tissue_key="tissue",
         disease_key="disease",
         max_length=5,
-        reserved_tokens=1,
     )
     tokens = tokenizer(adata)
 
