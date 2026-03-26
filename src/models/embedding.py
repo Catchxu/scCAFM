@@ -512,7 +512,7 @@ if __name__ == "__main__":
 
     from anndata import AnnData
 
-    from .tokenizer import ScTokenizer
+    from ..data.tokenizer import ScTokenizer
 
     root_dir = Path(__file__).resolve().parents[2]
     token_dict = pd.read_csv(root_dir / "resources" / "token_dict.csv")

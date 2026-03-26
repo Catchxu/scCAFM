@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from anndata import AnnData
+from torch.utils.data import DataLoader
 from torch.utils.data import Dataset
 
 from typing import Any, Optional
 
+from .collator import ScBatchCollator
 from .tokenizer import ScTokenizer, ScTokenizerOutput
 
 
@@ -99,6 +101,13 @@ if __name__ == "__main__":
         max_length=5,
     )
     dataset = ScDataset(adata=adata, tokenizer=tokenizer)
+    dataloader = DataLoader(
+        dataset,
+        batch_size=2,
+        shuffle=False,
+        collate_fn=ScBatchCollator(),
+    )
+    batch = next(iter(dataloader))
 
     print("len:", len(dataset))
     print("sample_keys:", sorted(dataset[0].keys()))
@@ -114,3 +123,10 @@ if __name__ == "__main__":
     print(dataset[0]["non_tf_mask"])
     print("gene_name_type:")
     print(dataset[0]["gene_name_type"])
+    print("batch_keys:", sorted(batch.keys()))
+    print("batch_input_ids_shape:", tuple(batch["input_ids"].shape))
+    print(
+        "batch_padding_mask_shape:",
+        None if batch["padding_mask"] is None else tuple(batch["padding_mask"].shape),
+    )
+    print("batch_non_tf_mask_shape:", tuple(batch["non_tf_mask"].shape))

@@ -113,6 +113,7 @@ class QBGating(nn.Module):
 
         selected_logits = flat_logits.gather(dim=-1, index=topk_idx)
         selected_probs = F.softmax(selected_logits / temperature, dim=-1)
+        selected_probs = selected_probs.to(dtype=flat_logits.dtype)
 
         probs = torch.zeros_like(flat_logits)
         probs.scatter_(dim=-1, index=topk_idx, src=selected_probs)
@@ -139,17 +140,17 @@ class GeneRouter(nn.Module):
     - `L`: full sequence length, where `L = G + 1`
 
     The output keeps the full gene-token sequence length `(C, G, M)`. Tokens
-    excluded by `non_tf_mask` or `padding_mask` receive zero probabilities and
-    zero scores.
+    where `non_tf_mask` is `True` or `padding_mask` is `True` receive zero
+    probabilities and zero scores.
     """
 
     def __init__(
         self,
         embed_dim: int,
-        num_factors: int,
+        num_factors: int = 256,
         hidden_dim: int = 128,
         dropout: float = 0.1,
-        topk: Optional[int] = None,
+        topk: Optional[int] = 32,
         temperature: float = 1.0,
         score_clip: float = 10.0,
         beta_momentum: float = 1.0,
@@ -221,7 +222,7 @@ class GeneRouter(nn.Module):
         active_mask = torch.ones((batch_size, seq_len), device=device, dtype=torch.bool)
 
         if non_tf_mask is not None:
-            active_mask = active_mask & cls._normalize_gene_mask(
+            active_mask = active_mask & ~cls._normalize_gene_mask(
                 batch_size=batch_size,
                 seq_len=seq_len,
                 mask=non_tf_mask,
@@ -245,7 +246,7 @@ class GeneRouter(nn.Module):
         x: torch.Tensor,
         non_tf_mask: Optional[torch.Tensor] = None,
         padding_mask: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.BoolTensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if x.ndim != 3:
             raise ValueError(f"`x` must have shape (C, L, D), got {tuple(x.shape)}.")
         if x.shape[-1] != self.embed_dim:
@@ -272,7 +273,7 @@ class GeneRouter(nn.Module):
         probs = torch.zeros_like(prob_logits)
         active_logits = prob_logits[active_mask]
         if active_logits.numel() == 0:
-            return probs, scores, active_mask
+            return probs, scores
 
         if self.gating is not None:
             probs[active_mask] = self.gating(
@@ -285,4 +286,71 @@ class GeneRouter(nn.Module):
                 dim=-1,
             )
 
-        return probs, scores, active_mask
+        return probs, scores
+
+
+
+
+if __name__ == "__main__":
+    torch.manual_seed(42)
+
+    batch_size = 2
+    gene_token_length = 5
+    full_sequence_length = gene_token_length + 1
+    embed_dim = 16
+    num_factors = 6
+
+    x = torch.randn(batch_size, full_sequence_length, embed_dim)
+    non_tf_mask = torch.tensor(
+        [
+            [True, False, True, True, True],
+            [True, True, False, True, True],
+        ],
+        dtype=torch.bool,
+    )
+    padding_mask = torch.tensor(
+        [
+            [False, False, False, True, True],
+            [False, False, False, False, True],
+        ],
+        dtype=torch.bool,
+    )
+
+    router = GeneRouter(
+        embed_dim=embed_dim,
+        num_factors=num_factors,
+        hidden_dim=32,
+        dropout=0.0,
+        topk=2,
+        temperature=0.7,
+        score_clip=5.0,
+    )
+    router.eval()
+
+    active_mask = ~non_tf_mask & ~padding_mask
+
+    with torch.no_grad():
+        probs, scores = router(
+            x,
+            non_tf_mask=non_tf_mask,
+            padding_mask=padding_mask,
+        )
+
+    print("input_shape:", tuple(x.shape))
+    print("non_tf_mask_shape:", tuple(non_tf_mask.shape))
+    print("padding_mask_shape:", tuple(padding_mask.shape))
+    print("probs_shape:", tuple(probs.shape))
+    print("scores_shape:", tuple(scores.shape))
+    print("active_mask_shape:", tuple(active_mask.shape))
+    print("active_mask:")
+    print(active_mask)
+    print("inactive_probs_zero:", bool((probs[~active_mask] == 0).all()))
+    print("inactive_scores_zero:", bool((scores[~active_mask] == 0).all()))
+    print(
+        "active_topk_counts:",
+        probs[active_mask].gt(0).sum(dim=-1).tolist() if active_mask.any() else [],
+    )
+    print(
+        "active_prob_sums:",
+        probs[active_mask].sum(dim=-1).tolist() if active_mask.any() else [],
+    )
