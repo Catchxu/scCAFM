@@ -57,6 +57,10 @@ homepage = "https://github.com/Catchxu/scCAFM"
 documentation = "https://github.com/Catchxu/scCAFM#readme"
 
 
+[project.scripts]
+sccafm-pretrain = "src.trainer.pretrain:main"
+
+
 [tool.hatch.build.targets.wheel]
 packages = [
     "src",

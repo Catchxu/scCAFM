@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.distributed as dist
 
 from ..models.sfm import FactorState
 
@@ -23,14 +24,44 @@ class DAGLoss(nn.Module):
         update_period: int = 100,
     ) -> None:
         super().__init__()
-        self.alpha = float(alpha)
-        self.rho = float(rho)
         self.rho_max = float(rho_max)
         self.update_period = int(update_period)
 
-        self.prev_h_val = float("inf")
-        self.step_counter = 0
-        self.accumulated_h = 0.0
+        self.register_buffer(
+            "alpha",
+            torch.tensor(float(alpha), dtype=torch.float32),
+            persistent=True,
+        )
+        self.register_buffer(
+            "rho",
+            torch.tensor(float(rho), dtype=torch.float32),
+            persistent=True,
+        )
+        self.register_buffer(
+            "prev_h_val",
+            torch.tensor(float("inf"), dtype=torch.float32),
+            persistent=True,
+        )
+        self.register_buffer(
+            "step_counter",
+            torch.tensor(0, dtype=torch.long),
+            persistent=True,
+        )
+        self.register_buffer(
+            "accumulated_h",
+            torch.tensor(0.0, dtype=torch.float32),
+            persistent=True,
+        )
+        self.register_buffer(
+            "_pending_h_sum",
+            torch.zeros((), dtype=torch.float32),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_pending_h_weight",
+            torch.zeros((), dtype=torch.float32),
+            persistent=False,
+        )
 
     @staticmethod
     def _validate_factors(factors: FactorState) -> None:
@@ -65,14 +96,14 @@ class DAGLoss(nn.Module):
         return torch.diagonal(res, dim1=-2, dim2=-1).sum(dim=-1) - num_factors
 
     def _auto_update_params(self) -> None:
-        avg_h = self.accumulated_h / self.update_period
-        if avg_h > 0.25 * self.prev_h_val:
-            self.rho = min(self.rho * 10.0, self.rho_max)
+        avg_h = self.accumulated_h / float(self.update_period)
+        if avg_h.item() > 0.25 * self.prev_h_val.item():
+            self.rho.fill_(min(self.rho.item() * 10.0, self.rho_max))
         else:
-            self.alpha += self.rho * avg_h
-        self.prev_h_val = avg_h
-        self.accumulated_h = 0.0
-        self.step_counter = 0
+            self.alpha.add_(self.rho * avg_h)
+        self.prev_h_val.copy_(avg_h)
+        self.accumulated_h.zero_()
+        self.step_counter.zero_()
 
     def forward(self, factors: FactorState) -> torch.Tensor:
         if factors is None:
@@ -83,9 +114,30 @@ class DAGLoss(nn.Module):
         dag_h_batch = self._compute_dag_constraint(adj_factor).mean()
 
         if self.training:
-            self.step_counter += 1
-            self.accumulated_h += float(dag_h_batch.detach())
-            if self.step_counter >= self.update_period:
+            self._pending_h_sum.add_(dag_h_batch.detach().to(torch.float32))
+            self._pending_h_weight.add_(1.0)
+
+        alpha = self.alpha.to(device=dag_h_batch.device, dtype=dag_h_batch.dtype)
+        rho = self.rho.to(device=dag_h_batch.device, dtype=dag_h_batch.dtype)
+        return alpha * dag_h_batch + 0.5 * rho * (dag_h_batch ** 2)
+
+    def apply_constraint_update(self) -> None:
+        if self._pending_h_weight.item() <= 0:
+            return
+
+        h_sum = self._pending_h_sum.clone()
+        h_weight = self._pending_h_weight.clone()
+
+        if dist.is_available() and dist.is_initialized():
+            dist.all_reduce(h_sum, op=dist.ReduceOp.SUM)
+            dist.all_reduce(h_weight, op=dist.ReduceOp.SUM)
+
+        if h_weight.item() > 0:
+            avg_h_step = float((h_sum / h_weight).item())
+            self.step_counter.add_(1)
+            self.accumulated_h.add_(avg_h_step)
+            if self.step_counter.item() >= self.update_period:
                 self._auto_update_params()
 
-        return self.alpha * dag_h_batch + 0.5 * self.rho * (dag_h_batch ** 2)
+        self._pending_h_sum.zero_()
+        self._pending_h_weight.zero_()

@@ -20,7 +20,6 @@ class ScPreprocessor:
 
     def __init__(
         self,
-        min_counts: Optional[int] = None,
         min_genes: Optional[int] = 200,
         min_cells: Optional[int] = 3,
         max_pct_counts_mt: Optional[float] = 20.0,
@@ -38,7 +37,6 @@ class ScPreprocessor:
         X_fill_value: float = 0.0,
         inplace: bool = False,
     ) -> None:
-        self.min_counts = min_counts
         self.min_genes = min_genes
         self.min_cells = min_cells
         self.max_pct_counts_mt = max_pct_counts_mt
@@ -209,8 +207,6 @@ class ScPreprocessor:
         sc.pp.calculate_qc_metrics(adata, qc_vars=qc_vars, percent_top=None, inplace=True)
 
     def _filter_cells_and_genes(self, adata) -> None:
-        if self.min_counts is not None:
-            sc.pp.filter_cells(adata, min_counts=self.min_counts)
         if self.min_genes is not None:
             sc.pp.filter_cells(adata, min_genes=self.min_genes)
         if self.min_cells is not None:
@@ -271,7 +267,6 @@ class ScPreprocessor:
 
 def preprocess_adata(
     adata,
-    min_counts: Optional[int] = None,
     min_genes: Optional[int] = 200,
     min_cells: Optional[int] = 3,
     max_pct_counts_mt: Optional[float] = 20.0,
@@ -294,7 +289,6 @@ def preprocess_adata(
     """
 
     return ScPreprocessor(
-        min_counts=min_counts,
         min_genes=min_genes,
         min_cells=min_cells,
         max_pct_counts_mt=max_pct_counts_mt,

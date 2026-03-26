@@ -198,9 +198,11 @@ class PriorLoss(nn.Module):
             return factors.u.new_zeros(())
 
         edge_prob = torch.bmm(factors.u, factors.v.transpose(1, 2)).clamp(1e-8, 1.0 - 1e-8)
-        loss = F.binary_cross_entropy(edge_prob, target.to(edge_prob.dtype), reduction="none")
-        weight = target.to(edge_prob.dtype) * self.pos_weight + (
-            1.0 - target.to(edge_prob.dtype)
+        edge_logits = torch.logit(edge_prob)
+        target_f = target.to(edge_logits.dtype)
+        loss = F.binary_cross_entropy_with_logits(edge_logits, target_f, reduction="none")
+        weight = target_f * self.pos_weight + (
+            1.0 - target_f
         ) * self.neg_weight
 
         sampled_mask = self._sample_negative_mask(
@@ -208,7 +210,7 @@ class PriorLoss(nn.Module):
             target=target,
             neg_sample_ratio=self.neg_sample_ratio,
         )
-        sampled_mask_f = sampled_mask.to(dtype=edge_prob.dtype)
+        sampled_mask_f = sampled_mask.to(dtype=edge_logits.dtype)
 
         numer = (loss * weight * sampled_mask_f).sum()
         denom = (weight * sampled_mask_f).sum()

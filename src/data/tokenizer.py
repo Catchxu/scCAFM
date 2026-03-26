@@ -656,13 +656,26 @@ class CondTokenizer:
 
         return obs[key].astype(str).tolist()
 
+    def fit_obs(self, obs: pd.DataFrame) -> None:
+        condition_columns = [
+            self._get_condition_values(obs, key, idx)
+            for idx, key in enumerate(self.condition_keys)
+        ]
+        for values in condition_columns:
+            for value in values:
+                self._fetch_or_add(value)
+
+    def fit_adata(self, adata: AnnData) -> None:
+        if not isinstance(adata, AnnData):
+            raise TypeError(f"`adata` must be an AnnData object, got {type(adata).__name__}.")
+        self.fit_obs(adata.obs)
+
     def __call__(self, adata: AnnData) -> torch.LongTensor:
         if not isinstance(adata, AnnData):
             raise TypeError(f"`adata` must be an AnnData object, got {type(adata).__name__}.")
 
         obs = adata.obs
         n_cells = int(adata.n_obs)
-
         condition_columns = [
             self._get_condition_values(obs, key, idx)
             for idx, key in enumerate(self.condition_keys)

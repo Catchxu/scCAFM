@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.distributed as dist
 
 from typing import Optional
 
@@ -43,6 +44,16 @@ class QBGating(nn.Module):
             "beta_qb",
             torch.zeros(num_factors, dtype=torch.float32),
             persistent=True,
+        )
+        self.register_buffer(
+            "_beta_update_sum",
+            torch.zeros(num_factors, dtype=torch.float32),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_beta_update_weight",
+            torch.zeros((), dtype=torch.float32),
+            persistent=False,
         )
 
     @staticmethod
@@ -121,14 +132,36 @@ class QBGating(nn.Module):
 
         if self.training:
             with torch.no_grad():
+                flat_logits_fp32 = flat_logits.detach().to(torch.float32)
                 beta_new = self._compute_beta_qb(
-                    flat_logits=flat_logits.detach().to(torch.float32),
+                    flat_logits=flat_logits_fp32,
                     beta_old=self.beta_qb.detach(),
                     k_eff=k_eff,
                 )
-                self.beta_qb.lerp_(beta_new, weight=self.beta_momentum)
+                token_weight = float(flat_logits_fp32.shape[0])
+                if token_weight > 0:
+                    self._beta_update_sum.add_(beta_new * token_weight)
+                    self._beta_update_weight.add_(token_weight)
 
         return probs
+
+    def apply_beta_update(self) -> None:
+        if self._beta_update_weight.item() <= 0:
+            return
+
+        beta_update_sum = self._beta_update_sum.clone()
+        beta_update_weight = self._beta_update_weight.clone()
+
+        if dist.is_available() and dist.is_initialized():
+            dist.all_reduce(beta_update_sum, op=dist.ReduceOp.SUM)
+            dist.all_reduce(beta_update_weight, op=dist.ReduceOp.SUM)
+
+        if beta_update_weight.item() > 0:
+            beta_new = beta_update_sum / beta_update_weight
+            self.beta_qb.lerp_(beta_new.to(dtype=self.beta_qb.dtype), weight=self.beta_momentum)
+
+        self._beta_update_sum.zero_()
+        self._beta_update_weight.zero_()
 
 
 class GeneRouter(nn.Module):
