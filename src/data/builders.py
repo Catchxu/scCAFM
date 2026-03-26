@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import random
+
 from pathlib import Path
 from typing import Any, Optional
 
@@ -79,7 +81,9 @@ def resolve_train_paths(inputs: str | Path | list[str] | list[Path] | None) -> l
             )
         resolved.append(path)
 
-    return sorted(dict.fromkeys(resolved))
+    resolved = list(dict.fromkeys(sorted(resolved)))
+    random.shuffle(resolved)
+    return resolved
 
 
 def _load_table(path: str) -> pd.DataFrame:
@@ -102,6 +106,7 @@ def _build_tokenizer(config: dict[str, Any], token_dict: pd.DataFrame) -> ScToke
     cond_dict = _load_table(cond_dict_path) if cond_dict_path else None
     human_tfs = _load_table(config["human_tfs_path"])
     mouse_tfs = _load_table(config["mouse_tfs_path"])
+    condition_mask_cfg = config.get("condition_mask", {})
 
     gene_tokenizer = GeneTokenizer(
         token_dict=token_dict,
@@ -120,6 +125,8 @@ def _build_tokenizer(config: dict[str, Any], token_dict: pd.DataFrame) -> ScToke
         species_key=config.get("species_key"),
         tissue_key=config.get("tissue_key"),
         disease_key=config.get("disease_key"),
+        mask_unknown_enabled=condition_mask_cfg.get("enabled", False),
+        mask_unknown_ratio=condition_mask_cfg.get("unk_ratio", 0.1),
     )
     return ScTokenizer(
         token_dict=token_dict,

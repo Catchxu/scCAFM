@@ -26,7 +26,7 @@ from ..distributed import (
     move_batch_to_device,
     reduce_scalar_dict,
 )
-from ..experiment import ExperimentLogger, prepare_experiment_paths
+from ..experiment import ExperimentLogger, format_metric_value, prepare_experiment_paths
 from ..losses.dag import DAGLoss
 from ..losses import PretrainingLossManager
 from ..models.router import QBGating
@@ -81,7 +81,6 @@ def _log_run_summary(
     config: dict[str, Any],
     data_assets: PretrainingAssets,
     total_steps: int,
-    resume_path: str | None,
 ) -> None:
     runtime_cfg = config["runtime"]
     data_cfg = config["data"]
@@ -90,17 +89,16 @@ def _log_run_summary(
     trainer_cfg = config["trainer"]
     precision_cfg = runtime_cfg.get("precision", {})
     preprocess_cfg = data_cfg.get("preprocess", {})
+    condition_mask_cfg = data_cfg.get("condition_mask", {})
     batch_size = int(data_cfg["batch_size"])
     grad_accum_steps = int(data_cfg.get("gradient_accumulation_steps", 1))
     global_batch_size = batch_size * int(runtime.world_size) * grad_accum_steps
 
     logger.info("========== Run Summary ==========")
     logger.info(
-        "Runtime: distributed=%s, world_size=%s, device=%s, resume=%s",
+        "Runtime: distributed=%s, world_size=%s",
         runtime.distributed,
         runtime.world_size,
-        runtime.device,
-        resume_path,
     )
     logger.info(
         "Precision: model_dtype=%s, train_dtype=%s",
@@ -108,14 +106,12 @@ def _log_run_summary(
         precision_cfg.get("train_dtype", "fp32"),
     )
     logger.info(
-        "Data: num_adata=%s, gene_key=%s, batch_size=%s, gradient_accumulation_steps=%s, global_batch_size=%s, max_length=%s, num_workers=%s",
+        "Data: num_adata=%s, batch_size=%s, gradient_accumulation_steps=%s, global_batch_size=%s, max_length=%s",
         len(data_assets.train_paths),
-        data_assets.gene_key,
         batch_size,
         grad_accum_steps,
         global_batch_size,
         data_cfg["max_length"],
-        data_cfg.get("num_workers", 0),
     )
     logger.info(
         "Optimizer: name=%s, lr=%s, betas=%s, weight_decay=%s",
@@ -146,7 +142,12 @@ def _log_run_summary(
         preprocess_cfg.get("n_top_genes"),
         preprocess_cfg.get("hvg_flavor"),
     )
-    logger.info("Paths: first_adata=%s", data_assets.train_paths[0])
+    logger.info(
+        "Condition mask: enabled=%s, unk_ratio=%s, keys=%s",
+        condition_mask_cfg.get("enabled", False),
+        condition_mask_cfg.get("unk_ratio", 0.1),
+        "platform,tissue,disease",
+    )
     logger.info("=================================")
 
 
@@ -205,11 +206,34 @@ class PretrainingTrainer:
             return float(grad_norm.detach().item())
         return float(grad_norm)
 
-    def _log_step(self, metrics: dict[str, float]) -> None:
-        if self.train_state["global_step"] % int(self.train_cfg.get("log_every_steps", 10)) != 0:
-            return
+    def _log_step(
+        self,
+        metrics: dict[str, float],
+        current_step: int,
+        total_steps: int,
+        next_log_step: int,
+    ) -> int:
+        log_every_steps = int(self.train_cfg.get("log_every_steps", 10))
+        if log_every_steps <= 0:
+            raise ValueError(f"`trainer.log_every_steps` must be positive, got {log_every_steps}.")
+
+        if current_step < next_log_step:
+            return next_log_step
+
         reduced = reduce_scalar_dict(metrics, self.runtime)
-        self.logger.log_metrics("train", self.train_state["global_step"], reduced)
+        metric_text = ", ".join(
+            f"{key}={format_metric_value(value)}" for key, value in reduced.items()
+        )
+        self.logger.info(
+            "[train step=%s/%s] %s",
+            int(current_step),
+            int(total_steps),
+            metric_text,
+        )
+
+        while next_log_step <= current_step:
+            next_log_step += log_every_steps
+        return next_log_step
 
     def _maybe_save_checkpoint(self, epoch: int) -> None:
         save_every_epochs = int(self.train_cfg.get("save_every_epochs", 1))
@@ -286,6 +310,8 @@ class PretrainingTrainer:
                     disable=not self.runtime.is_main,
                     desc=f"adata {file_index}/{len(train_paths)} epoch {epoch + 1}/{epochs}",
                 )
+                total_forward_steps = len(data_bundle.train_loader) * int(self.runtime.world_size)
+                next_log_step = int(self.train_cfg.get("log_every_steps", 10))
                 self.optimizer.zero_grad(set_to_none=True)
                 accum_metric_sums: dict[str, float] = {}
                 accum_micro_steps = 0
@@ -319,6 +345,14 @@ class PretrainingTrainer:
                     for key, value in metrics.items():
                         epoch_metric_sums[key] = epoch_metric_sums.get(key, 0.0) + float(value)
 
+                    global_forward_step = batch_idx * int(self.runtime.world_size)
+                    next_log_step = self._log_step(
+                        metrics,
+                        current_step=global_forward_step,
+                        total_steps=total_forward_steps,
+                        next_log_step=next_log_step,
+                    )
+
                     if should_step:
                         self._clip_grad_norm()
                         self.optimizer.step()
@@ -332,7 +366,6 @@ class PretrainingTrainer:
                             key: value / max(accum_micro_steps, 1)
                             for key, value in accum_metric_sums.items()
                         }
-                        self._log_step(step_metrics)
                         accum_metric_sums = {}
                         accum_micro_steps = 0
 
@@ -440,7 +473,6 @@ def main() -> None:
                 config=config,
                 data_assets=data_assets,
                 total_steps=total_steps,
-                resume_path=args.resume,
             )
             logger.info("")
 

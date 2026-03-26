@@ -23,6 +23,9 @@ data:
   tissue_key: tissue
   disease_key: disease
   expr_pad_value: 0.0
+  condition_mask:
+    enabled: true
+    unk_ratio: 0.1
   token_dict_path: resources/token_dict.csv
   cond_dict_path: null
   human_tfs_path: resources/human_tfs.csv

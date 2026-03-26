@@ -111,7 +111,7 @@ class PretrainingLossManager(nn.Module):
         if self.use_dag:
             dag_raw = self.dag(foundation_output.factors)
             total_loss = dag_raw if total_loss is None else total_loss + dag_raw
-            metrics["dag"] = float(dag_raw.detach().item())
+            metrics["dag"] = float(self.dag.last_h.detach().item())
 
         if total_loss is None:
             raise ValueError("At least one loss component must be enabled.")

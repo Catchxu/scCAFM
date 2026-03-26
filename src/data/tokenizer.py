@@ -534,6 +534,8 @@ class CondTokenizer:
         species_key: Optional[str] = None,
         tissue_key: Optional[str] = None,
         disease_key: Optional[str] = None,
+        mask_unknown_enabled: bool = False,
+        mask_unknown_ratio: float = 0.1,
     ) -> None:
         if cond_dict is None:
             cond_dict = pd.DataFrame({"cond_value": ["<unk>"], "token_index": [0]})
@@ -544,6 +546,12 @@ class CondTokenizer:
             for _, row in self.cond_dict.iterrows()
         }
         self.next_index = int(self.cond_dict["token_index"].max()) + 1
+        self.mask_unknown_enabled = bool(mask_unknown_enabled)
+        self.mask_unknown_ratio = float(mask_unknown_ratio)
+        if not 0.0 <= self.mask_unknown_ratio <= 1.0:
+            raise ValueError(
+                f"`mask_unknown_ratio` must be in [0, 1], got {self.mask_unknown_ratio}."
+            )
 
         self.set_condition_keys(
             platform_key=platform_key,
@@ -656,6 +664,25 @@ class CondTokenizer:
 
         return obs[key].astype(str).tolist()
 
+    def _maybe_mask_unknown(
+        self,
+        values: list[str],
+        condition_idx: int,
+    ) -> list[str]:
+        if not self.mask_unknown_enabled or self.mask_unknown_ratio <= 0.0:
+            return values
+        if condition_idx not in {0, 2, 3}:
+            return values
+        if len(values) == 0:
+            return values
+
+        masked = list(values)
+        mask = torch.rand(len(values)) < self.mask_unknown_ratio
+        for idx, replace in enumerate(mask.tolist()):
+            if replace:
+                masked[idx] = "<unk>"
+        return masked
+
     def fit_obs(self, obs: pd.DataFrame) -> None:
         condition_columns = [
             self._get_condition_values(obs, key, idx)
@@ -677,7 +704,10 @@ class CondTokenizer:
         obs = adata.obs
         n_cells = int(adata.n_obs)
         condition_columns = [
-            self._get_condition_values(obs, key, idx)
+            self._maybe_mask_unknown(
+                self._get_condition_values(obs, key, idx),
+                condition_idx=idx,
+            )
             for idx, key in enumerate(self.condition_keys)
         ]
 

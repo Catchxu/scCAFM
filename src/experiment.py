@@ -10,6 +10,16 @@ from typing import Any
 from .distributed import RuntimeContext, barrier, broadcast_object
 
 
+def format_metric_value(value: Any) -> str:
+    value_f = float(value)
+    abs_value = abs(value_f)
+    if abs_value == 0.0:
+        return "0.000000"
+    if 1e-4 <= abs_value < 1e4:
+        return f"{value_f:.6f}"
+    return f"{value_f:.6e}"
+
+
 @dataclass
 class ExperimentPaths:
     root: Path
@@ -93,6 +103,6 @@ class ExperimentLogger:
         if not self.runtime.is_main:
             return
         metric_text = ", ".join(
-            f"{key}={float(value):.6f}" for key, value in metrics.items()
+            f"{key}={format_metric_value(value)}" for key, value in metrics.items()
         )
         self.logger.info("[%s step=%s] %s", split, int(step), metric_text)

@@ -62,6 +62,11 @@ class DAGLoss(nn.Module):
             torch.zeros((), dtype=torch.float32),
             persistent=False,
         )
+        self.register_buffer(
+            "last_h",
+            torch.zeros((), dtype=torch.float32),
+            persistent=False,
+        )
 
     @staticmethod
     def _validate_factors(factors: FactorState) -> None:
@@ -89,9 +94,9 @@ class DAGLoss(nn.Module):
 
         batch_size, num_factors, _ = adj.shape
         device = adj.device
-        adj_sq = adj * adj
+        adj_pos = adj.clamp_min(0.0)
         eye = torch.eye(num_factors, device=device, dtype=adj.dtype).unsqueeze(0)
-        matrix_poly = eye.expand(batch_size, -1, -1) + adj_sq / num_factors
+        matrix_poly = eye.expand(batch_size, -1, -1) + adj_pos / num_factors
         res = torch.matrix_power(matrix_poly, num_factors)
         return torch.diagonal(res, dim1=-2, dim2=-1).sum(dim=-1) - num_factors
 
@@ -112,6 +117,7 @@ class DAGLoss(nn.Module):
 
         adj_factor = torch.bmm(factors.v.transpose(1, 2), factors.u)
         dag_h_batch = self._compute_dag_constraint(adj_factor).mean()
+        self.last_h.copy_(dag_h_batch.detach().to(torch.float32))
 
         if self.training:
             self._pending_h_sum.add_(dag_h_batch.detach().to(torch.float32))
