@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import warnings
+
 import pandas as pd
 import torch
 import torch.nn as nn
@@ -32,6 +34,19 @@ class FactorState:
     v: torch.Tensor
     u_score: torch.Tensor
     v_score: torch.Tensor
+
+    def effective_factors(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Return score-weighted factor assignments.
+
+        Returns:
+        - `u_eff`: (C, G, M)
+        - `v_eff`: (C, G, M)
+        """
+
+        u_eff = self.u * self.u_score
+        v_eff = self.v * self.v_score
+        return u_eff, v_eff
 
 
 class SFM(nn.Module):
@@ -162,9 +177,16 @@ class SFM(nn.Module):
     def forward(
         self,
         tokens: dict[str, torch.Tensor | None],
-        return_factors: bool = False,
-        compute_grn: bool = True,
+        return_factors: bool = True,
+        compute_grn: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor | None, FactorState]:
+        if not compute_grn and not return_factors:
+            warnings.warn(
+                "`SFM.forward()` was called with both `compute_grn=False` and "
+                "`return_factors=False`, so it will return `None`.",
+                stacklevel=2,
+            )
+
         self._validate_token_batch(tokens)
 
         input_ids = tokens["input_ids"]
@@ -220,22 +242,23 @@ class SFM(nn.Module):
                 f"{tuple(u_score.shape)}, and {tuple(v_score.shape)}."
             )
 
-        grn = None
-        if compute_grn:
-            u_eff = u * u_score
-            v_eff = v * v_score
-            grn = torch.einsum("cim,cjm->cij", u_eff, v_eff)
+        factors = FactorState(
+            u=u,
+            v=v,
+            u_score=u_score,
+            v_score=v_score,
+        )
 
-        if not return_factors:
-            return grn
+        if compute_grn:
+            u_eff, v_eff = factors.effective_factors()
+            grn = torch.einsum("cim,cjm->cij", u_eff, v_eff)
         else:
-            factors = FactorState(
-                u=u,
-                v=v,
-                u_score=u_score,
-                v_score=v_score,
-            )
+            grn = None
+
+        if return_factors:
             return grn, factors
+        else:
+            return grn
 
 
 

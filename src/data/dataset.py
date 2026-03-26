@@ -123,7 +123,7 @@ if __name__ == "__main__":
     print(dataset[0]["non_tf_mask"])
     print("gene_name_type:")
     print(dataset[0]["gene_name_type"])
-    print("batch_keys:", sorted(batch.keys()))
+    print("batch_keys:", batch.keys())
     print("batch_input_ids_shape:", tuple(batch["input_ids"].shape))
     print(
         "batch_padding_mask_shape:",
