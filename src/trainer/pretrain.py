@@ -27,7 +27,6 @@ from ..distributed import (
     reduce_scalar_dict,
 )
 from ..experiment import ExperimentLogger, format_metric_value, prepare_experiment_paths
-from ..losses.dag import DAGLoss
 from ..losses import PretrainingLossManager
 from ..models.router import QBGating
 
@@ -67,12 +66,6 @@ def _apply_qb_gating_updates(model: torch.nn.Module) -> None:
     for module in model.modules():
         if isinstance(module, QBGating):
             module.apply_beta_update()
-
-
-def _apply_dag_loss_updates(loss_manager: torch.nn.Module) -> None:
-    for module in loss_manager.modules():
-        if isinstance(module, DAGLoss):
-            module.apply_constraint_update()
 
 
 def _log_run_summary(
@@ -332,6 +325,7 @@ class PretrainingTrainer:
                                 tokens=tokens,
                                 model_output=model_output,
                                 current_epoch=epoch,
+                                global_step=int(self.train_state["global_step"]),
                             )
 
                         (loss_result.total / grad_accum_steps).backward()
@@ -357,7 +351,6 @@ class PretrainingTrainer:
                         self._clip_grad_norm()
                         self.optimizer.step()
                         _apply_qb_gating_updates(self.model)
-                        _apply_dag_loss_updates(self.loss_manager)
                         self.scheduler.step()
                         self.optimizer.zero_grad(set_to_none=True)
 
@@ -436,6 +429,7 @@ def main() -> None:
             config=config,
             token_dict=data_assets.token_dict,
             total_epochs=int(config["trainer"]["epochs"]),
+            total_steps=total_steps,
         )
 
         checkpoint_manager = CheckpointManager(paths=paths, runtime=runtime, logger=logger)

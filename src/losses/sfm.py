@@ -41,6 +41,7 @@ class PretrainingLossManager(nn.Module):
         config: dict[str, Any],
         token_dict: pd.DataFrame,
         total_epochs: int,
+        total_steps: int,
     ) -> None:
         super().__init__()
         loss_cfg = config["loss"]
@@ -52,7 +53,13 @@ class PretrainingLossManager(nn.Module):
         self.use_dag = bool(loss_cfg.get("dag", {}).get("enabled", False))
 
         self.elbo = ELBOLoss() if self.use_elbo else None
-        self.dag = DAGLoss(**loss_cfg.get("dag", {}).get("kwargs", {})) if self.use_dag else None
+        dag_cfg = loss_cfg.get("dag", {})
+        dag_kwargs = dict(dag_cfg.get("kwargs", {}))
+        if self.use_dag and "warmup_steps" not in dag_kwargs:
+            scheduler_cfg = config.get("scheduler", {})
+            warmup_ratio = float(scheduler_cfg.get("warmup_ratio", 0.03))
+            dag_kwargs["warmup_steps"] = int(total_steps * warmup_ratio)
+        self.dag = DAGLoss(**dag_kwargs) if self.use_dag else None
 
         prior_cfg = loss_cfg.get("prior", {})
         prior_kwargs = dict(prior_cfg.get("kwargs", {}))
@@ -87,6 +94,7 @@ class PretrainingLossManager(nn.Module):
         tokens: dict[str, torch.Tensor | None],
         model_output: ModelWrapperOutput,
         current_epoch: int,
+        global_step: int = 0,
     ) -> LossResult:
         foundation_output = model_output.foundations[self.foundation_name]
         vgae_output = model_output.heads.get(self.head_name)
@@ -109,7 +117,7 @@ class PretrainingLossManager(nn.Module):
             metrics["prior"] = float(weighted_prior.detach().item())
 
         if self.use_dag:
-            dag_raw = self.dag(foundation_output.factors)
+            dag_raw = self.dag(foundation_output.factors, global_step=global_step)
             total_loss = dag_raw if total_loss is None else total_loss + dag_raw
             metrics["dag"] = float(self.dag.last_h.detach().item())
 
