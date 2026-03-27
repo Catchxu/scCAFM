@@ -1,28 +1,49 @@
-# Building a pretraining cell corpus from Cellxgene Census
-This folder contains scripts for building large-scale single-cell datasets from Cellxgene Census for scCAFM pretraining. The workflow is designed for SLURM-based clusters and assumes internet access during Census queries and downloads.
+# Data Pipeline Guide
+
+This directory contains two separate workflows:
+
+1. Build the pretraining cell corpus from Cellxgene Census.
+2. Build initial gene embeddings from GO annotations with PubMedBERT.
 
 
-## What this pipeline does
-* Queries cells from Cellxgene Census using predefined tissue-level filters.
-* Builds SOMA index files for selected query groups.
-* Downloads filtered data in partitioned `.h5ad` chunks.
+## Directory Overview
+
+### Cell-corpus scripts
+* `build_soma_idx.py` and `build_soma_idx.sh`: build SOMA index files for query groups.
+* `download_partition.py` and related shell scripts: download partitioned `.h5ad` files.
+* `run_download_all.py`: one-command entrypoint for index building and downloads.
+* `check_and_redownload_h5ad.py`: integrity check and auto-repair for downloaded `.h5ad` files.
+
+### Gene-embedding scripts
+* `build_gene_go_terms.py`: query Ensembl BioMart and export GO annotations to `resources/gene_go_terms.csv`.
+* `build_gene_embeddings.py`: build gene embeddings from GO-term text with PubMedBERT.
+* `build_gene_embeddings.sh`: run both gene-related steps together.
 
 
-## Prerequisites
-* A SLURM environment (`sbatch`) for array jobs.
-* Python environment with dependencies used by scripts in `data/`.
-* Network access from compute nodes to Cellxgene Census.
+## Workflow A: Build the Cell Corpus
 
+### What this workflow does
+* Query cells from Cellxgene Census using predefined filters.
+* Build SOMA index files for each query group.
+* Download filtered single-cell data as partitioned `.h5ad` files.
 
-## Data preparation workflow
-1. (Optional) Customize query configuration.
-2. Build SOMA index files from query groups.
-3. Download partitioned `.h5ad` data.
+### Requirements
+* A Python environment with dependencies used by the scripts in `data/`.
+* Internet access to Cellxgene Census.
+* A SLURM environment if you want to use the provided array-job scripts.
 
+### Main configuration files
+* `data/data_config.py`: query settings and filter definitions.
+* `data/query_list.txt`: query groups to process.
+* `data/cancer_list.txt`: cancer-related filtering settings.
 
-## One-command run
-Run the full workflow (build index + download all partitions) in one command:
+### Recommended order
+1. Customize the query configuration if needed.
+2. Build SOMA index files.
+3. Download `.h5ad` partitions.
+4. Optionally run integrity check and redownload broken files.
 
+### One-command run
 ```bash
 python3 data/run_download_all.py \
   --query-list data/query_list.txt \
@@ -35,10 +56,30 @@ Useful flags:
 * `--skip-index`: reuse existing `.idx` files.
 * `--max-partition-size 200000`: control partition size.
 
+### Step 1: Build SOMA index files
+```bash
+INDEX_PATH="/path/to/index"
+QUERY_PATH="data/query_list.txt"
 
-## Integrity check and auto-repair
-Check all expected partitions, delete broken `.h5ad`, and redownload missing/broken files:
+bash data/build_soma_idx.sh "$INDEX_PATH" "$QUERY_PATH"
+```
 
+Notes:
+* Reuse the same `INDEX_PATH` in the download step.
+* Make sure `QUERY_PATH` matches your configured query list.
+
+### Step 2: Download `.h5ad` partitions
+Before submitting jobs, configure these variables in `data/array_download_partition.sh`:
+* `DATA_PATH`
+* `INDEX_PATH`
+* `QUERY_PATH`
+
+Then submit:
+```bash
+sbatch data/array_download_partition.sh
+```
+
+### Step 3: Integrity check and auto-repair
 ```bash
 python3 data/check_and_redownload_h5ad.py \
   --query-list data/query_list.txt \
@@ -46,49 +87,84 @@ python3 data/check_and_redownload_h5ad.py \
   --output-dir /path/to/data
 ```
 
-
-## (1) Optional: customize query configuration
-Update these files if you want custom data coverage:
-* `data/data_config.py`
-* `data/query_list.txt`
-* `data/cancer_list.txt` (for cancer filtering settings)
+### Output
+This workflow produces a directory tree of partitioned `.h5ad` files for downstream preprocessing and model training.
 
 
-Key settings in `data/data_config.py`:
-* `MAJOR_TISSUE_LIST`: high-level tissue groups used in querying.
-* `VERSION`: Cellxgene Census release version.
-* `DISEASE`-related filters: controls healthy/cancer subsets.
+## Workflow B: Build Initial Gene Embeddings
 
+### What this workflow does
+1. Read `resources/token_dict.csv`.
+2. Query Ensembl BioMart for GO annotations.
+3. Save filtered GO annotations to `resources/gene_go_terms.csv`.
+4. Convert each GO annotation into text:
 
-## (2) Build SOMA index files
-Create index files (SOMA IDs) for each query group:
-
-```bash
-INDEX_PATH="path/to/index"
-QUERY_PATH="path/to/query_list.txt"
-
-bash data/build_soma_idx.sh "$INDEX_PATH" "$QUERY_PATH"
+```text
+GO term: {go_term_name}. Domain: {go_domain}.
 ```
 
-Notes:
-* `INDEX_PATH` should be reused in the next step.
-* `QUERY_PATH` should be consistent with your configured query list.
+5. Run PubMedBERT to embed each GO text.
+6. Mean-pool GO-text embeddings into one embedding per gene.
+7. Use `GO term: unknown. Domain: unknown.` for genes without GO terms.
+8. Save the final checkpoint to `checkpoints/gene_embeddings.pt`.
 
+### Requirements
+* Internet access for `build_gene_go_terms.py`.
+* CUDA GPUs for `build_gene_embeddings.py`.
+* A PubMedBERT checkpoint available at `/data1021/xukaichen/data/LLM/pubmedbert-base-embeddings`, or another compatible path.
 
-## (3) Download `.h5ad` partitions
-Configure paths in `data/array_download_partition.sh`:
-* `DATA_PATH`
-* `INDEX_PATH`
-* `QUERY_PATH`
+### Recommended order
+1. Build GO-term annotations.
+2. Build embeddings from those annotations.
 
-Then submit:
-
+### One-command run
 ```bash
-sbatch data/array_download_partition.sh
+bash data/build_gene_embeddings.sh
 ```
 
-Each task downloads partitioned `.h5ad` chunks. Partition size is controlled by `MAX_PARTITION_SIZE` in `data/download_partition.sh`.
+### Common environment variables for the shell script
+* `GPUS`: comma-separated GPU ids, such as `0` or `0,1,2,3`.
+* `BATCH_SIZE`: embedding batch size. Default is `1024`.
+* `MODEL_NAME`: PubMedBERT model path.
+* `TOKEN_DICT`: token dictionary path. Default is `resources/token_dict.csv`.
+* `INPUT_CSV`: GO-term CSV path. Default is `resources/gene_go_terms.csv`.
+* `OUTPUT_CKPT`: output checkpoint path. Default is `checkpoints/gene_embeddings.pt`.
+
+Example:
+```bash
+GPUS=0,1,2,3 BATCH_SIZE=1024 bash data/build_gene_embeddings.sh
+```
+
+### Run each step separately
+Build GO annotations:
+```bash
+python data/build_gene_go_terms.py
+```
+
+Build gene embeddings:
+```bash
+python data/build_gene_embeddings.py \
+  --gpus 0,1,2,3 \
+  --batch-size 1024
+```
+
+### Output
+The final checkpoint contains:
+* `gene_symbols`: a list of gene symbols.
+* `embeddings`: a `torch.Tensor` of shape `(num_genes, 768)`.
 
 
-## Output
-The result of this pipeline is a directory tree of downloaded `.h5ad` files organized by query groups, ready for downstream preprocessing and model training.
+## Practical Notes
+
+### Network-dependent steps
+* Cell-corpus querying depends on Cellxgene Census availability.
+* GO-term export depends on Ensembl BioMart availability.
+
+### GPU-dependent steps
+* `build_gene_embeddings.py` requires CUDA.
+* Multi-GPU inference is supported through `--gpus`.
+
+### Related files outside `data/`
+* `resources/token_dict.csv`: gene vocabulary source.
+* `resources/gene_go_terms.csv`: GO annotations used for embedding generation.
+* `checkpoints/gene_embeddings.pt`: saved initial gene embeddings.
