@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import gc
 from typing import Any
 
 import torch
@@ -66,6 +67,21 @@ def _apply_qb_gating_updates(model: torch.nn.Module) -> None:
     for module in model.modules():
         if isinstance(module, QBGating):
             module.apply_beta_update()
+
+
+def _release_data_bundle(data_bundle: PretrainingDataBundle | None, runtime: RuntimeContext) -> None:
+    if data_bundle is None:
+        return
+
+    train_loader = getattr(data_bundle, "train_loader", None)
+    dataset = getattr(train_loader, "dataset", None)
+    if hasattr(dataset, "close"):
+        dataset.close()
+
+    del train_loader
+    gc.collect()
+    if runtime.device.type == "cuda":
+        torch.cuda.empty_cache()
 
 
 def _log_run_summary(
@@ -271,110 +287,113 @@ class PretrainingTrainer:
                     path,
                 )
 
-            data_bundle = build_data_bundle_for_path(
-                path=path,
-                assets=self.data_assets,
-                config=self.config,
-                runtime=self.runtime,
-                logger=self.logger,
-                file_index=file_index,
-                num_files=len(train_paths),
-            )
-
-            start_epoch = int(self.train_state.get("epoch", 0)) if file_offset == start_file_index else 0
-            for epoch in range(start_epoch, epochs):
-                epoch_metric_sums: dict[str, float] = {}
-                epoch_steps = 0
-
-                if self.runtime.is_main:
-                    self.logger.info(
-                        "[epoch %s/%s] Train on %s cells from %s",
-                        epoch + 1,
-                        epochs,
-                        data_bundle.train_size,
-                        path,
-                    )
-
-                if hasattr(data_bundle.train_sampler, "set_epoch"):
-                    data_bundle.train_sampler.set_epoch(epoch)
-
-                progress = tqdm(
-                    data_bundle.train_loader,
-                    disable=not self.runtime.is_main,
-                    desc=f"adata {file_index}/{len(train_paths)} epoch {epoch + 1}/{epochs}",
+            data_bundle: PretrainingDataBundle | None = None
+            try:
+                data_bundle = build_data_bundle_for_path(
+                    path=path,
+                    assets=self.data_assets,
+                    config=self.config,
+                    runtime=self.runtime,
+                    logger=self.logger,
+                    file_index=file_index,
+                    num_files=len(train_paths),
                 )
-                total_forward_steps = len(data_bundle.train_loader) * int(self.runtime.world_size)
-                next_log_step = int(self.train_cfg.get("log_every_steps", 10))
-                self.optimizer.zero_grad(set_to_none=True)
-                accum_metric_sums: dict[str, float] = {}
-                accum_micro_steps = 0
 
-                num_batches = len(data_bundle.train_loader)
-                for batch_idx, batch in enumerate(progress, start=1):
-                    tokens = move_batch_to_device(batch, self.runtime.device)
-                    should_step = (batch_idx % grad_accum_steps == 0) or (batch_idx == num_batches)
+                start_epoch = int(self.train_state.get("epoch", 0)) if file_offset == start_file_index else 0
+                for epoch in range(start_epoch, epochs):
+                    epoch_metric_sums: dict[str, float] = {}
+                    epoch_steps = 0
 
-                    with self._grad_sync_context(should_sync=should_step):
-                        with self._autocast_context():
-                            model_output = self.model(
-                                tokens,
-                                compute_grn=False,
-                                return_factors=True,
-                            )
-                            loss_result = self.loss_manager(
-                                tokens=tokens,
-                                model_output=model_output,
-                                current_epoch=epoch,
-                                global_step=int(self.train_state["global_step"]),
-                            )
+                    if self.runtime.is_main:
+                        self.logger.info(
+                            "[epoch %s/%s] Train on %s cells from %s",
+                            epoch + 1,
+                            epochs,
+                            data_bundle.train_size,
+                            path,
+                        )
 
-                        (loss_result.total / grad_accum_steps).backward()
+                    if hasattr(data_bundle.train_sampler, "set_epoch"):
+                        data_bundle.train_sampler.set_epoch(epoch)
 
-                    metrics = dict(loss_result.metrics)
-                    accum_micro_steps += 1
-                    for key, value in metrics.items():
-                        accum_metric_sums[key] = accum_metric_sums.get(key, 0.0) + float(value)
-
-                    epoch_steps += 1
-                    for key, value in metrics.items():
-                        epoch_metric_sums[key] = epoch_metric_sums.get(key, 0.0) + float(value)
-
-                    global_forward_step = batch_idx * int(self.runtime.world_size)
-                    next_log_step = self._log_step(
-                        metrics,
-                        current_step=global_forward_step,
-                        total_steps=total_forward_steps,
-                        next_log_step=next_log_step,
+                    progress = tqdm(
+                        data_bundle.train_loader,
+                        disable=not self.runtime.is_main,
+                        desc=f"adata {file_index}/{len(train_paths)} epoch {epoch + 1}/{epochs}",
                     )
-
-                    if should_step:
-                        self._clip_grad_norm()
-                        self.optimizer.step()
-                        _apply_qb_gating_updates(self.model)
-                        self.scheduler.step()
+                    try:
+                        total_forward_steps = len(data_bundle.train_loader) * int(self.runtime.world_size)
+                        next_log_step = int(self.train_cfg.get("log_every_steps", 10))
                         self.optimizer.zero_grad(set_to_none=True)
-
-                        self.train_state["global_step"] += 1
-                        step_metrics = {
-                            key: value / max(accum_micro_steps, 1)
-                            for key, value in accum_metric_sums.items()
-                        }
-                        accum_metric_sums = {}
+                        accum_metric_sums: dict[str, float] = {}
                         accum_micro_steps = 0
 
-                self.train_state["file_index"] = file_offset
-                self.train_state["epoch"] = epoch + 1
-                epoch_metrics = {
-                    key: value / max(epoch_steps, 1)
-                    for key, value in epoch_metric_sums.items()
-                }
-                epoch_metrics = reduce_scalar_dict(epoch_metrics, self.runtime)
-                self.logger.log_metrics("train_epoch", self.train_state["global_step"], epoch_metrics)
+                        num_batches = len(data_bundle.train_loader)
+                        for batch_idx, batch in enumerate(progress, start=1):
+                            tokens = move_batch_to_device(batch, self.runtime.device)
+                            should_step = (batch_idx % grad_accum_steps == 0) or (batch_idx == num_batches)
 
-                self._maybe_save_checkpoint(epoch + 1)
+                            with self._grad_sync_context(should_sync=should_step):
+                                with self._autocast_context():
+                                    model_output = self.model(
+                                        tokens,
+                                        compute_grn=False,
+                                        return_factors=True,
+                                    )
+                                    loss_result = self.loss_manager(
+                                        tokens=tokens,
+                                        model_output=model_output,
+                                        current_epoch=epoch,
+                                        global_step=int(self.train_state["global_step"]),
+                                    )
 
-            self.train_state["file_index"] = file_offset + 1
-            self.train_state["epoch"] = 0
+                                (loss_result.total / grad_accum_steps).backward()
+
+                            metrics = dict(loss_result.metrics)
+                            accum_micro_steps += 1
+                            for key, value in metrics.items():
+                                accum_metric_sums[key] = accum_metric_sums.get(key, 0.0) + float(value)
+
+                            epoch_steps += 1
+                            for key, value in metrics.items():
+                                epoch_metric_sums[key] = epoch_metric_sums.get(key, 0.0) + float(value)
+
+                            global_forward_step = batch_idx * int(self.runtime.world_size)
+                            next_log_step = self._log_step(
+                                metrics,
+                                current_step=global_forward_step,
+                                total_steps=total_forward_steps,
+                                next_log_step=next_log_step,
+                            )
+
+                            if should_step:
+                                self._clip_grad_norm()
+                                self.optimizer.step()
+                                _apply_qb_gating_updates(self.model)
+                                self.scheduler.step()
+                                self.optimizer.zero_grad(set_to_none=True)
+
+                                self.train_state["global_step"] += 1
+                                accum_metric_sums = {}
+                                accum_micro_steps = 0
+
+                        self.train_state["file_index"] = file_offset
+                        self.train_state["epoch"] = epoch + 1
+                        epoch_metrics = {
+                            key: value / max(epoch_steps, 1)
+                            for key, value in epoch_metric_sums.items()
+                        }
+                        epoch_metrics = reduce_scalar_dict(epoch_metrics, self.runtime)
+                        self.logger.log_metrics("train_epoch", self.train_state["global_step"], epoch_metrics)
+
+                        self._maybe_save_checkpoint(epoch + 1)
+                    finally:
+                        progress.close()
+
+                self.train_state["file_index"] = file_offset + 1
+                self.train_state["epoch"] = 0
+            finally:
+                _release_data_bundle(data_bundle, self.runtime)
 
         self.checkpoint_manager.save(
             model=self.model,

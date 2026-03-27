@@ -60,6 +60,13 @@ class ScDataset(Dataset):
             "gene_name_type": self.tokenized.gene_name_type,
         }
 
+    def close(self) -> None:
+        adata = getattr(self, "adata", None)
+        if getattr(adata, "file", None) is not None:
+            adata.file.close()
+        self.adata = None
+        self.tokenized = None
+
 
 
 
