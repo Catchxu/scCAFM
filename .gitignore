@@ -178,5 +178,4 @@ cython_debug/
 checkpoints/
 logs/
 results/
-resources/
-.pybiomart.sqlite
+gene_go_terms.csv
