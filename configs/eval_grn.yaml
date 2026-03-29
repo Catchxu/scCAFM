@@ -9,25 +9,23 @@ runtime:
     limit_all_gathers: true
 
 data:
-  # Each entry can be a `.h5ad` file or a directory; directories are expanded to all nested `.h5ad` files.
-  train_paths: /data1021/xukaichen/data/Atlas/blood
-  shuffle_train_paths: true
+  train_paths: /data1021/xukaichen/data/CTA/pbmc.h5ad
+  shuffle_train_paths: false
   shuffle_train_paths_seed: 0
-  batch_size: 8
-  gradient_accumulation_steps: 8
+  batch_size: 32
   num_workers: 0
   pin_memory: true
   drop_last: false
   max_length: 2048
-  gene_key: feature_id
+  gene_key: null
   platform_key: assay
   species_key: null
   tissue_key: tissue
   disease_key: disease
   expr_pad_value: 0.0
   condition_mask:
-    enabled: true
-    unk_ratio: 0.1
+    enabled: false
+    unk_ratio: 0.0
   token_dict_path: resources/token_dict.csv
   cond_dict_path: resources/cond_dict.csv
   human_tfs_path: resources/human_tfs.csv
@@ -49,41 +47,7 @@ data:
     X_fill_value: 0.0
     inplace: false
 
-optimizer:
-  name: adamw
-  lr: 0.0001
-  betas: [0.9, 0.95]
-  eps: 1.0e-8
-  weight_decay: 0.01
-
-scheduler:
-  name: cosine_with_warmup
-  warmup_ratio: 0.03
-  min_lr_ratio: 0.1
-
-loss:
+evaluator:
+  checkpoint_path: checkpoints/sfm_latest.pt
+  evaluation_grn_path: resources/OmniPath.csv
   foundation_name: sfm
-  head_name: vgae
-  elbo:
-    enabled: true
-  prior:
-    enabled: true
-    prior_grn_path: resources/OmniPath.csv
-    kwargs:
-      pos_weight: 1.0
-      neg_weight: 1.0
-      neg_sample_ratio: null
-    weight_schedule:
-      initial: 10.0
-      final: 0.1
-      span_epochs: null
-  dag:
-    enabled: True
-    kwargs:
-      lambda_dag: 1.0
-
-trainer:
-  epochs: 1
-  grad_clip_norm: 1.0
-  log_every_steps: 10000
-  save_every_epochs: 1

@@ -15,7 +15,7 @@ from .collator import ScBatchCollator
 from .dataset import ScDataset
 from .preprocess import ScPreprocessor
 from .tokenizer import CondTokenizer, ExprTokenizer, GeneTokenizer, ScTokenizer
-from ..distributed import RuntimeContext
+from ..distributed import RuntimeContext, broadcast_object
 
 
 class PreprocessedScDataset(ScDataset):
@@ -81,13 +81,39 @@ def resolve_train_paths(inputs: str | Path | list[str] | list[Path] | None) -> l
             )
         resolved.append(path)
 
-    resolved = list(dict.fromkeys(sorted(resolved)))
-    random.shuffle(resolved)
-    return resolved
+    return list(dict.fromkeys(sorted(resolved)))
+
+
+def _shuffle_train_paths(
+    train_paths: list[Path],
+    runtime: RuntimeContext,
+    enabled: bool,
+    seed: int,
+) -> list[Path]:
+    if not enabled or len(train_paths) <= 1:
+        return train_paths
+
+    payload: list[str] | None = None
+    if not runtime.distributed or runtime.is_main:
+        shuffled = list(train_paths)
+        random.Random(int(seed)).shuffle(shuffled)
+        payload = [str(path) for path in shuffled]
+
+    resolved = broadcast_object(payload, src=0)
+    return [Path(path_str) for path_str in resolved]
 
 
 def _load_table(path: str) -> pd.DataFrame:
     return pd.read_csv(Path(path).expanduser().resolve())
+
+
+def _load_optional_table(path: str | None) -> pd.DataFrame | None:
+    if not path:
+        return None
+    resolved = Path(path).expanduser().resolve()
+    if not resolved.exists():
+        return None
+    return pd.read_csv(resolved)
 
 
 def _build_preprocessor(config: dict[str, Any], token_dict: pd.DataFrame) -> Optional[ScPreprocessor]:
@@ -103,7 +129,7 @@ def _build_preprocessor(config: dict[str, Any], token_dict: pd.DataFrame) -> Opt
 
 def _build_tokenizer(config: dict[str, Any], token_dict: pd.DataFrame) -> ScTokenizer:
     cond_dict_path = config.get("cond_dict_path")
-    cond_dict = _load_table(cond_dict_path) if cond_dict_path else None
+    cond_dict = _load_optional_table(cond_dict_path)
     human_tfs = _load_table(config["human_tfs_path"])
     mouse_tfs = _load_table(config["mouse_tfs_path"])
     condition_mask_cfg = config.get("condition_mask", {})
@@ -147,7 +173,17 @@ def _fit_condition_vocab(paths: list[Path], tokenizer: ScTokenizer) -> None:
                 adata.file.close()
 
 
-def build_pretraining_assets(config: dict[str, Any]) -> PretrainingAssets:
+def _save_condition_vocab(config: dict[str, Any], tokenizer: ScTokenizer, runtime: RuntimeContext) -> None:
+    cond_dict_path = config.get("cond_dict_path")
+    if not cond_dict_path or not runtime.is_main:
+        return
+
+    output_path = Path(cond_dict_path).expanduser().resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    tokenizer.cond_tokenizer.cond_dict.to_csv(output_path, index=False)
+
+
+def build_pretraining_assets(config: dict[str, Any], runtime: RuntimeContext) -> PretrainingAssets:
     data_cfg = config["data"]
     token_dict = _load_table(data_cfg["token_dict_path"])
     tokenizer = _build_tokenizer(data_cfg, token_dict=token_dict)
@@ -155,7 +191,14 @@ def build_pretraining_assets(config: dict[str, Any]) -> PretrainingAssets:
     train_paths = resolve_train_paths(data_cfg.get("train_paths"))
     if not train_paths:
         raise ValueError("At least one `.h5ad` file is required for training.")
+    train_paths = _shuffle_train_paths(
+        train_paths=train_paths,
+        runtime=runtime,
+        enabled=bool(data_cfg.get("shuffle_train_paths", False)),
+        seed=int(data_cfg.get("shuffle_train_paths_seed", 0)),
+    )
     _fit_condition_vocab(train_paths, tokenizer)
+    _save_condition_vocab(data_cfg, tokenizer, runtime)
     gene_key = data_cfg.get("gene_key")
     return PretrainingAssets(
         train_paths=train_paths,

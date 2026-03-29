@@ -50,10 +50,10 @@ def _load_resume_states(
         return None
 
     if isinstance(model, FSDP):
-        optim_state = FSDP.shard_full_optim_state_dict(
-            payload["optimizer_state_dict"],
+        optim_state = FSDP.optim_state_dict_to_load(
             model,
-            optim=optimizer,
+            optimizer,
+            payload["optimizer_state_dict"],
         )
         optimizer.load_state_dict(optim_state)
     else:
@@ -110,9 +110,9 @@ def _log_run_summary(
         runtime.world_size,
     )
     logger.info(
-        "Precision: model_dtype=%s, train_dtype=%s",
+        "Precision: model_dtype=%s, autocast_dtype=%s",
         precision_cfg.get("model_dtype", "fp32"),
-        precision_cfg.get("train_dtype", "fp32"),
+        precision_cfg.get("autocast_dtype", "fp32"),
     )
     logger.info(
         "Data: num_adata=%s, batch_size=%s, gradient_accumulation_steps=%s, global_batch_size=%s, max_length=%s",
@@ -193,14 +193,14 @@ class PretrainingTrainer:
 
     def _autocast_context(self):
         precision_cfg = self.runtime_cfg.get("precision", {})
-        train_dtype = str(precision_cfg.get("train_dtype", "fp32")).lower()
-        if self.runtime.device.type != "cuda" or train_dtype == "fp32":
+        autocast_dtype = str(precision_cfg.get("autocast_dtype", "fp32")).lower()
+        if self.runtime.device.type != "cuda" or autocast_dtype == "fp32":
             return contextlib.nullcontext()
-        if train_dtype == "bf16":
+        if autocast_dtype == "bf16":
             if not torch.cuda.is_bf16_supported():
-                raise ValueError("`runtime.precision.train_dtype=bf16` requires CUDA bf16 support.")
+                raise ValueError("`runtime.precision.autocast_dtype=bf16` requires CUDA bf16 support.")
             return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
-        raise ValueError(f"Unsupported `runtime.precision.train_dtype`: {train_dtype}")
+        raise ValueError(f"Unsupported `runtime.precision.autocast_dtype`: {autocast_dtype}")
 
     def _clip_grad_norm(self) -> float | None:
         max_norm = self.train_cfg.get("grad_clip_norm")
@@ -426,7 +426,7 @@ def main() -> None:
             runtime=runtime,
         )
 
-        data_assets = build_pretraining_assets(config=config)
+        data_assets = build_pretraining_assets(config=config, runtime=runtime)
         model = build_model(
             sfm_config=config["model"],
             data_bundle=PretrainingDataBundle(

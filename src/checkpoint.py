@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import warnings
+
 from pathlib import Path
 from typing import Any
 
@@ -53,13 +55,19 @@ class CheckpointManager:
 
         if isinstance(model, FSDP):
             state_cfg = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
-            with FSDP.state_dict_type(
-                model,
-                StateDictType.FULL_STATE_DICT,
-                state_dict_config=state_cfg,
-            ):
-                model_state = model.state_dict()
-            optim_state = FSDP.full_optim_state_dict(model, optimizer, rank0_only=True)
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message=r"FSDP.state_dict_type\(\) and FSDP.set_state_dict_type\(\) are being deprecated\.",
+                    category=FutureWarning,
+                )
+                with FSDP.state_dict_type(
+                    model,
+                    StateDictType.FULL_STATE_DICT,
+                    state_dict_config=state_cfg,
+                ):
+                    model_state = model.state_dict()
+            optim_state = FSDP.optim_state_dict(model, optimizer)
         else:
             model_state = model.state_dict()
             optim_state = optimizer.state_dict()

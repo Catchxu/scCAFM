@@ -537,6 +537,7 @@ class CondTokenizer:
         mask_unknown_enabled: bool = False,
         mask_unknown_ratio: float = 0.1,
     ) -> None:
+        provided_cond_dict = cond_dict is not None
         if cond_dict is None:
             cond_dict = pd.DataFrame({"cond_value": ["<unk>"], "token_index": [0]})
 
@@ -546,6 +547,7 @@ class CondTokenizer:
             for _, row in self.cond_dict.iterrows()
         }
         self.next_index = int(self.cond_dict["token_index"].max()) + 1
+        self.allow_new_conditions = not provided_cond_dict
         self.mask_unknown_enabled = bool(mask_unknown_enabled)
         self.mask_unknown_ratio = float(mask_unknown_ratio)
         if not 0.0 <= self.mask_unknown_ratio <= 1.0:
@@ -640,6 +642,9 @@ class CondTokenizer:
 
         if value in self.cond_to_index:
             return self.cond_to_index[value]
+
+        if not self.allow_new_conditions:
+            return self.cond_to_index["<unk>"]
 
         token_index = self.next_index
         self.next_index += 1
