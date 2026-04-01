@@ -179,3 +179,5 @@ checkpoints/
 logs/
 results/
 gene_go_terms.csv
+slurm-*.out
+slurm-*.err

@@ -12,7 +12,7 @@ from pathlib import Path
 
 import scanpy as sc
 
-from data_config import normalize_organism, organism_output_name
+from data_config import DEFAULT_HOMOLOGY_PATH, normalize_organism, organism_output_name
 
 
 def _load_queries(query_list_path: Path):
@@ -54,7 +54,7 @@ def main():
     parser.add_argument(
         "--query-list",
         type=str,
-        default="query_list.txt",
+        default=str((Path(__file__).resolve().parent / "query_list.txt")),
         help="Path to query list file.",
     )
     parser.add_argument(
@@ -86,6 +86,12 @@ def main():
         type=str,
         default=None,
         help="Optional path to token_dict.csv. If provided, redownloaded partitions will keep only genes found in the token dictionary.",
+    )
+    parser.add_argument(
+        "--homology-path",
+        type=str,
+        default=str(DEFAULT_HOMOLOGY_PATH),
+        help="Path to homologous.csv used to map mouse genes onto the human vocabulary.",
     )
     args = parser.parse_args()
 
@@ -156,6 +162,8 @@ def main():
                         str(args.max_partition_size),
                         "--organism",
                         normalized_organism,
+                        "--homology-path",
+                        str(Path(args.homology_path).expanduser().resolve()),
                         *([] if not args.token_dict_path else ["--token-dict-path", str(Path(args.token_dict_path).expanduser().resolve())]),
                     ],
                     cwd=script_dir,

@@ -15,23 +15,69 @@ This directory contains:
 * Save partitions into species-specific folders.
 * Add `obs["species"]` to each partition.
 * Optionally keep only genes found in `resources/token_dict.csv`.
+* For mouse downloads, remap `feature_id` and `feature_name` through `resources/homologous.csv` so the exported files align with the human token vocabulary while preserving original mouse feature columns as `source_feature_id` and `source_feature_name`.
+* Drop `soma_joinid` from both `obs` and `var`, and drop all `obs` columns ending with `_term_id` before saving.
 
-### One-command run
+### Preferred workflow
+The supported workflow is shell-based:
+* `data/demo_download.sh` for a quick smoke test
+* `data/build_soma_idx.sh` to build index files
+* `data/download_partition.sh` to download one query for one organism
+* `data/array_download_partition.sh` to run the full SLURM array
+
+### Demo download
 ```bash
-python3 data/run_download_all.py \
-  --organism "Homo sapiens" \
-  --token-dict-path resources/token_dict.csv \
-  --query-list data/query_list.txt \
-  --index-dir /path/to/index \
-  --output-dir /path/to/data
+bash data/demo_download.sh /path/to/index /path/to/data
 ```
 
-Useful flags:
-* `--organism "Homo sapiens"` or `--organism "Mus musculus"`
-* `--token-dict-path resources/token_dict.csv`
-* `--resume`
-* `--skip-index`
-* `--max-partition-size 200000`
+Equivalent positional form:
+```bash
+bash data/demo_download.sh /path/to/index /path/to/data brain
+```
+
+This builds the index and downloads only `partition_0.h5ad` for:
+* `human/brain`
+* `mouse/brain`
+
+The demo uses a smaller partition size by default:
+```bash
+DEMO_MAX_PARTITION_SIZE=5000 bash data/demo_download.sh /path/to/index /path/to/data brain
+```
+
+### Build index files
+Build all index files for one organism:
+```bash
+bash data/build_soma_idx.sh /path/to/index data/query_list.txt "Homo sapiens"
+```
+
+Build mouse indexes:
+```bash
+bash data/build_soma_idx.sh /path/to/index data/query_list.txt "Mus musculus"
+```
+
+### Download partitions
+Download all partitions for one query and one organism:
+```bash
+bash data/download_partition.sh \
+  brain \
+  /path/to/index \
+  /path/to/data \
+  "Homo sapiens" \
+  resources/token_dict.csv \
+  resources/homologous.csv
+```
+
+Download only partition `0`:
+```bash
+bash data/download_partition.sh \
+  brain \
+  /path/to/index \
+  /path/to/data \
+  "Mus musculus" \
+  resources/token_dict.csv \
+  resources/homologous.csv \
+  0
+```
 
 ### Output layout
 ```text
@@ -46,8 +92,8 @@ Set these variables in `data/array_download_partition.sh`:
 * `INDEX_PATH`
 * `QUERY_PATH`
 * `DATA_PATH`
-* `ORGANISM`
 * `TOKEN_DICT_PATH`
+* `HOMOLOGY_PATH`
 
 Then run:
 ```bash
@@ -59,6 +105,7 @@ sbatch data/array_download_partition.sh
 python3 data/check_and_redownload_h5ad.py \
   --organism "Homo sapiens" \
   --token-dict-path resources/token_dict.csv \
+  --homology-path resources/homologous.csv \
   --query-list data/query_list.txt \
   --index-dir /path/to/index \
   --output-dir /path/to/data

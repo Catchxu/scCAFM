@@ -1,12 +1,20 @@
-#!/bin/sh
+#!/usr/bin/env bash
+
+set -euo pipefail
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# output directory for the index 
-OUTPUT_DIR=$1
-QUERY_LIST=$2
-ORGANISM=${3:-"Homo sapiens"}
+OUTPUT_DIR="${1:?Usage: build_soma_idx.sh OUTPUT_DIR [QUERY_LIST] [ORGANISM]}"
+QUERY_LIST="${2:-${SCRIPT_DIR}/query_list.txt}"
+ORGANISM="${3:-Homo sapiens}"
 
-while read QUERY; do
-    echo "building index for ${QUERY}"
-    python3 "${SCRIPT_DIR}/build_soma_idx.py" --query-name ${QUERY} --output-dir ${OUTPUT_DIR} --organism "${ORGANISM}"
-done < ${QUERY_LIST}
+while IFS= read -r QUERY || [ -n "${QUERY}" ]; do
+    if [ -z "${QUERY}" ] || [[ "${QUERY}" == \#* ]]; then
+        continue
+    fi
+    echo "building index for ${QUERY} (${ORGANISM})"
+    python3 "${SCRIPT_DIR}/build_soma_idx.py" \
+        --query-name "${QUERY}" \
+        --output-dir "${OUTPUT_DIR}" \
+        --organism "${ORGANISM}"
+done < "${QUERY_LIST}"

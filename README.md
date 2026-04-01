@@ -41,15 +41,6 @@ For better attention efficiency, we strongly recommend installing FlashAttention
 
 
 ## Data Download
-You can build and download Cellxgene-based pretraining data with one command. The pipeline supports both `Homo sapiens` and `Mus musculus`, writes species-specific folders, adds a `species` column to each downloaded partition, and can optionally keep only genes found in `token_dict.csv`.
+The data pipeline supports both `Homo sapiens` and `Mus musculus`, writes species-specific folders, adds a `species` column to each downloaded partition, and can keep only genes found in `token_dict.csv`. The supported workflow is now shell-based, including a small demo download before the full SLURM run.
 
-```bash
-python3 data/run_download_all.py \
-  --organism "Homo sapiens" \
-  --token-dict-path resources/token_dict.csv \
-  --query-list data/query_list.txt \
-  --index-dir /path/to/index \
-  --output-dir /path/to/data
-```
-
-For complete data pipeline details (workflow, options, and integrity check), see [Data Download Guide](data/README.md).
+For complete data pipeline details, see [Data Download Guide](data/README.md).

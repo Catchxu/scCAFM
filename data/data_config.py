@@ -1,7 +1,9 @@
 from pathlib import Path
 
-MAJOR_TISSUE_LIST  = ["heart", "blood", "brain", "lung", "kidney", "intestine", "pancreas"]
+MAJOR_TISSUE_LIST  = ["brain", "kidney", "intestine", "heart", "lung", "blood", "liver", "breast", "thymus"]
 VERSION = "2023-05-15"
+ROOT_DIR = Path(__file__).resolve().parents[1]
+DEFAULT_HOMOLOGY_PATH = ROOT_DIR / "resources" / "homologous.csv"
 
 ORGANISM_TO_CENSUS_KEY = {
     "Homo sapiens": "homo_sapiens",
