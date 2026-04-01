@@ -200,6 +200,8 @@ class PretrainingTrainer:
             if not torch.cuda.is_bf16_supported():
                 raise ValueError("`runtime.precision.autocast_dtype=bf16` requires CUDA bf16 support.")
             return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+        if autocast_dtype == "fp16":
+            return torch.autocast(device_type="cuda", dtype=torch.float16)
         raise ValueError(f"Unsupported `runtime.precision.autocast_dtype`: {autocast_dtype}")
 
     def _clip_grad_norm(self) -> float | None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -11,7 +12,14 @@ import torch
 from .metrics import summarize_binary_metrics
 from ..config import load_yaml_config, save_yaml_config
 from ..data import PretrainingDataBundle, build_data_bundle_for_path, build_pretraining_assets
-from ..distributed import RuntimeContext, barrier, broadcast_object, cleanup_distributed, initialize_distributed
+from ..distributed import (
+    RuntimeContext,
+    barrier,
+    broadcast_object,
+    cleanup_distributed,
+    initialize_distributed,
+    move_batch_to_device,
+)
 from ..experiment import ExperimentLogger, ExperimentPaths
 from ..models.wrapper import ModelWrapperOutput
 from ..trainer.builders import build_model, maybe_wrap_fsdp
@@ -27,9 +35,23 @@ class EvaluationGRNCache:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate predicted cell-specific GRNs.")
-    parser.add_argument("--model-config", default="configs/sfm.yaml")
-    parser.add_argument("--eval-config", default="configs/eval_grn.yaml")
+    parser.add_argument("--sfm-config", default="configs/sfm.yaml")
+    parser.add_argument("--eval-grn-config", default="configs/eval_grn.yaml")
     return parser.parse_args()
+
+
+def _autocast_context(config: dict[str, object], runtime: RuntimeContext):
+    precision_cfg = config.get("runtime", {}).get("precision", {})
+    autocast_dtype = str(precision_cfg.get("autocast_dtype", "fp32")).lower()
+    if runtime.device.type != "cuda" or autocast_dtype == "fp32":
+        return contextlib.nullcontext()
+    if autocast_dtype == "bf16":
+        if not torch.cuda.is_bf16_supported():
+            raise ValueError("`runtime.precision.autocast_dtype=bf16` requires CUDA bf16 support.")
+        return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+    if autocast_dtype == "fp16":
+        return torch.autocast(device_type="cuda", dtype=torch.float16)
+    raise ValueError(f"Unsupported `runtime.precision.autocast_dtype`: {autocast_dtype}")
 
 
 def _map_gene_to_token(
@@ -272,6 +294,16 @@ def _save_rank_metrics(rank_df: pd.DataFrame, paths: ExperimentPaths, runtime: R
     return rank_path
 
 
+def _release_data_bundle(data_bundle: PretrainingDataBundle | None) -> None:
+    if data_bundle is None:
+        return
+
+    train_loader = getattr(data_bundle, "train_loader", None)
+    dataset = getattr(train_loader, "dataset", None)
+    if hasattr(dataset, "close"):
+        dataset.close()
+
+
 def _merge_rank_metrics(paths: ExperimentPaths, runtime: RuntimeContext, logger: ExperimentLogger) -> None:
     barrier()
     if not runtime.is_main:
@@ -307,13 +339,13 @@ def _log_run_summary(
 
 
 def run_evaluation(
-    model_config: dict[str, object],
-    eval_config: dict[str, object],
+    sfm_config: dict[str, object],
+    eval_grn_config: dict[str, object],
     runtime: RuntimeContext,
 ) -> None:
     config = {
-        "model": model_config,
-        **eval_config,
+        "model": sfm_config,
+        **eval_grn_config,
     }
     evaluator_cfg = config["evaluator"]
     checkpoint_path = Path(str(evaluator_cfg["checkpoint_path"])).expanduser().resolve()
@@ -324,11 +356,11 @@ def run_evaluation(
     paths = prepare_evaluation_paths(runtime=runtime)
     logger = ExperimentLogger(name="evaluate_grn", paths=paths, runtime=runtime)
     results_dir = paths.root / "results"
-    configs_dir = paths.root / "configs"
+    configs_dir = results_dir / "configs"
 
     if runtime.is_main:
-        save_yaml_config(configs_dir / "model_config.yaml", model_config)
-        save_yaml_config(configs_dir / "eval_config.yaml", eval_config)
+        save_yaml_config(configs_dir / "sfm.yaml", sfm_config)
+        save_yaml_config(configs_dir / "eval_grn.yaml", eval_grn_config)
 
     data_assets = build_pretraining_assets(config=config, runtime=runtime)
     evaluation_grn_df = _load_evaluation_grn(evaluator_cfg["evaluation_grn_path"])
@@ -386,15 +418,13 @@ def run_evaluation(
 
             batch_offset = 0
             for batch_idx, batch in enumerate(data_bundle.train_loader, start=1):
-                tokens = {
-                    key: value.to(runtime.device, non_blocking=True) if torch.is_tensor(value) else value
-                    for key, value in batch.items()
-                }
-                model_output = model(
-                    tokens,
-                    compute_grn={foundation_name: True},
-                    return_factors=False,
-                )
+                tokens = move_batch_to_device(batch, runtime.device)
+                with _autocast_context(config=config, runtime=runtime):
+                    model_output = model(
+                        tokens,
+                        compute_grn={foundation_name: True},
+                        return_factors=False,
+                    )
                 pred_grn = _extract_predicted_grn(model_output, foundation_name=foundation_name)
                 batch_metrics = evaluate_cell_specific_grns(
                     pred_grn=pred_grn,
@@ -410,9 +440,7 @@ def run_evaluation(
                 batch_offset += len(batch_metrics)
                 all_rows.append(batch_metrics)
 
-            dataset = getattr(data_bundle.train_loader, "dataset", None)
-            if hasattr(dataset, "close"):
-                dataset.close()
+            _release_data_bundle(data_bundle)
 
     rank_df = pd.concat(all_rows, ignore_index=True) if all_rows else pd.DataFrame()
     _save_rank_metrics(rank_df=rank_df, paths=paths, runtime=runtime)
@@ -427,9 +455,9 @@ def main() -> None:
     args = parse_args()
     runtime = initialize_distributed()
     try:
-        model_config = load_yaml_config(args.model_config)
-        eval_config = load_yaml_config(args.eval_config)
-        run_evaluation(model_config=model_config, eval_config=eval_config, runtime=runtime)
+        sfm_config = load_yaml_config(args.sfm_config)
+        eval_grn_config = load_yaml_config(args.eval_grn_config)
+        run_evaluation(sfm_config=sfm_config, eval_grn_config=eval_grn_config, runtime=runtime)
     finally:
         cleanup_distributed()
 

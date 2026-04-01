@@ -32,10 +32,18 @@ def build_model(
     sfm_config: dict[str, Any],
     data_bundle: PretrainingDataBundle,
 ) -> ModelWrapper:
+    sfm_kwargs = dict(sfm_config["sfm"])
+    configured_cond_vocab_size = sfm_kwargs.pop("cond_vocab_size", None)
+    if configured_cond_vocab_size is not None and int(configured_cond_vocab_size) != int(data_bundle.cond_vocab_size):
+        raise ValueError(
+            "Mismatched `cond_vocab_size` between model config "
+            f"({configured_cond_vocab_size}) and data bundle ({data_bundle.cond_vocab_size})."
+        )
+
     sfm_module = SFM(
         token_dict=data_bundle.token_dict,
         cond_vocab_size=data_bundle.cond_vocab_size,
-        **sfm_config["sfm"],
+        **sfm_kwargs,
     )
     vgae_head = VGAE(**sfm_config["vgae"])
     return ModelWrapper(
