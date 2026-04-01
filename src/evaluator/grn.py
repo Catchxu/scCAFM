@@ -8,9 +8,10 @@ from typing import Optional
 
 import pandas as pd
 import torch
+import torch.distributed as dist
 
 from .metrics import summarize_binary_metrics
-from ..config import load_yaml_config, save_yaml_config
+from ..config import load_yaml_config
 from ..data import PretrainingDataBundle, build_data_bundle_for_path, build_pretraining_assets
 from ..distributed import (
     RuntimeContext,
@@ -226,13 +227,10 @@ def prepare_evaluation_paths(
     checkpoints = root / "checkpoints"
     logs = root / "logs"
     results = root / "results"
-    configs = root / "configs"
 
     if runtime.is_main:
-        checkpoints.mkdir(parents=True, exist_ok=True)
         logs.mkdir(parents=True, exist_ok=True)
         results.mkdir(parents=True, exist_ok=True)
-        configs.mkdir(parents=True, exist_ok=True)
     barrier()
 
     return ExperimentPaths(
@@ -287,13 +285,6 @@ def _summarize_metrics(metrics_df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame([summary])
 
 
-def _save_rank_metrics(rank_df: pd.DataFrame, paths: ExperimentPaths, runtime: RuntimeContext) -> Path:
-    results_dir = paths.root / "results"
-    rank_path = results_dir / f"cell_metrics_rank{runtime.rank}.csv"
-    rank_df.to_csv(rank_path, index=False)
-    return rank_path
-
-
 def _release_data_bundle(data_bundle: PretrainingDataBundle | None) -> None:
     if data_bundle is None:
         return
@@ -304,19 +295,38 @@ def _release_data_bundle(data_bundle: PretrainingDataBundle | None) -> None:
         dataset.close()
 
 
-def _merge_rank_metrics(paths: ExperimentPaths, runtime: RuntimeContext, logger: ExperimentLogger) -> None:
-    barrier()
+def _save_summary_metrics(
+    metric_sums: dict[str, float],
+    metric_counts: dict[str, int],
+    paths: ExperimentPaths,
+    runtime: RuntimeContext,
+    logger: ExperimentLogger,
+) -> None:
+    metric_names = ["auprc_ratio", "auroc", "ep_ratio"]
+    totals = torch.tensor(
+        [
+            metric_sums.get(name, 0.0) for name in metric_names
+        ] + [
+            float(metric_counts.get(name, 0)) for name in metric_names
+        ],
+        dtype=torch.float64,
+        device=runtime.device,
+    )
+    if dist.is_available() and dist.is_initialized():
+        dist.all_reduce(totals, op=dist.ReduceOp.SUM)
+
     if not runtime.is_main:
         return
 
     results_dir = paths.root / "results"
-    rank_paths = sorted(results_dir.glob("cell_metrics_rank*.csv"))
-    merged = pd.concat([pd.read_csv(path) for path in rank_paths], ignore_index=True) if rank_paths else pd.DataFrame()
-    merged.to_csv(results_dir / "cell_metrics.csv", index=False)
+    summary = {}
+    for idx, name in enumerate(metric_names):
+        total = float(totals[idx].item())
+        count = int(round(float(totals[idx + len(metric_names)].item())))
+        summary[name] = float("nan") if count <= 0 else total / count
 
-    summary_df = _summarize_metrics(merged) if not merged.empty else pd.DataFrame()
-    summary_df.to_csv(results_dir / "summary_metrics.csv", index=False)
-    logger.info("Saved merged evaluation results to %s", results_dir)
+    pd.DataFrame([summary]).to_csv(results_dir / "summary_metrics.csv", index=False)
+    logger.info("Saved evaluation summary to %s", results_dir / "summary_metrics.csv")
 
 
 def _log_run_summary(
@@ -356,11 +366,6 @@ def run_evaluation(
     paths = prepare_evaluation_paths(runtime=runtime)
     logger = ExperimentLogger(name="evaluate_grn", paths=paths, runtime=runtime)
     results_dir = paths.root / "results"
-    configs_dir = results_dir / "configs"
-
-    if runtime.is_main:
-        save_yaml_config(configs_dir / "sfm.yaml", sfm_config)
-        save_yaml_config(configs_dir / "eval_grn.yaml", eval_grn_config)
 
     data_assets = build_pretraining_assets(config=config, runtime=runtime)
     evaluation_grn_df = _load_evaluation_grn(evaluator_cfg["evaluation_grn_path"])
@@ -403,7 +408,9 @@ def run_evaluation(
             num_eval_edges=int(eval_cache.pair_keys.numel()),
         )
 
-    all_rows: list[pd.DataFrame] = []
+    metric_names = ["auprc_ratio", "auroc", "ep_ratio"]
+    metric_sums = {name: 0.0 for name in metric_names}
+    metric_counts = {name: 0 for name in metric_names}
     with torch.no_grad():
         for file_index, path in enumerate(data_assets.train_paths, start=1):
             data_bundle = build_data_bundle_for_path(
@@ -432,20 +439,21 @@ def run_evaluation(
                     token_dict=data_assets.token_dict,
                     evaluation_grn_df=evaluation_grn_df,
                 )
-                batch_metrics["rank"] = runtime.rank
-                batch_metrics["file_index"] = file_index
-                batch_metrics["file_path"] = str(path)
-                batch_metrics["batch_index"] = batch_idx
-                batch_metrics["cell_index_global"] = range(batch_offset, batch_offset + len(batch_metrics))
+                for name in metric_names:
+                    series = batch_metrics[name].dropna()
+                    metric_sums[name] += float(series.sum())
+                    metric_counts[name] += int(series.shape[0])
                 batch_offset += len(batch_metrics)
-                all_rows.append(batch_metrics)
 
             _release_data_bundle(data_bundle)
 
-    rank_df = pd.concat(all_rows, ignore_index=True) if all_rows else pd.DataFrame()
-    _save_rank_metrics(rank_df=rank_df, paths=paths, runtime=runtime)
-    _merge_rank_metrics(paths=paths, runtime=runtime, logger=logger)
-    barrier()
+    _save_summary_metrics(
+        metric_sums=metric_sums,
+        metric_counts=metric_counts,
+        paths=paths,
+        runtime=runtime,
+        logger=logger,
+    )
 
     if runtime.is_main:
         logger.info("Evaluation finished. Results are under %s", results_dir)

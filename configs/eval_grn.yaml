@@ -49,5 +49,5 @@ data:
 
 evaluator:
   checkpoint_path: checkpoints/sfm_latest.pt
-  evaluation_grn_path: resources/OmniPath.csv
+  evaluation_grn_path: /data1021/xukaichen/data/GRN/networks/hSTRING.csv
   foundation_name: sfm

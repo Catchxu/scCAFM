@@ -13,6 +13,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from data_config import normalize_organism, organism_output_name
+
 
 def _load_queries(query_list_path: Path):
     queries = []
@@ -73,12 +75,26 @@ def main():
         action="store_true",
         help="Skip a partition if its output .h5ad file already exists.",
     )
+    parser.add_argument(
+        "--organism",
+        type=str,
+        default="Homo sapiens",
+        help="Organism to download: Homo sapiens or Mus musculus.",
+    )
+    parser.add_argument(
+        "--token-dict-path",
+        type=str,
+        default=None,
+        help="Optional path to token_dict.csv. If provided, keep only genes found in the token dictionary.",
+    )
     args = parser.parse_args()
 
     script_dir = Path(__file__).resolve().parent
     query_list = Path(args.query_list).expanduser().resolve()
     index_dir = Path(args.index_dir).expanduser().resolve()
     output_dir = Path(args.output_dir).expanduser().resolve()
+    normalized_organism = normalize_organism(args.organism)
+    organism_dir = organism_output_name(normalized_organism)
 
     if not query_list.is_file():
         raise FileNotFoundError(f"query list not found: {query_list}")
@@ -101,12 +117,14 @@ def main():
                     q,
                     "--output-dir",
                     str(index_dir),
+                    "--organism",
+                    normalized_organism,
                 ],
                 cwd=script_dir,
             )
 
     for q in queries:
-        idx_file = index_dir / f"{q}.idx"
+        idx_file = index_dir / organism_dir / f"{q}.idx"
         if not idx_file.is_file():
             raise FileNotFoundError(
                 f"missing index for query '{q}': {idx_file}. "
@@ -122,7 +140,7 @@ def main():
         print(f"[info] query={q}, cells={total_cells}, partitions={n_parts}")
 
         for part_idx in range(n_parts):
-            out_file = output_dir / q / f"partition_{part_idx}.h5ad"
+            out_file = output_dir / organism_dir / q / f"partition_{part_idx}.h5ad"
             if args.resume and out_file.exists():
                 print(f"[skip] exists: {out_file}")
                 continue
@@ -141,6 +159,9 @@ def main():
                     str(index_dir),
                     "--max-partition-size",
                     str(args.max_partition_size),
+                    "--organism",
+                    normalized_organism,
+                    *([] if not args.token_dict_path else ["--token-dict-path", str(Path(args.token_dict_path).expanduser().resolve())]),
                 ],
                 cwd=script_dir,
             )

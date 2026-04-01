@@ -1,9 +1,10 @@
-heart
-blood
 brain
-lung
 kidney
 intestine
-pancreas
-others
+heart
+lung
+blood
+liver
+breast
+thymus
 pan-cancer

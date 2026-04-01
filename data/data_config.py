@@ -1,11 +1,24 @@
-
-
+from pathlib import Path
 
 MAJOR_TISSUE_LIST  = ["heart", "blood", "brain", "lung", "kidney", "intestine", "pancreas"]
 VERSION = "2023-05-15"
 
-CANCER_LIST_PATH = "./cancer_list.txt"
-with open(CANCER_LIST_PATH) as f:
+ORGANISM_TO_CENSUS_KEY = {
+    "Homo sapiens": "homo_sapiens",
+    "Mus musculus": "mus_musculus",
+}
+
+ORGANISM_ALIASES = {
+    "human": "Homo sapiens",
+    "homo sapiens": "Homo sapiens",
+    "homo_sapiens": "Homo sapiens",
+    "mouse": "Mus musculus",
+    "mus musculus": "Mus musculus",
+    "mus_musculus": "Mus musculus",
+}
+
+CANCER_LIST_PATH = Path(__file__).resolve().with_name("cancer_list.txt")
+with CANCER_LIST_PATH.open() as f:
     CANCER_LIST = [line.rstrip('\n') for line in f]
 
 #  build the value filter dict for each tissue
@@ -26,6 +39,21 @@ for disease in CANCER_LIST:
     else:
         cancer_condition = f"{cancer_condition} or (disease == '{disease}')"
 VALUE_FILTER['pan-cancer'] = f"(suspension_type != 'na') and ({cancer_condition})"
+
+
+def normalize_organism(name: str) -> str:
+    key = str(name).strip().lower()
+    if key not in ORGANISM_ALIASES:
+        raise ValueError(
+            f"Unsupported organism: {name!r}. "
+            "Expected one of: Homo sapiens, Mus musculus, human, mouse."
+        )
+    return ORGANISM_ALIASES[key]
+
+
+def organism_output_name(name: str) -> str:
+    normalized = normalize_organism(name)
+    return "human" if normalized == "Homo sapiens" else "mouse"
 
 if __name__ == "__main__":
     # print(VALUE_FILTER["others"])
