@@ -1,7 +1,7 @@
 from pathlib import Path
 
-MAJOR_TISSUE_LIST  = ["brain", "kidney", "intestine", "heart", "lung", "blood", "liver", "breast", "thymus"]
-VERSION = "2023-05-15"
+MAJOR_TISSUE_LIST  = ["brain", "kidney", "intestine", "heart", "lung", "blood", "liver", "breast"]
+VERSION = "2024-07-01"
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_HOMOLOGY_PATH = ROOT_DIR / "resources" / "homologous.csv"
 

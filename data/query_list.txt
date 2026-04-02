@@ -6,5 +6,4 @@ lung
 blood
 liver
 breast
-thymus
 pan-cancer
