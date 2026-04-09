@@ -73,8 +73,6 @@ def validate_factor_shapes(
     tensors = {
         "u": factors.u,
         "v": factors.v,
-        "u_score": factors.u_score,
-        "v_score": factors.v_score,
     }
     for name, tensor in tensors.items():
         if tensor.ndim != 3:

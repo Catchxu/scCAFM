@@ -11,7 +11,7 @@ sfm:
   embedding_dropout: 0.1
   gene_embedding_ckpt: checkpoints/gene_embeddings.pt
   freeze_loaded_gene_embeddings: false
-  num_layers: 8
+  num_layers: 12
   num_heads: 12
   backbone_mlp_hidden_dim: 3072
   attn_dropout: 0.1
@@ -28,7 +28,6 @@ sfm:
   router_dropout: 0.1
   topk: 32
   router_temperature: 1.0
-  score_clip: 10.0
   beta_momentum: 1.0
 
 vgae:

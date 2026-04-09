@@ -354,25 +354,19 @@ class ScEmbedding(nn.Module):
         payload = torch.load(str(ckpt), map_location="cpu")
         if not isinstance(payload, dict):
             raise ValueError(f"Invalid checkpoint format at {ckpt}: expected dict payload.")
-        if "gene_symbols" not in payload or "embeddings" not in payload:
+        if "embeddings" not in payload:
             raise ValueError(
-                f"Invalid checkpoint format at {ckpt}: expected keys 'gene_symbols' and 'embeddings'."
+                f"Invalid checkpoint format at {ckpt}: expected key 'embeddings'."
             )
 
-        gene_symbols = payload["gene_symbols"]
+        gene_symbols = payload.get("gene_symbols")
+        token_indices = payload.get("token_indices")
         embeddings = payload["embeddings"]
-        if not isinstance(gene_symbols, list):
-            raise ValueError(f"Invalid `gene_symbols` type in {ckpt}: expected list.")
         if not torch.is_tensor(embeddings):
             raise ValueError(f"Invalid `embeddings` type in {ckpt}: expected torch.Tensor.")
         if embeddings.ndim != 2:
             raise ValueError(
                 f"Invalid embedding shape in {ckpt}: expected 2D tensor, got {tuple(embeddings.shape)}."
-            )
-        if len(gene_symbols) != embeddings.shape[0]:
-            raise ValueError(
-                f"Checkpoint row mismatch in {ckpt}: "
-                f"len(gene_symbols)={len(gene_symbols)} vs embeddings.shape[0]={embeddings.shape[0]}."
             )
         if embeddings.shape[1] != self.embed_dim:
             raise ValueError(
@@ -380,29 +374,69 @@ class ScEmbedding(nn.Module):
                 f"{embeddings.shape[1]} vs model embed_dim={self.embed_dim}."
             )
 
+        use_direct_token_indices = token_indices is not None
+        if use_direct_token_indices:
+            if not isinstance(token_indices, list):
+                raise ValueError(f"Invalid `token_indices` type in {ckpt}: expected list.")
+            if len(token_indices) != embeddings.shape[0]:
+                raise ValueError(
+                    f"Checkpoint row mismatch in {ckpt}: "
+                    f"len(token_indices)={len(token_indices)} vs embeddings.shape[0]={embeddings.shape[0]}."
+                )
+        else:
+            if not isinstance(gene_symbols, list):
+                raise ValueError(
+                    f"Invalid checkpoint format at {ckpt}: expected list `gene_symbols` when "
+                    "`token_indices` is not provided."
+                )
+            if len(gene_symbols) != embeddings.shape[0]:
+                raise ValueError(
+                    f"Checkpoint row mismatch in {ckpt}: "
+                    f"len(gene_symbols)={len(gene_symbols)} vs embeddings.shape[0]={embeddings.shape[0]}."
+                )
+
         symbol_to_index: dict[str, int] = {}
+        freezable_indices: set[int] = set()
         if "gene_symbol" in token_dict.columns:
             for _, row in token_dict.iterrows():
-                symbol = str(row["gene_symbol"]).strip().upper()
+                token_index = int(row["token_index"])
+                symbol_raw = row["gene_symbol"]
+                symbol = "" if pd.isna(symbol_raw) else str(symbol_raw).strip().upper()
                 if symbol:
-                    symbol_to_index[symbol] = int(row["token_index"])
+                    symbol_to_index[symbol] = token_index
+                    freezable_indices.add(token_index)
 
         copied = 0
         mask = torch.zeros(self.gene_vocab_size, dtype=torch.bool)
         emb_cpu = embeddings.to(torch.float32).cpu()
         with torch.no_grad():
-            for row_idx, symbol in enumerate(gene_symbols):
-                token_index = symbol_to_index.get(str(symbol).strip().upper())
-                if token_index is None:
-                    continue
-                self.gene_embedding.weight.data[token_index] = emb_cpu[row_idx].to(
-                    self.gene_embedding.weight.dtype
-                )
-                mask[token_index] = True
-                copied += 1
+            if use_direct_token_indices:
+                for row_idx, token_index in enumerate(token_indices):
+                    token_index = int(token_index)
+                    if not 0 <= token_index < self.gene_vocab_size:
+                        raise ValueError(
+                            f"Checkpoint token index out of range in {ckpt}: {token_index}."
+                        )
+                    self.gene_embedding.weight.data[token_index] = emb_cpu[row_idx].to(
+                        self.gene_embedding.weight.dtype
+                    )
+                    if token_index in freezable_indices:
+                        mask[token_index] = True
+                    copied += 1
+            else:
+                for row_idx, symbol in enumerate(gene_symbols):
+                    token_index = symbol_to_index.get(str(symbol).strip().upper())
+                    if token_index is None:
+                        continue
+                    self.gene_embedding.weight.data[token_index] = emb_cpu[row_idx].to(
+                        self.gene_embedding.weight.dtype
+                    )
+                    if token_index in freezable_indices:
+                        mask[token_index] = True
+                    copied += 1
 
         self.loaded_gene_embedding_ckpt = str(ckpt)
-        self.loaded_gene_embedding_total = len(gene_symbols)
+        self.loaded_gene_embedding_total = int(embeddings.shape[0])
         self.loaded_gene_embedding_count = copied
         self._loaded_gene_embedding_mask = mask
 

@@ -60,7 +60,7 @@ class VariationalEncoder(nn.Module):
 
     Inputs:
     - `expression_values`: (C, G)
-    - `factors.u`, `factors.v`, `factors.u_score`, `factors.v_score`: (C, G, M)
+    - `factors.u`, `factors.v`: (C, G, M)
     Outputs:
     - `mu_z`, `sigma_z`: (C, G)
     """
@@ -80,9 +80,8 @@ class VariationalEncoder(nn.Module):
         expr_features: torch.Tensor,
         factors: FactorState,
     ) -> torch.Tensor:
-        u_eff, v_eff = factors.effective_factors()
-        tf_summary = torch.einsum("cgm,cgh->cmh", u_eff, expr_features)
-        return torch.einsum("cgm,cmh->cgh", v_eff, tf_summary)
+        tf_summary = torch.einsum("cgm,cgh->cmh", factors.u, expr_features)
+        return torch.einsum("cgm,cmh->cgh", factors.v, tf_summary)
 
     def forward(
         self,
@@ -134,9 +133,8 @@ class VariationalDecoder(nn.Module):
         token_features: torch.Tensor,
         factors: FactorState,
     ) -> torch.Tensor:
-        u_eff, v_eff = factors.effective_factors()
-        tf_summary = torch.einsum("cgm,cgh->cmh", u_eff, token_features)
-        return torch.einsum("cgm,cmh->cgh", v_eff, tf_summary)
+        tf_summary = torch.einsum("cgm,cgh->cmh", factors.u, token_features)
+        return torch.einsum("cgm,cmh->cgh", factors.v, tf_summary)
 
     def decode(
         self,
@@ -186,7 +184,7 @@ class VGAE(nn.Module):
     - `non_tf_mask`: (C, G), True for non-TF genes
 
     Expected factor entries:
-    - `u`, `v`, `u_score`, `v_score`: (C, G, M)
+    - `u`, `v`: (C, G, M)
     """
 
     def __init__(

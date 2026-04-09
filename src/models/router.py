@@ -174,7 +174,7 @@ class GeneRouter(nn.Module):
 
     The output keeps the full gene-token sequence length `(C, G, M)`. Tokens
     where `non_tf_mask` is `True` or `padding_mask` is `True` receive zero
-    probabilities and zero scores.
+    probabilities.
     """
 
     def __init__(
@@ -185,7 +185,6 @@ class GeneRouter(nn.Module):
         dropout: float = 0.1,
         topk: Optional[int] = 32,
         temperature: float = 1.0,
-        score_clip: float = 10.0,
         beta_momentum: float = 1.0,
         **_: object,
     ) -> None:
@@ -203,13 +202,12 @@ class GeneRouter(nn.Module):
         self.hidden_dim = hidden_dim
         self.topk = topk
         self.temperature = float(temperature)
-        self.score_clip = float(score_clip)
 
         self.mlp = nn.Sequential(
             nn.Linear(embed_dim, hidden_dim),
             nn.SiLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, 2 * num_factors),
+            nn.Linear(hidden_dim, num_factors),
         )
 
         self.gating = (
@@ -279,7 +277,7 @@ class GeneRouter(nn.Module):
         x: torch.Tensor,
         non_tf_mask: Optional[torch.Tensor] = None,
         padding_mask: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         if x.ndim != 3:
             raise ValueError(f"`x` must have shape (C, L, D), got {tuple(x.shape)}.")
         if x.shape[-1] != self.embed_dim:
@@ -299,14 +297,10 @@ class GeneRouter(nn.Module):
         )
 
         logits = self.mlp(gene_tokens)
-        prob_logits, scores = torch.split(logits, self.num_factors, dim=-1)
-        scores = scores.clamp(min=-self.score_clip, max=self.score_clip)
-        scores = scores.masked_fill(~active_mask.unsqueeze(-1), 0.0)
-
-        probs = torch.zeros_like(prob_logits)
-        active_logits = prob_logits[active_mask]
+        probs = torch.zeros_like(logits)
+        active_logits = logits[active_mask]
         if active_logits.numel() == 0:
-            return probs, scores
+            return probs
 
         if self.gating is not None:
             probs[active_mask] = self.gating(
@@ -319,7 +313,7 @@ class GeneRouter(nn.Module):
                 dim=-1,
             )
 
-        return probs, scores
+        return probs
 
 
 
@@ -356,14 +350,13 @@ if __name__ == "__main__":
         dropout=0.0,
         topk=2,
         temperature=0.7,
-        score_clip=5.0,
     )
     router.eval()
 
     active_mask = ~non_tf_mask & ~padding_mask
 
     with torch.no_grad():
-        probs, scores = router(
+        probs = router(
             x,
             non_tf_mask=non_tf_mask,
             padding_mask=padding_mask,
@@ -373,12 +366,10 @@ if __name__ == "__main__":
     print("non_tf_mask_shape:", tuple(non_tf_mask.shape))
     print("padding_mask_shape:", tuple(padding_mask.shape))
     print("probs_shape:", tuple(probs.shape))
-    print("scores_shape:", tuple(scores.shape))
     print("active_mask_shape:", tuple(active_mask.shape))
     print("active_mask:")
     print(active_mask)
     print("inactive_probs_zero:", bool((probs[~active_mask] == 0).all()))
-    print("inactive_scores_zero:", bool((scores[~active_mask] == 0).all()))
     print(
         "active_topk_counts:",
         probs[active_mask].gt(0).sum(dim=-1).tolist() if active_mask.any() else [],

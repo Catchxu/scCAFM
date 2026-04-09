@@ -23,7 +23,6 @@ class PriorLoss(nn.Module):
 
     Notes:
     - This loss constrains `u` and `v` only.
-    - `u_score` and `v_score` are intentionally ignored.
     - Source positions are restricted to active TF genes; target positions are
       restricted to active genes.
     """

@@ -178,6 +178,6 @@ cython_debug/
 checkpoints/
 logs/
 results/
-gene_go_terms.csv
+.codex
 slurm-*.out
 slurm-*.err

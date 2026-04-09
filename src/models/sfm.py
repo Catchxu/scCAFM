@@ -14,10 +14,10 @@ from .embedding import ScEmbedding
 from .router import GeneRouter
 
 
-@dataclass
+@dataclass(slots=True)
 class FactorState:
     """
-    Factor assignments and score heads produced by the two routers.
+    Lightweight container for the two factor-assignment tensors.
 
     Shape convention:
     - `G`: gene-token length
@@ -26,27 +26,10 @@ class FactorState:
     Tensor shapes:
     - `u`: (C, G, M)
     - `v`: (C, G, M)
-    - `u_score`: (C, G, M)
-    - `v_score`: (C, G, M)
     """
 
     u: torch.Tensor
     v: torch.Tensor
-    u_score: torch.Tensor
-    v_score: torch.Tensor
-
-    def effective_factors(self) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Return score-weighted factor assignments.
-
-        Returns:
-        - `u_eff`: (C, G, M)
-        - `v_eff`: (C, G, M)
-        """
-
-        u_eff = self.u * self.u_score
-        v_eff = self.v * self.v_score
-        return u_eff, v_eff
 
 
 class SFM(nn.Module):
@@ -92,7 +75,6 @@ class SFM(nn.Module):
         router_dropout: float = 0.1,
         topk: Optional[int] = 32,
         router_temperature: float = 1.0,
-        score_clip: float = 10.0,
         beta_momentum: float = 1.0,
     ) -> None:
         super().__init__()
@@ -144,7 +126,6 @@ class SFM(nn.Module):
             dropout=router_dropout,
             topk=topk,
             temperature=router_temperature,
-            score_clip=score_clip,
             beta_momentum=beta_momentum,
         )
         self.tg_router = GeneRouter(
@@ -154,7 +135,6 @@ class SFM(nn.Module):
             dropout=router_dropout,
             topk=topk,
             temperature=router_temperature,
-            score_clip=score_clip,
             beta_momentum=beta_momentum,
         )
 
@@ -224,39 +204,30 @@ class SFM(nn.Module):
             causal=False,
         )
 
-        u, u_score = self.tf_router(
+        u = self.tf_router(
             hidden_states,
             non_tf_mask=non_tf_mask,
             padding_mask=padding_mask,
         )
-        v, v_score = self.tg_router(
+        v = self.tg_router(
             hidden_states,
             non_tf_mask=None,
             padding_mask=padding_mask,
         )
 
-        if u.shape != v.shape or u.shape != u_score.shape or u.shape != v_score.shape:
+        if u.shape != v.shape:
             raise ValueError(
-                "Expected `u`, `v`, `u_score`, and `v_score` to share shape "
-                f"(C, G, M), got {tuple(u.shape)}, {tuple(v.shape)}, "
-                f"{tuple(u_score.shape)}, and {tuple(v_score.shape)}."
+                "Expected `u` and `v` to share shape (C, G, M), got "
+                f"{tuple(u.shape)} and {tuple(v.shape)}."
             )
 
-        factors = FactorState(
-            u=u,
-            v=v,
-            u_score=u_score,
-            v_score=v_score,
-        )
-
         if compute_grn:
-            u_eff, v_eff = factors.effective_factors()
-            grn = torch.einsum("cim,cjm->cij", u_eff, v_eff)
+            grn = torch.einsum("cim,cjm->cij", u, v)
         else:
             grn = None
 
         if return_factors:
-            return grn, factors
+            return grn, FactorState(u=u, v=v)
         else:
             return grn
 
@@ -338,17 +309,13 @@ if __name__ == "__main__":
     v_row_nonzero = factors.v.ne(0).sum(dim=-1)
     u_active_rows = factors.u.ne(0).any(dim=-1)
     v_active_rows = factors.v.ne(0).any(dim=-1)
-    u_score_row_nonzero = factors.u_score.ne(0).sum(dim=-1)
-    v_score_row_nonzero = factors.v_score.ne(0).sum(dim=-1)
 
     print("grn_shape:", None if grn is None else tuple(grn.shape))
     print("u_shape:", tuple(factors.u.shape))
     print("v_shape:", tuple(factors.v.shape))
-    print("u_score_shape:", tuple(factors.u_score.shape))
-    print("v_score_shape:", tuple(factors.v_score.shape))
     print(
         "shared_factor_shapes:",
-        factors.u.shape == factors.v.shape == factors.u_score.shape == factors.v_score.shape,
+        factors.u.shape == factors.v.shape,
     )
     print("u_nonzero_per_gene:")
     print(u_row_nonzero)
@@ -363,14 +330,10 @@ if __name__ == "__main__":
         bool((v_row_nonzero[v_active_rows] == model.tg_router.topk).all()) if v_active_rows.any() else True,
     )
     print(
-        "u_score_zero_on_inactive_rows:",
-        bool((factors.u_score[~u_active_rows] == 0).all()),
+        "u_zero_on_inactive_rows:",
+        bool((factors.u[~u_active_rows] == 0).all()),
     )
     print(
-        "v_score_zero_on_inactive_rows:",
-        bool((factors.v_score[~v_active_rows] == 0).all()),
+        "v_zero_on_inactive_rows:",
+        bool((factors.v[~v_active_rows] == 0).all()),
     )
-    print("u_score_nonzero_per_gene:")
-    print(u_score_row_nonzero)
-    print("v_score_nonzero_per_gene:")
-    print(v_score_row_nonzero)
