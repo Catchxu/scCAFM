@@ -29,15 +29,38 @@ git clone https://github.com/Catchxu/scCAFM.git
 cd scCAFM
 pip install .
 ```
-where the `assets/` and `configs/` directories are included automatically in the package, so you don’t need to copy them manually.
+The package includes the runtime code and `configs/`, but model assets are not bundled with the install. By default, scCAFM resolves model assets from the Hugging Face model repo `kaichenxu/scCAFM` through `model_source`.
 
-If you encounter the conflicts of dependencies while using scCAFM, you can report the errors at [Issues](https://github.com/Catchxu/scCAFM/issues). In this case, we also recommend that you can try installing a strict and reproducible environment which is verified that there are no conflicts:
+If you want a local asset copy instead of on-demand HF resolution, you can download it manually:
 ```bash
-pip install .[server]
+hf download kaichenxu/scCAFM --local-dir assets
 ```
-where exact versions of dependencies are specified.
 
-For better attention efficiency, we strongly recommend installing FlashAttention for your specific hardware/software environment by following the official installation instructions in the FlashAttention repository: https://github.com/Dao-AILab/flash-attention. After installation, please run the upstream validation tests from the same repository to confirm everything is working correctly.
+If you encounter dependency conflicts while using scCAFM, please report them at [Issues](https://github.com/Catchxu/scCAFM/issues). For this repository's current Python 3.12 environment, we also provide an exact pinned extra in `pyproject.toml`:
+```bash
+pip install .[py312]
+```
+
+Please note that GPU-specific packages such as FlashAttention still depend on your CUDA, PyTorch, compiler, and GPU stack.
+
+
+## FlashAttention
+scCAFM uses FlashAttention in the transformer attention path when `flash-attn` is installed in your environment.
+
+Current behavior:
+* The runtime prefers the newer CuTe / FA4-style kernels when available.
+* If the CuTe / FA4 path raises an error, scCAFM automatically falls back to the FA2 kernels.
+* Attention dropout is disabled in this path, so FA4 and FA2 use the same effective behavior.
+
+We recommend installing FlashAttention for your specific hardware and software environment by following the official repository instructions:
+
+* https://github.com/Dao-AILab/flash-attention
+
+After installation, you can validate the local attention backend with:
+
+```bash
+python -m src.models.attention
+```
 
 
 ## Hugging Face assets
@@ -64,13 +87,13 @@ Project configs now default to:
 model_source: kaichenxu/scCAFM
 ```
 
-For local development, you can still point to the bundled assets directory instead:
+For local development, you can still point to a locally downloaded `assets/` directory instead:
 
 ```yaml
 model_source: assets
 ```
 
-This makes it easy to work with either the published HF repo or the bundled local `assets/` directory. In the current package layout, model files live under `models/` and supporting CSV files stay at the asset root.
+This makes it easy to work with either the published HF repo or a locally downloaded `assets/` directory. In the current package layout, model files live under `models/` and supporting CSV files stay at the asset root.
 
 
 ## Data download

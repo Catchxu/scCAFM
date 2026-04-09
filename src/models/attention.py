@@ -1,9 +1,18 @@
+import warnings
+
 import torch
 import torch.nn as nn
 
 from flash_attn import flash_attn_qkvpacked_func, flash_attn_varlen_qkvpacked_func
 from flash_attn.layers.rotary import RotaryEmbedding
 from flash_attn.bert_padding import unpad_input, pad_input
+
+try:
+    from flash_attn.cute import flash_attn_func as cute_flash_attn_func
+    from flash_attn.cute import flash_attn_varlen_func as cute_flash_attn_varlen_func
+except ImportError:
+    cute_flash_attn_func = None
+    cute_flash_attn_varlen_func = None
 
 
 class FlashMHA(nn.Module):
@@ -14,14 +23,15 @@ class FlashMHA(nn.Module):
     - `L`: full sequence length
 
     Upgrades:
-    1. Uses flash_attn_qkvpacked_func in the no-padding path
-    2. Uses flash_attn.bert_padding unpad/pad utilities in the masked path
+    1. Prefers the CuTe / FA4-style kernels when available and compatible
+    2. Falls back to the FA2 packed-QKV kernels if CuTe is unavailable or fails
+    3. Uses flash_attn.bert_padding unpad/pad utilities in the masked path
 
     Args:
         embed_dim: model dimension
         num_heads: number of attention heads
         use_rotary: whether to apply RoPE to Q/K
-        attn_dropout: attention dropout probability
+        attn_dropout: retained for config compatibility; attention dropout is disabled
         qkv_bias: bias for fused qkv projection
         out_bias: bias for output projection
         rotary_base: RoPE base
@@ -33,7 +43,6 @@ class FlashMHA(nn.Module):
         embed_dim: int,
         num_heads: int = 8,
         use_rotary: bool = False,
-        attn_dropout: float = 0.0,
         qkv_bias: bool = True,
         out_bias: bool = True,
         rotary_base: float = 10000.0,
@@ -50,8 +59,11 @@ class FlashMHA(nn.Module):
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
         self.use_rotary = use_rotary
-        self.attn_dropout = attn_dropout
         self.softmax_scale = self.head_dim ** -0.5
+        self._fa4_available = (
+            cute_flash_attn_func is not None and cute_flash_attn_varlen_func is not None
+        )
+        self._fa4_runtime_disabled = False
 
         self.qkv_proj = nn.Linear(embed_dim, 3 * embed_dim, bias=qkv_bias)
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=out_bias)
@@ -69,6 +81,126 @@ class FlashMHA(nn.Module):
             )
         else:
             self.rotary_emb = None
+
+    def _should_try_fa4(self) -> bool:
+        return self._fa4_available and not self._fa4_runtime_disabled
+
+    def _disable_fa4(self, exc: Exception) -> None:
+        if not self._fa4_runtime_disabled:
+            warnings.warn(
+                f"FA4/CuTe attention failed ({type(exc).__name__}: {exc}). Falling back to FA2.",
+                stacklevel=2,
+            )
+        self._fa4_runtime_disabled = True
+
+    @staticmethod
+    def _normalize_attention_output(output: torch.Tensor | tuple[torch.Tensor, ...]) -> torch.Tensor:
+        if torch.is_tensor(output):
+            return output
+        if isinstance(output, tuple) and output and torch.is_tensor(output[0]):
+            return output[0]
+        raise TypeError(
+            "Attention kernel returned an unsupported output type: "
+            f"{type(output).__name__}"
+        )
+
+    def _run_fa2_dense(self, qkv: torch.Tensor, *, causal: bool) -> torch.Tensor:
+        return flash_attn_qkvpacked_func(
+            qkv,
+            dropout_p=0.0,
+            softmax_scale=self.softmax_scale,
+            causal=causal,
+        )
+
+    def _run_fa4_dense(
+        self,
+        qkv: torch.Tensor,
+        *,
+        causal: bool,
+    ) -> torch.Tensor:
+        q, k, v = qkv.unbind(dim=2)
+        return self._normalize_attention_output(
+            cute_flash_attn_func(
+                q,
+                k,
+                v,
+                softmax_scale=self.softmax_scale,
+                causal=causal,
+            )
+        )
+
+    def _run_fa2_varlen(
+        self,
+        qkv_unpad: torch.Tensor,
+        *,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
+        causal: bool,
+    ) -> torch.Tensor:
+        return flash_attn_varlen_qkvpacked_func(
+            qkv_unpad,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+            dropout_p=0.0,
+            softmax_scale=self.softmax_scale,
+            causal=causal,
+        )
+
+    def _run_fa4_varlen(
+        self,
+        qkv_unpad: torch.Tensor,
+        *,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
+        causal: bool,
+    ) -> torch.Tensor:
+        q_unpad, k_unpad, v_unpad = qkv_unpad.unbind(dim=1)
+        return self._normalize_attention_output(
+            cute_flash_attn_varlen_func(
+                q_unpad,
+                k_unpad,
+                v_unpad,
+                cu_seqlens_q=cu_seqlens,
+                cu_seqlens_k=cu_seqlens,
+                max_seqlen_q=max_seqlen,
+                max_seqlen_k=max_seqlen,
+                softmax_scale=self.softmax_scale,
+                causal=causal,
+            )
+        )
+
+    def _run_dense_attention(self, qkv: torch.Tensor, *, causal: bool) -> torch.Tensor:
+        if self._should_try_fa4():
+            try:
+                return self._run_fa4_dense(qkv, causal=causal)
+            except Exception as exc:
+                self._disable_fa4(exc)
+        return self._run_fa2_dense(qkv, causal=causal)
+
+    def _run_varlen_attention(
+        self,
+        qkv_unpad: torch.Tensor,
+        *,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
+        causal: bool,
+    ) -> torch.Tensor:
+        if self._should_try_fa4():
+            try:
+                return self._run_fa4_varlen(
+                    qkv_unpad,
+                    cu_seqlens=cu_seqlens,
+                    max_seqlen=max_seqlen,
+                    causal=causal,
+                )
+            except Exception as exc:
+                self._disable_fa4(exc)
+        return self._run_fa2_varlen(
+            qkv_unpad,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+            causal=causal,
+        )
 
     def forward(
         self,
@@ -102,8 +234,6 @@ class FlashMHA(nn.Module):
             if key_padding_mask.dtype != torch.bool:
                 key_padding_mask = key_padding_mask.to(torch.bool)
 
-        dropout_p = self.attn_dropout if self.training else 0.0
-
         # (B, L, 3D) -> (B, L, 3, H, Dh)
         qkv = self.qkv_proj(x).reshape(B, L, 3, self.num_heads, self.head_dim)
 
@@ -114,12 +244,7 @@ class FlashMHA(nn.Module):
         # Path 1: no padding -> packed QKV FlashAttention
         # ------------------------------------------------------------
         if key_padding_mask is None:
-            out = flash_attn_qkvpacked_func(
-                qkv,
-                dropout_p=dropout_p,
-                softmax_scale=self.softmax_scale,
-                causal=causal,
-            )
+            out = self._run_dense_attention(qkv, causal=causal)
             out = out.reshape(B, L, self.embed_dim)
             out = self.out_proj(out)
             return out
@@ -151,12 +276,10 @@ class FlashMHA(nn.Module):
             out = out.masked_fill(key_padding_mask.unsqueeze(-1), 0.0)
             return out
 
-        out_unpad = flash_attn_varlen_qkvpacked_func(
+        out_unpad = self._run_varlen_attention(
             qkv_unpad,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
-            dropout_p=dropout_p,
-            softmax_scale=self.softmax_scale,
             causal=causal,
         )
 
@@ -181,11 +304,14 @@ if __name__ == "__main__":
     model = FlashMHA(
         embed_dim=64,
         num_heads=8,
-        use_rotary=True,
-        attn_dropout=0.0,
+        use_rotary=True
     ).to(device)
     model = model.half()
     model.eval()
+
+    fa4_requested = model._should_try_fa4()
+    print("fa4_available:", model._fa4_available)
+    print("fa4_requested:", fa4_requested)
 
     x = torch.randn(2, 16, 64, device=device, dtype=torch.float16)
     key_padding_mask = torch.zeros(2, 16, device=device, dtype=torch.bool)
@@ -193,10 +319,14 @@ if __name__ == "__main__":
 
     with torch.no_grad():
         out_no_padding = model(x, key_padding_mask=None, causal=False)
+        dense_backend = "fa2" if model._fa4_runtime_disabled else ("fa4" if fa4_requested else "fa2")
         out_with_padding = model(x, key_padding_mask=key_padding_mask, causal=False)
+        varlen_backend = "fa2" if model._fa4_runtime_disabled else ("fa4" if fa4_requested else "fa2")
 
     print("device:", out_no_padding.device)
     print("dtype:", out_no_padding.dtype)
     print("no_padding_shape:", tuple(out_no_padding.shape))
+    print("dense_backend:", dense_backend)
     print("with_padding_shape:", tuple(out_with_padding.shape))
+    print("varlen_backend:", varlen_backend)
     print("masked_tail_norm:", out_with_padding[1, 12:].abs().sum().item())

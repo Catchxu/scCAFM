@@ -1,7 +1,7 @@
 [project]
 name = "scCAFM"
 version = "0.1.0"
-description = "Causality-aware single-cell RNA-Seq foundation model with causal gene regulation modeling"
+description = "Building a causality-aware single-cell RNA-seq foundation model via context-specific causal regulation modeling"
 authors = [
     { name = "Kaichen Xu", email = "KXU248@emory.edu" }
 ]
@@ -18,11 +18,14 @@ keywords = [
 ]
 
 dependencies = [
+    "anndata>=0.12,<0.13",
     "huggingface_hub>=0.30,<1.0",
     "numpy>=1.24,<3.0",
     "pandas>=2.0,<3.0",
     "safetensors>=0.4,<1.0",
     "scanpy>=1.10,<2.0",
+    "scikit-learn>=1.5,<2.0",
+    "scipy>=1.14,<2.0",
     "torch>=2.0",
     "leidenalg>=0.10",
     "tqdm>=4.20.0",
@@ -38,18 +41,20 @@ dev = [
     "mypy",
 ]
 
-server = [
-    "numpy==2.3.5",
+py312 = [
+    "anndata==0.12.10",
+    "huggingface_hub==0.36.2",
+    "numpy==2.2.6",
     "pandas==2.3.3",
-    "scanpy==1.11.5",
-    "torch==2.9.1+cu130",
-    "leidenalg==0.10.2",
-    "tqdm==4.67.1",
-    "PyYAML==6.0.3"
-]
-
-cuda = [
-    "torch==2.9.1+cu130",
+    "PyYAML==6.0.3",
+    "safetensors==0.7.0",
+    "scanpy==1.12",
+    "scikit-learn==1.5.2",
+    "scipy==1.14.1",
+    "torch==2.10.0+cu128",
+    "leidenalg==0.11.0",
+    "tqdm==4.67.3",
+    "flash-attn==2.8.3",
 ]
 
 
@@ -66,7 +71,6 @@ sccafm-pretrain = "src.trainer.pretrain:main"
 [tool.hatch.build.targets.wheel]
 packages = [
     "src",
-    "assets",
     "configs"
 ]
 
@@ -76,7 +80,6 @@ include = [
     "src",
     "README.md",
     "configs",
-    "assets",
 ]
 
 
