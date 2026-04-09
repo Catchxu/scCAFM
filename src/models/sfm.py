@@ -241,6 +241,7 @@ if __name__ == "__main__":
     import numpy as np
     from anndata import AnnData
 
+    from ..assets import resolve_model_assets
     from ..data.tokenizer import ScTokenizer
 
     if not torch.cuda.is_available():
@@ -248,9 +249,10 @@ if __name__ == "__main__":
 
     root_dir = Path(__file__).resolve().parents[2]
     device = torch.device("cuda")
-    token_dict = load_vocab_json(root_dir / "assets" / "vocab.json")
-    human_tfs = pd.read_csv(root_dir / "assets" / "human_tfs.csv")
-    mouse_tfs = pd.read_csv(root_dir / "assets" / "mouse_tfs.csv")
+    assets = resolve_model_assets(root_dir / "assets")
+    token_dict = load_vocab_json(assets.vocab)
+    human_tfs = pd.read_csv(assets.human_tfs)
+    mouse_tfs = pd.read_csv(assets.mouse_tfs)
 
     obs = pd.DataFrame(
         {

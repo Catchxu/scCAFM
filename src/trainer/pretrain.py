@@ -465,6 +465,8 @@ def main() -> None:
             assets=assets,
             runtime=runtime,
             logger=logger,
+            config=config,
+            data_assets=data_assets,
         )
         model_state = checkpoint_manager.load_model_weights()
         resume_payload = checkpoint_manager.load_resume_state(args.resume)

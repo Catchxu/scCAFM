@@ -77,10 +77,13 @@ if __name__ == "__main__":
     import numpy as np
     import pandas as pd
 
+    from ..assets import resolve_model_assets
+
     root_dir = Path(__file__).resolve().parents[2]
-    token_dict = load_vocab_json(root_dir / "assets" / "vocab.json")
-    human_tfs = pd.read_csv(root_dir / "assets" / "human_tfs.csv")
-    mouse_tfs = pd.read_csv(root_dir / "assets" / "mouse_tfs.csv")
+    assets = resolve_model_assets(root_dir / "assets")
+    token_dict = load_vocab_json(assets.vocab)
+    human_tfs = pd.read_csv(assets.human_tfs)
+    mouse_tfs = pd.read_csv(assets.mouse_tfs)
 
     obs = pd.DataFrame(
         {

@@ -43,13 +43,11 @@ For better attention efficiency, we strongly recommend installing FlashAttention
 ## Hugging Face assets
 scCAFM now uses an asset package that is compatible with both a local directory and a Hugging Face model repository. The canonical asset files are:
 
-* `sfm_config.json`
-* `sfm_model.safetensors`
-* `efm_config.json`
-* `efm_model.safetensors`
-* `vocab.json`
-* `vocab.safetensors`
-* supporting CSV files such as `cond_dict.csv`, `human_tfs.csv`, `mouse_tfs.csv`, `OmniPath.csv` and `homologous.csv`
+* `models/sfm_config.json`
+* `models/sfm_model.safetensors`
+* `models/vocab.json`
+* `models/vocab.safetensors`
+* flat CSV sidecars such as `cond_dict.csv`, `human_tfs.csv`, `mouse_tfs.csv`, `OmniPath.csv`, and `homologous.csv`
 
 The canonical Hugging Face model ID for this project is:
 
@@ -72,10 +70,10 @@ For local development, you can still point to the bundled assets directory inste
 model_source: assets
 ```
 
-This makes it easy to work with either the published HF repo or the bundled local `assets/` directory, both of which follow the same flat file layout.
+This makes it easy to work with either the published HF repo or the bundled local `assets/` directory. In the current package layout, model files live under `models/` and supporting CSV files stay at the asset root.
 
 
 ## Data download
-The data pipeline supports both `Homo sapiens` and `Mus musculus`, writes species-specific folders, adds a `species` column to each downloaded partition, and can keep only genes found in `assets/vocab.json`. The supported workflow is now shell-based, including a small demo download before the full SLURM run.
+The data pipeline supports both `Homo sapiens` and `Mus musculus`, writes species-specific folders, adds a `species` column to each downloaded partition, and can keep only genes found in `assets/models/vocab.json`. The supported workflow is now shell-based, including a small demo download before the full SLURM run.
 
 For complete data pipeline details, see [Data Download Guide](data/README.md).

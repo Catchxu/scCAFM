@@ -25,6 +25,7 @@ class ExperimentPaths:
     root: Path
     logs: Path
     log_file: Path
+    resume_manifest_file: Path
     resume_state_file: Path
 
 
@@ -51,6 +52,7 @@ def prepare_experiment_paths(
         root=root,
         logs=logs,
         log_file=logs / "pretrain.log",
+        resume_manifest_file=logs / "resume_manifest.json",
         resume_state_file=root / "sfm_train_state.pt",
     )
 

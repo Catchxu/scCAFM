@@ -316,8 +316,11 @@ if __name__ == "__main__":
 
     from anndata import AnnData
 
-    root_dir = Path(__file__).resolve().parents[1]
-    token_dict = load_vocab_json(root_dir / "assets" / "vocab.json")
+    from ..assets import resolve_model_assets
+
+    root_dir = Path(__file__).resolve().parents[2]
+    assets = resolve_model_assets(root_dir / "assets")
+    token_dict = load_vocab_json(assets.vocab)
 
     X = np.array(
         [

@@ -17,6 +17,7 @@ SFM_CONFIG_NAME = "sfm_config.json"
 SFM_MODEL_NAME = "sfm_model.safetensors"
 VOCAB_NAME = "vocab.json"
 VOCAB_TENSORS_NAME = "vocab.safetensors"
+MODELS_DIR_NAME = "models"
 COND_DICT_NAME = "cond_dict.csv"
 HUMAN_TFS_NAME = "human_tfs.csv"
 MOUSE_TFS_NAME = "mouse_tfs.csv"
@@ -27,6 +28,7 @@ OMNIPATH_NAME = "OmniPath.csv"
 class ModelAssets:
     model_source: str
     local_dir: Path
+    model_dir: Path
     sfm_config: Path
     sfm_model: Path
     vocab: Path
@@ -57,6 +59,20 @@ def _snapshot_download_model_repo(repo_id: str) -> Path:
     return Path(snapshot_path).resolve()
 
 
+def _resolve_model_file(local_dir: Path, filename: str) -> Path:
+    model_subdir_path = local_dir / MODELS_DIR_NAME / filename
+    if model_subdir_path.exists():
+        return model_subdir_path
+    return local_dir / filename
+
+
+def _resolve_model_dir(local_dir: Path) -> Path:
+    model_subdir = local_dir / MODELS_DIR_NAME
+    if model_subdir.exists() and model_subdir.is_dir():
+        return model_subdir
+    return local_dir
+
+
 def resolve_model_assets(
     model_source: str | Path,
     *,
@@ -72,10 +88,11 @@ def resolve_model_assets(
     assets = ModelAssets(
         model_source=model_source_str,
         local_dir=local_dir,
-        sfm_config=local_dir / SFM_CONFIG_NAME,
-        sfm_model=local_dir / SFM_MODEL_NAME,
-        vocab=local_dir / VOCAB_NAME,
-        vocab_tensors=local_dir / VOCAB_TENSORS_NAME,
+        model_dir=_resolve_model_dir(local_dir),
+        sfm_config=_resolve_model_file(local_dir, SFM_CONFIG_NAME),
+        sfm_model=_resolve_model_file(local_dir, SFM_MODEL_NAME),
+        vocab=_resolve_model_file(local_dir, VOCAB_NAME),
+        vocab_tensors=_resolve_model_file(local_dir, VOCAB_TENSORS_NAME),
         cond_dict=local_dir / COND_DICT_NAME,
         human_tfs=local_dir / HUMAN_TFS_NAME,
         mouse_tfs=local_dir / MOUSE_TFS_NAME,

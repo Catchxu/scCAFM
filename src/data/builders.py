@@ -3,7 +3,7 @@ from __future__ import annotations
 import random
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import anndata as ad
 import pandas as pd
@@ -13,10 +13,12 @@ from torch.utils.data import DataLoader, Dataset, DistributedSampler, RandomSamp
 
 from .collator import ScBatchCollator
 from .dataset import ScDataset
-from .preprocess import ScPreprocessor
 from .tokenizer import CondTokenizer, ExprTokenizer, GeneTokenizer, ScTokenizer
 from ..assets import load_vocab_json
 from ..distributed import RuntimeContext, broadcast_object
+
+if TYPE_CHECKING:
+    from .preprocess import ScPreprocessor
 
 
 class PreprocessedScDataset(ScDataset):
@@ -124,6 +126,8 @@ def _build_preprocessor(config: dict[str, Any], token_dict: pd.DataFrame) -> Opt
     preprocess_cfg = config.get("preprocess", {})
     if not preprocess_cfg.get("enabled", False):
         return None
+
+    from .preprocess import ScPreprocessor
 
     kwargs = {key: value for key, value in preprocess_cfg.items() if key != "enabled"}
     kwargs["token_dict"] = token_dict

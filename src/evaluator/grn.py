@@ -241,6 +241,7 @@ def prepare_evaluation_paths(
         root=root,
         logs=logs,
         log_file=logs / "evaluate_grn.log",
+        resume_manifest_file=logs / "resume_manifest.json",
         resume_state_file=root / "sfm_train_state.pt",
     )
 
