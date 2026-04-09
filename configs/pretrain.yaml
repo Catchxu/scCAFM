@@ -1,3 +1,5 @@
+model_source: kaichenxu/scCAFM
+
 runtime:
   precision:
     model_dtype: fp32
@@ -28,10 +30,6 @@ data:
   condition_mask:
     enabled: true
     unk_ratio: 0.1
-  token_dict_path: resources/token_dict.csv
-  cond_dict_path: resources/cond_dict.csv
-  human_tfs_path: resources/human_tfs.csv
-  mouse_tfs_path: resources/mouse_tfs.csv
   preprocess:
     enabled: true
     min_genes: 200
@@ -68,7 +66,6 @@ loss:
     enabled: true
   prior:
     enabled: true
-    prior_grn_path: resources/OmniPath.csv
     kwargs:
       pos_weight: 1.0
       neg_weight: 1.0

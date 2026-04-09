@@ -8,6 +8,7 @@ import torch
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import ShardingStrategy
 
+from ..assets import ModelAssets
 from ..data import PretrainingDataBundle
 from ..models.heads.vgae import VGAE
 from ..models.sfm import SFM
@@ -31,6 +32,7 @@ def _resolve_torch_dtype(name: str) -> torch.dtype:
 def build_model(
     sfm_config: dict[str, Any],
     data_bundle: PretrainingDataBundle,
+    assets: ModelAssets,
 ) -> ModelWrapper:
     sfm_kwargs = dict(sfm_config["sfm"])
     configured_cond_vocab_size = sfm_kwargs.pop("cond_vocab_size", None)
@@ -39,10 +41,12 @@ def build_model(
             "Mismatched `cond_vocab_size` between model config "
             f"({configured_cond_vocab_size}) and data bundle ({data_bundle.cond_vocab_size})."
         )
+    sfm_kwargs.pop("gene_embedding_ckpt", None)
 
     sfm_module = SFM(
         token_dict=data_bundle.token_dict,
         cond_vocab_size=data_bundle.cond_vocab_size,
+        gene_embedding_ckpt=str(assets.vocab_tensors),
         **sfm_kwargs,
     )
     vgae_head = VGAE(**sfm_config["vgae"])

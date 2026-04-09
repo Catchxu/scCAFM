@@ -11,6 +11,7 @@ from torch.distributed.fsdp import FullStateDictConfig
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import StateDictType
 
+from .assets import ModelAssets, load_model_state_dict, save_model_state_dict
 from .distributed import RuntimeContext, barrier
 from .experiment import ExperimentLogger, ExperimentPaths
 
@@ -33,15 +34,20 @@ class CheckpointManager:
     def __init__(
         self,
         paths: ExperimentPaths,
+        assets: ModelAssets,
         runtime: RuntimeContext,
         logger: ExperimentLogger,
     ) -> None:
         self.paths = paths
+        self.assets = assets
         self.runtime = runtime
         self.logger = logger
 
-    def latest_checkpoint_path(self) -> Path:
-        return self.paths.checkpoints / "sfm_latest.pt"
+    def model_weights_path(self) -> Path:
+        return self.assets.sfm_model
+
+    def latest_resume_state_path(self) -> Path:
+        return self.paths.resume_state_file
 
     def save(
         self,
@@ -50,8 +56,9 @@ class CheckpointManager:
         scheduler: torch.optim.lr_scheduler.LRScheduler,
         loss_manager: torch.nn.Module,
         train_state: dict[str, Any],
-    ) -> Path:
-        checkpoint_path = self.latest_checkpoint_path()
+    ) -> tuple[Path, Path]:
+        model_weights_path = self.model_weights_path()
+        resume_state_path = self.latest_resume_state_path()
 
         if isinstance(model, FSDP):
             state_cfg = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
@@ -73,25 +80,36 @@ class CheckpointManager:
             optim_state = optimizer.state_dict()
 
         if self.runtime.is_main:
-            payload = {
-                "model_state_dict": _cast_floating_tensors_to_fp32(model_state),
+            save_model_state_dict(
+                model_weights_path,
+                _cast_floating_tensors_to_fp32(model_state),
+            )
+            resume_payload = {
                 "optimizer_state_dict": _cast_floating_tensors_to_fp32(optim_state),
                 "scheduler_state_dict": scheduler.state_dict(),
                 "loss_manager_state_dict": loss_manager.state_dict(),
                 "train_state": train_state,
+                "model_weights_path": str(model_weights_path),
             }
-            torch.save(payload, checkpoint_path)
-            self.logger.info(f"Checkpoint saved to {checkpoint_path}")
+            torch.save(resume_payload, resume_state_path)
+            self.logger.info("Model weights saved to %s", model_weights_path)
+            self.logger.info("Resume state saved to %s", resume_state_path)
 
         barrier()
-        return checkpoint_path
+        return model_weights_path, resume_state_path
 
-    def load(self, resume_path: str | None) -> dict[str, Any] | None:
+    def load_model_weights(self) -> dict[str, torch.Tensor] | None:
+        model_weights_path = self.model_weights_path()
+        if not model_weights_path.exists():
+            return None
+        return load_model_state_dict(model_weights_path)
+
+    def load_resume_state(self, resume_path: str | None) -> dict[str, Any] | None:
         if resume_path is None:
             return None
 
-        checkpoint_path = Path(resume_path).expanduser().resolve()
-        payload = torch.load(checkpoint_path, map_location="cpu")
+        resume_state_path = Path(resume_path).expanduser().resolve()
+        payload = torch.load(resume_state_path, map_location="cpu")
         if self.runtime.is_main:
-            self.logger.info(f"Resuming from checkpoint {checkpoint_path}")
+            self.logger.info(f"Resuming from local train-state file {resume_state_path}")
         return payload

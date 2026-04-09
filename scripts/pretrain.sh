@@ -6,11 +6,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
 NPROC_PER_NODE="${NPROC_PER_NODE:-4}"
-SFM_CONFIG="${SFM_CONFIG:-configs/sfm.yaml}"
 PRETRAIN_CONFIG="${PRETRAIN_CONFIG:-configs/pretrain.yaml}"
 
 ARGS=(
-  --sfm-config "${SFM_CONFIG}"
   --pretrain-config "${PRETRAIN_CONFIG}"
 )
 

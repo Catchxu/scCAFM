@@ -9,6 +9,7 @@ import torch.nn as nn
 from dataclasses import dataclass
 from typing import Optional
 
+from ..assets import load_vocab_json
 from .backbone import TransformerBackbone
 from .embedding import ScEmbedding
 from .router import GeneRouter
@@ -247,9 +248,9 @@ if __name__ == "__main__":
 
     root_dir = Path(__file__).resolve().parents[2]
     device = torch.device("cuda")
-    token_dict = pd.read_csv(root_dir / "resources" / "token_dict.csv")
-    human_tfs = pd.read_csv(root_dir / "resources" / "human_tfs.csv")
-    mouse_tfs = pd.read_csv(root_dir / "resources" / "mouse_tfs.csv")
+    token_dict = load_vocab_json(root_dir / "assets" / "vocab.json")
+    human_tfs = pd.read_csv(root_dir / "assets" / "human_tfs.csv")
+    mouse_tfs = pd.read_csv(root_dir / "assets" / "mouse_tfs.csv")
 
     obs = pd.DataFrame(
         {

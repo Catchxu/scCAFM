@@ -15,6 +15,7 @@ from .collator import ScBatchCollator
 from .dataset import ScDataset
 from .preprocess import ScPreprocessor
 from .tokenizer import CondTokenizer, ExprTokenizer, GeneTokenizer, ScTokenizer
+from ..assets import load_vocab_json
 from ..distributed import RuntimeContext, broadcast_object
 
 
@@ -104,7 +105,10 @@ def _shuffle_train_paths(
 
 
 def _load_table(path: str) -> pd.DataFrame:
-    return pd.read_csv(Path(path).expanduser().resolve())
+    resolved = Path(path).expanduser().resolve()
+    if resolved.suffix.lower() == ".json":
+        return load_vocab_json(resolved)
+    return pd.read_csv(resolved)
 
 
 def _load_optional_table(path: str | None) -> pd.DataFrame | None:

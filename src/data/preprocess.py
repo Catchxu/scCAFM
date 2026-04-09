@@ -7,6 +7,7 @@ import scipy.sparse as sp
 
 from typing import Optional
 
+from ..assets import load_vocab_json
 
 class ScPreprocessor:
     """
@@ -316,7 +317,7 @@ if __name__ == "__main__":
     from anndata import AnnData
 
     root_dir = Path(__file__).resolve().parents[1]
-    token_dict = pd.read_csv(root_dir / "resources" / "token_dict.csv")
+    token_dict = load_vocab_json(root_dir / "assets" / "vocab.json")
 
     X = np.array(
         [

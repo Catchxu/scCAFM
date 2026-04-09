@@ -10,6 +10,12 @@ import pandas as pd
 import torch
 import torch.distributed as dist
 
+from ..assets import (
+    apply_model_assets_to_runtime_config,
+    load_model_state_dict,
+    load_sfm_config,
+    resolve_model_assets,
+)
 from .metrics import summarize_binary_metrics
 from ..config import load_yaml_config
 from ..data import PretrainingDataBundle, build_data_bundle_for_path, build_pretraining_assets
@@ -36,7 +42,6 @@ class EvaluationGRNCache:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate predicted cell-specific GRNs.")
-    parser.add_argument("--sfm-config", default="configs/sfm.yaml")
     parser.add_argument("--eval-grn-config", default="configs/eval_grn.yaml")
     return parser.parse_args()
 
@@ -224,7 +229,6 @@ def prepare_evaluation_paths(
         root_candidate = Path.cwd().resolve()
 
     root = Path(broadcast_object(str(root_candidate) if root_candidate is not None else None))
-    checkpoints = root / "checkpoints"
     logs = root / "logs"
     results = root / "results"
 
@@ -235,9 +239,9 @@ def prepare_evaluation_paths(
 
     return ExperimentPaths(
         root=root,
-        checkpoints=checkpoints,
         logs=logs,
         log_file=logs / "evaluate_grn.log",
+        resume_state_file=root / "sfm_train_state.pt",
     )
 
 
@@ -262,20 +266,6 @@ def _extract_predicted_grn(
     if grn is None:
         raise ValueError(f"Foundation {foundation_name!r} did not return a GRN tensor.")
     return grn
-
-
-def _infer_cond_vocab_size_from_checkpoint(payload: dict[str, object]) -> int:
-    state_dict = payload.get("model_state_dict")
-    if not isinstance(state_dict, dict):
-        raise ValueError("Checkpoint payload is missing `model_state_dict`.")
-
-    weight_key = "foundation_modules.sfm.embedding.condition_encoder.cond_embedding.weight"
-    cond_weight = state_dict.get(weight_key)
-    if not torch.is_tensor(cond_weight) or cond_weight.ndim != 2:
-        raise ValueError(
-            f"Checkpoint is missing a valid condition embedding weight at {weight_key!r}."
-        )
-    return int(cond_weight.shape[0])
 
 
 def _summarize_metrics(metrics_df: pd.DataFrame) -> pd.DataFrame:
@@ -360,8 +350,7 @@ def run_evaluation(
     evaluator_cfg = config["evaluator"]
     checkpoint_path = Path(str(evaluator_cfg["checkpoint_path"])).expanduser().resolve()
     foundation_name = str(evaluator_cfg.get("foundation_name", "sfm"))
-    payload = torch.load(checkpoint_path, map_location="cpu")
-    checkpoint_cond_vocab_size = _infer_cond_vocab_size_from_checkpoint(payload)
+    model_state = load_model_state_dict(checkpoint_path)
 
     paths = prepare_evaluation_paths(runtime=runtime)
     logger = ExperimentLogger(name="evaluate_grn", paths=paths, runtime=runtime)
@@ -375,23 +364,18 @@ def run_evaluation(
     )
 
     model = build_model(
-        sfm_config={
-            **config["model"],
-            "sfm": {
-                **config["model"]["sfm"],
-                "cond_vocab_size": checkpoint_cond_vocab_size,
-            },
-        },
+        sfm_config=config["model"],
         data_bundle=PretrainingDataBundle(
             train_loader=None,
             train_sampler=None,
             token_dict=data_assets.token_dict,
-            cond_vocab_size=checkpoint_cond_vocab_size,
+            cond_vocab_size=data_assets.cond_vocab_size,
             train_size=0,
             path=data_assets.train_paths[0],
         ),
+        assets=resolve_model_assets(config["model_source"], require_model_weights=True),
     )
-    model.load_state_dict(payload["model_state_dict"])
+    model.load_state_dict(model_state)
     model = maybe_wrap_fsdp(
         model=model,
         config=config,
@@ -463,9 +447,22 @@ def main() -> None:
     args = parse_args()
     runtime = initialize_distributed()
     try:
-        sfm_config = load_yaml_config(args.sfm_config)
         eval_grn_config = load_yaml_config(args.eval_grn_config)
-        run_evaluation(sfm_config=sfm_config, eval_grn_config=eval_grn_config, runtime=runtime)
+        assets = resolve_model_assets(
+            model_source=eval_grn_config["model_source"],
+            require_model_weights=True,
+        )
+        sfm_config = load_sfm_config(assets.sfm_config)
+        eval_runtime_config = apply_model_assets_to_runtime_config(
+            eval_grn_config,
+            assets,
+            require_model_weights=True,
+        )
+        run_evaluation(
+            sfm_config=sfm_config,
+            eval_grn_config=eval_runtime_config,
+            runtime=runtime,
+        )
     finally:
         cleanup_distributed()
 

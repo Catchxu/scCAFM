@@ -23,9 +23,9 @@ def format_metric_value(value: Any) -> str:
 @dataclass
 class ExperimentPaths:
     root: Path
-    checkpoints: Path
     logs: Path
     log_file: Path
+    resume_state_file: Path
 
 
 def prepare_experiment_paths(
@@ -34,26 +34,24 @@ def prepare_experiment_paths(
 ) -> ExperimentPaths:
     if resume_path:
         checkpoint_path = Path(resume_path).expanduser().resolve()
-        root = checkpoint_path.parent.parent
+        root = checkpoint_path.parent
     elif runtime.is_main:
         root = Path.cwd().resolve()
     else:
         root = None
 
     root = Path(broadcast_object(str(root) if root is not None else None))
-    checkpoints = root / "checkpoints"
     logs = root / "logs"
 
     if runtime.is_main:
-        checkpoints.mkdir(parents=True, exist_ok=True)
         logs.mkdir(parents=True, exist_ok=True)
     barrier()
 
     return ExperimentPaths(
         root=root,
-        checkpoints=checkpoints,
         logs=logs,
         log_file=logs / "pretrain.log",
+        resume_state_file=root / "sfm_train_state.pt",
     )
 
 

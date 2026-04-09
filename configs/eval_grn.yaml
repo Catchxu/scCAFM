@@ -1,3 +1,5 @@
+model_source: kaichenxu/scCAFM
+
 runtime:
   precision:
     model_dtype: fp32
@@ -26,10 +28,6 @@ data:
   condition_mask:
     enabled: false
     unk_ratio: 0.0
-  token_dict_path: resources/token_dict.csv
-  cond_dict_path: resources/cond_dict.csv
-  human_tfs_path: resources/human_tfs.csv
-  mouse_tfs_path: resources/mouse_tfs.csv
   preprocess:
     enabled: true
     min_genes: 200
@@ -48,6 +46,5 @@ data:
     inplace: false
 
 evaluator:
-  checkpoint_path: checkpoints/sfm_latest.pt
   evaluation_grn_path: /data1021/xukaichen/data/GRN/networks/hSTRING.csv
   foundation_name: sfm

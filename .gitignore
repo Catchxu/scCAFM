@@ -175,9 +175,10 @@ cython_debug/
 .pypirc
 
 # Project file
-checkpoints/
+assets/
 logs/
 results/
 .codex
+sfm_train_state.pt
 slurm-*.out
 slurm-*.err

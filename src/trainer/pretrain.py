@@ -7,6 +7,7 @@ from typing import Any
 
 import torch
 
+from ..assets import apply_model_assets_to_runtime_config, load_sfm_config, resolve_model_assets
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from tqdm import tqdm
 
@@ -34,7 +35,6 @@ from ..models.router import QBGating
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Pretrain the wrapped SFM + VGAE model.")
-    parser.add_argument("--sfm-config", default="configs/sfm.yaml")
     parser.add_argument("--pretrain-config", default="configs/pretrain.yaml")
     parser.add_argument("--resume", default=None)
     return parser.parse_args()
@@ -411,12 +411,18 @@ def main() -> None:
     runtime = initialize_distributed()
 
     try:
-        sfm_config = load_yaml_config(args.sfm_config)
         pretrain_config = load_yaml_config(args.pretrain_config)
-        config = {
-            "model": sfm_config,
-            **pretrain_config,
-        }
+        model_source = pretrain_config["model_source"]
+        assets = resolve_model_assets(model_source=model_source, require_model_weights=False)
+        sfm_config = load_sfm_config(assets.sfm_config)
+        config = apply_model_assets_to_runtime_config(
+            {
+                "model": sfm_config,
+                **pretrain_config,
+            },
+            assets,
+            require_model_weights=False,
+        )
 
         paths = prepare_experiment_paths(
             runtime=runtime,
@@ -439,6 +445,7 @@ def main() -> None:
                 train_size=0,
                 path=data_assets.train_paths[0],
             ),
+            assets=assets,
         )
 
         total_steps = estimate_total_training_steps(
@@ -453,18 +460,29 @@ def main() -> None:
             total_steps=total_steps,
         )
 
-        checkpoint_manager = CheckpointManager(paths=paths, runtime=runtime, logger=logger)
-        payload = checkpoint_manager.load(args.resume)
+        checkpoint_manager = CheckpointManager(
+            paths=paths,
+            assets=assets,
+            runtime=runtime,
+            logger=logger,
+        )
+        model_state = checkpoint_manager.load_model_weights()
+        resume_payload = checkpoint_manager.load_resume_state(args.resume)
+        if resume_payload is not None and model_state is None:
+            raise FileNotFoundError(
+                f"Full resume requires model weights at {assets.sfm_model}, but none were found."
+            )
 
-        if payload is not None:
-            model.load_state_dict(payload["model_state_dict"])
-            loss_manager.load_state_dict(payload["loss_manager_state_dict"])
+        if model_state is not None:
+            model.load_state_dict(model_state)
+        if resume_payload is not None:
+            loss_manager.load_state_dict(resume_payload["loss_manager_state_dict"])
 
         model = maybe_wrap_fsdp(
             model=model,
             config=config,
             runtime=runtime,
-            sync_module_states=(payload is not None),
+            sync_module_states=(model_state is not None or resume_payload is not None),
         )
         optimizer = build_optimizer(model=model, config=config)
         scheduler = build_scheduler(
@@ -473,7 +491,7 @@ def main() -> None:
             total_steps=total_steps,
         )
         train_state = _load_resume_states(
-            payload=payload,
+            payload=resume_payload,
             optimizer=optimizer,
             scheduler=scheduler,
             model=model,
