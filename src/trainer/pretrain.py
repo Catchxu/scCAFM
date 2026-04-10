@@ -11,7 +11,14 @@ from ..assets import apply_model_assets_to_runtime_config, load_sfm_config, reso
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from tqdm import tqdm
 
-from .builders import build_model, build_optimizer, build_scheduler, maybe_wrap_fsdp
+from .builders import (
+    build_model,
+    build_optimizer,
+    build_scheduler,
+    maybe_compile_model,
+    resolve_compile_settings,
+    maybe_wrap_fsdp,
+)
 from ..checkpoint import CheckpointManager
 from ..config import load_yaml_config
 from ..data import (
@@ -97,6 +104,7 @@ def _log_run_summary(
     scheduler_cfg = config["scheduler"]
     trainer_cfg = config["trainer"]
     precision_cfg = runtime_cfg.get("precision", {})
+    compile_cfg = resolve_compile_settings(config)
     preprocess_cfg = data_cfg.get("preprocess", {})
     condition_mask_cfg = data_cfg.get("condition_mask", {})
     batch_size = int(data_cfg["batch_size"])
@@ -113,6 +121,14 @@ def _log_run_summary(
         "Precision: model_dtype=%s, autocast_dtype=%s",
         precision_cfg.get("model_dtype", "fp32"),
         precision_cfg.get("autocast_dtype", "fp32"),
+    )
+    logger.info(
+        "Compile: enabled=%s, backend=%s, mode=%s, dynamic=%s, fullgraph=%s",
+        compile_cfg["enabled"],
+        compile_cfg["backend"],
+        compile_cfg["mode"],
+        compile_cfg["dynamic"],
+        compile_cfg["fullgraph"],
     )
     logger.info(
         "Data: num_adata=%s, batch_size=%s, gradient_accumulation_steps=%s, global_batch_size=%s, max_length=%s",
@@ -480,6 +496,11 @@ def main() -> None:
         if resume_payload is not None:
             loss_manager.load_state_dict(resume_payload["loss_manager_state_dict"])
 
+        model = maybe_compile_model(
+            model=model,
+            config=config,
+            runtime=runtime,
+        )
         model = maybe_wrap_fsdp(
             model=model,
             config=config,

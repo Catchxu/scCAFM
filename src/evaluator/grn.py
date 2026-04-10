@@ -29,7 +29,7 @@ from ..distributed import (
 )
 from ..experiment import ExperimentLogger, ExperimentPaths
 from ..models.wrapper import ModelWrapperOutput
-from ..trainer.builders import build_model, maybe_wrap_fsdp
+from ..trainer.builders import build_model, maybe_compile_model, maybe_wrap_fsdp, resolve_compile_settings
 from ..utils import build_active_gene_mask, build_tf_mask, build_token_lookup_maps, require_tensor
 
 
@@ -323,15 +323,25 @@ def _save_summary_metrics(
 def _log_run_summary(
     logger: ExperimentLogger,
     runtime: RuntimeContext,
+    config: dict[str, object],
     num_paths: int,
     num_eval_edges: int,
 ) -> None:
+    compile_cfg = resolve_compile_settings(config)
     logger.info("========== Evaluation Summary ==========")
     logger.info(
         "Runtime: distributed=%s, world_size=%s, device=%s",
         runtime.distributed,
         runtime.world_size,
         runtime.device,
+    )
+    logger.info(
+        "Compile: enabled=%s, backend=%s, mode=%s, dynamic=%s, fullgraph=%s",
+        compile_cfg["enabled"],
+        compile_cfg["backend"],
+        compile_cfg["mode"],
+        compile_cfg["dynamic"],
+        compile_cfg["fullgraph"],
     )
     logger.info("Data: num_adata=%s", num_paths)
     logger.info("Evaluation GRN edges: %s", num_eval_edges)
@@ -377,6 +387,11 @@ def run_evaluation(
         assets=resolve_model_assets(config["model_source"], require_model_weights=True),
     )
     model.load_state_dict(model_state)
+    model = maybe_compile_model(
+        model=model,
+        config=config,
+        runtime=runtime,
+    )
     model = maybe_wrap_fsdp(
         model=model,
         config=config,
@@ -389,6 +404,7 @@ def run_evaluation(
         _log_run_summary(
             logger=logger,
             runtime=runtime,
+            config=config,
             num_paths=len(data_assets.train_paths),
             num_eval_edges=int(eval_cache.pair_keys.numel()),
         )

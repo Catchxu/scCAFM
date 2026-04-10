@@ -4,6 +4,10 @@ runtime:
   precision:
     model_dtype: fp32
     autocast_dtype: bf16
+  compile:
+    enabled: true
+    dynamic: false
+    fullgraph: false
   fsdp:
     enabled: true
     sharding_strategy: FULL_SHARD

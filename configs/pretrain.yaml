@@ -4,6 +4,10 @@ runtime:
   precision:
     model_dtype: fp32
     autocast_dtype: bf16
+  compile:
+    enabled: true
+    dynamic: false
+    fullgraph: false
   fsdp:
     enabled: true
     sharding_strategy: FULL_SHARD
@@ -12,7 +16,7 @@ runtime:
 
 data:
   # Each entry can be a `.h5ad` file or a directory; directories are expanded to all nested `.h5ad` files.
-  train_paths: /data1021/xukaichen/data/Atlas/blood
+  train_paths: /scratch/kxu248/data/Atlas/human/pan-cancer
   shuffle_train_paths: true
   shuffle_train_paths_seed: 0
   batch_size: 8
@@ -23,7 +27,7 @@ data:
   max_length: 2048
   gene_key: feature_id
   platform_key: assay
-  species_key: null
+  species_key: species
   tissue_key: tissue
   disease_key: disease
   expr_pad_value: 0.0
@@ -75,7 +79,7 @@ loss:
       final: 0.1
       span_epochs: null
   dag:
-    enabled: True
+    enabled: False
     kwargs:
       lambda_dag: 1.0
 

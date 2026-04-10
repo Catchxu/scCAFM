@@ -57,8 +57,44 @@ def build_model(
     )
 
 
+def resolve_compile_settings(config: dict[str, Any]) -> dict[str, Any]:
+    compile_cfg = config["runtime"].get("compile", {})
+    return {
+        "enabled": bool(compile_cfg.get("enabled", False)),
+        "backend": str(compile_cfg.get("backend", "inductor")),
+        "mode": str(compile_cfg.get("mode", "default")),
+        "dynamic": bool(compile_cfg.get("dynamic", False)),
+        "fullgraph": bool(compile_cfg.get("fullgraph", False)),
+    }
+
+
+def maybe_compile_model(
+    model: torch.nn.Module,
+    config: dict[str, Any],
+    runtime: RuntimeContext,
+) -> torch.nn.Module:
+    compile_settings = resolve_compile_settings(config)
+    if not compile_settings["enabled"]:
+        return model
+
+    if not hasattr(torch, "compile"):
+        raise RuntimeError("`runtime.compile.enabled=true` requires a PyTorch build with `torch.compile`.")
+
+    if runtime.device.type != "cuda":
+        raise ValueError("`runtime.compile.enabled=true` is currently only supported for CUDA runs.")
+
+    compile_kwargs: dict[str, Any] = {
+        "backend": compile_settings["backend"],
+        "mode": compile_settings["mode"],
+        "fullgraph": compile_settings["fullgraph"],
+        "dynamic": compile_settings["dynamic"],
+    }
+
+    return torch.compile(model, **compile_kwargs)
+
+
 def maybe_wrap_fsdp(
-    model: ModelWrapper,
+    model: torch.nn.Module,
     config: dict[str, Any],
     runtime: RuntimeContext,
     sync_module_states: bool,
