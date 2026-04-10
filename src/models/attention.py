@@ -31,7 +31,6 @@ class FlashMHA(nn.Module):
         embed_dim: model dimension
         num_heads: number of attention heads
         use_rotary: whether to apply RoPE to Q/K
-        attn_dropout: retained for config compatibility; attention dropout is disabled
         qkv_bias: bias for fused qkv projection
         out_bias: bias for output projection
         rotary_base: RoPE base

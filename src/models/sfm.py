@@ -62,7 +62,6 @@ class SFM(nn.Module):
         num_layers: int = 4,
         num_heads: int = 8,
         backbone_mlp_hidden_dim: Optional[int] = None,
-        attn_dropout: float = 0.1,
         backbone_mlp_dropout: float = 0.1,
         use_rotary: bool = False,
         qkv_bias: bool = True,
@@ -110,7 +109,6 @@ class SFM(nn.Module):
             num_layers=num_layers,
             num_heads=num_heads,
             mlp_hidden_dim=backbone_mlp_hidden_dim,
-            attn_dropout=attn_dropout,
             mlp_dropout=backbone_mlp_dropout,
             use_rotary=use_rotary,
             qkv_bias=qkv_bias,
@@ -138,7 +136,6 @@ class SFM(nn.Module):
             temperature=router_temperature,
             beta_momentum=beta_momentum,
         )
-
         self.apply(self._init_weights)
 
     @staticmethod

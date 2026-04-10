@@ -13,6 +13,26 @@ from typing import Optional
 from ..assets import load_vocab_json, load_vocab_tensor_file
 
 
+EMBEDDING_INIT_STD = 0.02
+
+
+def _init_embedding(
+    module: nn.Embedding,
+    *,
+    std: float = EMBEDDING_INIT_STD,
+    zero_padding_idx: bool = False,
+) -> None:
+    nn.init.normal_(module.weight, mean=0.0, std=std)
+    if zero_padding_idx and module.padding_idx is not None:
+        with torch.no_grad():
+            module.weight[module.padding_idx].zero_()
+
+
+def _zero_parameter(param: nn.Parameter) -> None:
+    with torch.no_grad():
+        param.zero_()
+
+
 @dataclass
 class ScEmbeddingOutput:
     """
@@ -56,6 +76,10 @@ class ExpressionValueEmbedding(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, embed_dim),
         )
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        _zero_parameter(self.zero_embedding)
 
     def forward(self, expression_values: torch.Tensor) -> torch.Tensor:
         if expression_values.ndim != 2:
@@ -128,6 +152,10 @@ class ConditionEncoder(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(2 * embed_dim, embed_dim),
         )
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        _init_embedding(self.cond_embedding, std=EMBEDDING_INIT_STD)
 
     def forward(self, condition_ids: torch.LongTensor) -> tuple[torch.Tensor, torch.Tensor]:
         if condition_ids.ndim != 2 or condition_ids.shape[1] != 4:
@@ -266,6 +294,7 @@ class ScEmbedding(nn.Module):
         self.loaded_gene_embedding_ckpt: Optional[str] = None
         self.loaded_gene_embedding_count = 0
         self.loaded_gene_embedding_total = 0
+        self.reset_parameters()
 
         if gene_embedding_ckpt is not None:
             self._load_gene_embeddings_from_ckpt(
@@ -273,6 +302,18 @@ class ScEmbedding(nn.Module):
                 ckpt_path=gene_embedding_ckpt,
                 freeze_loaded=freeze_loaded_gene_embeddings,
             )
+
+    def reset_parameters(self) -> None:
+        _init_embedding(
+            self.gene_embedding,
+            std=EMBEDDING_INIT_STD,
+            zero_padding_idx=True,
+        )
+        _init_embedding(self.tf_type_embedding, std=EMBEDDING_INIT_STD)
+        _init_embedding(self.position_embedding, std=EMBEDDING_INIT_STD)
+        _zero_parameter(self.prefix_type_embedding)
+        _zero_parameter(self.gene_type_embedding)
+        self.final_norm.reset_parameters()
 
     @classmethod
     def _validate_token_dict(cls, token_dict: pd.DataFrame) -> None:
