@@ -1,13 +1,9 @@
-model_source: kaichenxu/scCAFM
+model_source: assets
 
 runtime:
   precision:
     model_dtype: fp32
     autocast_dtype: bf16
-  compile:
-    enabled: true
-    dynamic: false
-    fullgraph: false
   fsdp:
     enabled: true
     sharding_strategy: FULL_SHARD
@@ -16,12 +12,12 @@ runtime:
 
 data:
   # Each entry can be a `.h5ad` file or a directory; directories are expanded to all nested `.h5ad` files.
-  train_paths: /scratch/kxu248/data/Atlas/human/pan-cancer
+  train_paths: /scratch/kxu248/data/Atlas/
   shuffle_train_paths: true
   shuffle_train_paths_seed: 0
-  batch_size: 8
-  gradient_accumulation_steps: 8
-  num_workers: 0
+  batch_size: 64
+  gradient_accumulation_steps: 4
+  num_workers: 4
   pin_memory: true
   drop_last: false
   max_length: 2048
@@ -31,6 +27,8 @@ data:
   tissue_key: tissue
   disease_key: disease
   expr_pad_value: 0.0
+  condition_vocab:
+    regenerate: True
   condition_mask:
     enabled: true
     unk_ratio: 0.1
@@ -71,7 +69,7 @@ loss:
   prior:
     enabled: true
     kwargs:
-      pos_weight: 1.0
+      pos_weight: 10.0
       neg_weight: 1.0
       neg_sample_ratio: null
     weight_schedule:

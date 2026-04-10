@@ -3,7 +3,7 @@
 This directory contains:
 
 1. Cell download scripts for building pretraining partitions from Cellxgene Census.
-2. Gene embedding scripts for building initial gene embeddings from GO annotations.
+2. Gene embedding scripts for rebuilding `checkpoints/models/vocab.safetensors` from GO annotations.
 
 
 ## Cell Download
@@ -14,8 +14,8 @@ This directory contains:
 * Support both `Homo sapiens` and `Mus musculus`.
 * Save partitions into species-specific folders.
 * Add `obs["species"]` to each partition.
-* Optionally keep only genes found in `resources/token_dict.csv`.
-* For mouse downloads, remap `feature_id` and `feature_name` through `resources/homologous.csv` so the exported files align with the human token vocabulary while preserving original mouse feature columns as `source_feature_id` and `source_feature_name`.
+* Optionally keep only genes found in `assets/models/vocab.json`.
+* For mouse downloads, remap `feature_id` and `feature_name` through `assets/homologous.csv` so the exported files align with the human token vocabulary while preserving original mouse feature columns as `source_feature_id` and `source_feature_name`.
 * Drop `soma_joinid` from both `obs` and `var`, and drop all `obs` columns ending with `_term_id` before saving.
 
 ### Preferred workflow
@@ -63,8 +63,8 @@ bash data/download_partition.sh \
   /path/to/index \
   /path/to/data \
   "Homo sapiens" \
-  resources/token_dict.csv \
-  resources/homologous.csv
+  assets/models/vocab.json \
+  assets/homologous.csv
 ```
 
 Download only partition `0`:
@@ -74,8 +74,8 @@ bash data/download_partition.sh \
   /path/to/index \
   /path/to/data \
   "Mus musculus" \
-  resources/token_dict.csv \
-  resources/homologous.csv \
+  assets/models/vocab.json \
+  assets/homologous.csv \
   0
 ```
 
@@ -104,8 +104,8 @@ sbatch data/array_download_partition.sh
 ```bash
 python3 data/check_and_redownload_h5ad.py \
   --organism "Homo sapiens" \
-  --token-dict-path resources/token_dict.csv \
-  --homology-path resources/homologous.csv \
+  --token-dict-path assets/models/vocab.json \
+  --homology-path assets/homologous.csv \
   --query-list data/query_list.txt \
   --index-dir /path/to/index \
   --output-dir /path/to/data
@@ -115,11 +115,11 @@ python3 data/check_and_redownload_h5ad.py \
 ## Gene Embeddings
 
 ### What it does
-1. Read `resources/token_dict.csv`.
+1. Read `assets/models/vocab.json`.
 2. Query Ensembl BioMart for GO annotations.
-3. Save GO annotations to `resources/gene_go_terms.csv`.
+3. Save GO annotations to `checkpoints/gene_go_terms.csv`.
 4. Encode GO text with PubMedBERT.
-5. Save the final checkpoint to `checkpoints/gene_embeddings.pt`.
+5. Save the final gene embedding asset to `checkpoints/models/vocab.safetensors`.
 
 ### One-command run
 ```bash
@@ -138,5 +138,5 @@ python data/build_gene_embeddings.py --gpus 0,1,2,3 --batch-size 1024
 ```
 
 ### Output
-* `resources/gene_go_terms.csv`
-* `checkpoints/gene_embeddings.pt`
+* `checkpoints/gene_go_terms.csv`
+* `checkpoints/models/vocab.safetensors`

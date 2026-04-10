@@ -10,8 +10,6 @@ from anndata import AnnData
 from dataclasses import dataclass
 from typing import Optional, Sequence, Dict, Any
 
-from ..assets import load_vocab_json
-
 class BasicTokenizer:
     """
     Shared utilities for padded tokenizer implementations.
@@ -323,13 +321,14 @@ class GeneTokenizer(BasicTokenizer):
             dtype=torch.bool,
         )
 
-        for row_idx, species in enumerate(species_values):
-            if species == "human":
-                non_tf_mask[row_idx, :n_genes] = human_non_tf
-            elif species == "mouse":
-                non_tf_mask[row_idx, :n_genes] = mouse_non_tf
-            else:
-                non_tf_mask[row_idx, :n_genes] = True
+        species_array = np.asarray(species_values, dtype=object)
+        human_rows = species_array == "human"
+        mouse_rows = species_array == "mouse"
+
+        if human_rows.any():
+            non_tf_mask[torch.as_tensor(human_rows), :n_genes] = human_non_tf
+        if mouse_rows.any():
+            non_tf_mask[torch.as_tensor(mouse_rows), :n_genes] = mouse_non_tf
 
         return non_tf_mask
 
@@ -659,6 +658,18 @@ class CondTokenizer:
         )
         return token_index
 
+    def _encode_values(self, values: list[str]) -> torch.LongTensor:
+        normalized_values = [self._normalize_condition_value(value) for value in values]
+        if self.allow_new_conditions:
+            for value in dict.fromkeys(normalized_values):
+                self._fetch_or_add(value)
+
+        unk_index = self.cond_to_index["<unk>"]
+        return torch.tensor(
+            [self.cond_to_index.get(value, unk_index) for value in normalized_values],
+            dtype=torch.long,
+        )
+
     def _get_condition_values(self, obs: pd.DataFrame, key: Optional[str], condition_idx: int) -> list[str]:
         if key is None:
             if condition_idx == 1:
@@ -690,12 +701,14 @@ class CondTokenizer:
         return masked
 
     def fit_obs(self, obs: pd.DataFrame) -> None:
+        if not self.allow_new_conditions:
+            return
         condition_columns = [
             self._get_condition_values(obs, key, idx)
             for idx, key in enumerate(self.condition_keys)
         ]
         for values in condition_columns:
-            for value in values:
+            for value in dict.fromkeys(self._normalize_condition_value(item) for item in values):
                 self._fetch_or_add(value)
 
     def fit_adata(self, adata: AnnData) -> None:
@@ -708,7 +721,6 @@ class CondTokenizer:
             raise TypeError(f"`adata` must be an AnnData object, got {type(adata).__name__}.")
 
         obs = adata.obs
-        n_cells = int(adata.n_obs)
         condition_columns = [
             self._maybe_mask_unknown(
                 self._get_condition_values(obs, key, idx),
@@ -717,10 +729,8 @@ class CondTokenizer:
             for idx, key in enumerate(self.condition_keys)
         ]
 
-        condition_ids = torch.zeros((n_cells, 4), dtype=torch.long)
-        for col_idx, values in enumerate(condition_columns):
-            for row_idx, value in enumerate(values):
-                condition_ids[row_idx, col_idx] = self._fetch_or_add(value)
+        encoded_columns = [self._encode_values(values) for values in condition_columns]
+        condition_ids = torch.stack(encoded_columns, dim=1)
 
         return condition_ids
 
@@ -844,6 +854,7 @@ class ScTokenizer:
 if __name__ == "__main__":
     from pathlib import Path
 
+    from ..assets import load_vocab_json
     from ..assets import resolve_model_assets
 
     root_dir = Path(__file__).resolve().parents[2]

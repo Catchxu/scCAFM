@@ -27,8 +27,8 @@ INDEX_PATH="/scratch/kxu248/data/Atlas"  # "path/to/index"
 QUERY_PATH="${REPO_ROOT}/data/query_list.txt"
 DATA_PATH="/scratch/kxu248/data/Atlas"  # "path/to/data"
 ORGANISMS=("Homo sapiens" "Mus musculus")
-TOKEN_DICT_PATH="${REPO_ROOT}/resources/token_dict.csv"
-HOMOLOGY_PATH="${REPO_ROOT}/resources/homologous.csv"
+TOKEN_DICT_PATH="${REPO_ROOT}/assets/models/vocab.json"
+HOMOLOGY_PATH="${REPO_ROOT}/assets/homologous.csv"
 
 query_name="$(sed -n "${SLURM_ARRAY_TASK_ID}p" "${QUERY_PATH}")"
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -18,7 +19,11 @@ from ..assets import (
 )
 from .metrics import summarize_binary_metrics
 from ..config import load_yaml_config
-from ..data import PretrainingDataBundle, build_data_bundle_for_path, build_pretraining_assets
+from ..data import (
+    PretrainingDataBundle,
+    build_data_bundle_for_path,
+    build_evaluation_assets,
+)
 from ..distributed import (
     RuntimeContext,
     barrier,
@@ -29,7 +34,7 @@ from ..distributed import (
 )
 from ..experiment import ExperimentLogger, ExperimentPaths
 from ..models.wrapper import ModelWrapperOutput
-from ..trainer.builders import build_model, maybe_compile_model, maybe_wrap_fsdp, resolve_compile_settings
+from ..trainer.builders import build_model, maybe_wrap_fsdp
 from ..utils import build_active_gene_mask, build_tf_mask, build_token_lookup_maps, require_tensor
 
 
@@ -231,19 +236,33 @@ def prepare_evaluation_paths(
     root = Path(broadcast_object(str(root_candidate) if root_candidate is not None else None))
     logs = root / "logs"
     results = root / "results"
+    checkpoints = root / "checkpoints"
+    model_package_dir = checkpoints / "models"
 
     if runtime.is_main:
         logs.mkdir(parents=True, exist_ok=True)
         results.mkdir(parents=True, exist_ok=True)
+        model_package_dir.mkdir(parents=True, exist_ok=True)
     barrier()
 
     return ExperimentPaths(
         root=root,
         logs=logs,
+        checkpoints=checkpoints,
+        model_package_dir=model_package_dir,
         log_file=logs / "evaluate_grn.log",
         resume_manifest_file=logs / "resume_manifest.json",
         resume_state_file=root / "sfm_train_state.pt",
     )
+
+
+def _prepare_evaluation_config(config: dict[str, object]) -> dict[str, object]:
+    prepared = deepcopy(config)
+    data_cfg = dict(prepared.get("data", {}))
+    data_cfg["condition_vocab"] = {"regenerate": False}
+    data_cfg["condition_mask"] = {"enabled": False, "unk_ratio": 0.0}
+    prepared["data"] = data_cfg
+    return prepared
 
 
 def _load_evaluation_grn(path: str | Path) -> pd.DataFrame:
@@ -323,25 +342,15 @@ def _save_summary_metrics(
 def _log_run_summary(
     logger: ExperimentLogger,
     runtime: RuntimeContext,
-    config: dict[str, object],
     num_paths: int,
     num_eval_edges: int,
 ) -> None:
-    compile_cfg = resolve_compile_settings(config)
     logger.info("========== Evaluation Summary ==========")
     logger.info(
         "Runtime: distributed=%s, world_size=%s, device=%s",
         runtime.distributed,
         runtime.world_size,
         runtime.device,
-    )
-    logger.info(
-        "Compile: enabled=%s, backend=%s, mode=%s, dynamic=%s, fullgraph=%s",
-        compile_cfg["enabled"],
-        compile_cfg["backend"],
-        compile_cfg["mode"],
-        compile_cfg["dynamic"],
-        compile_cfg["fullgraph"],
     )
     logger.info("Data: num_adata=%s", num_paths)
     logger.info("Evaluation GRN edges: %s", num_eval_edges)
@@ -354,6 +363,7 @@ def run_evaluation(
     eval_grn_config: dict[str, object],
     runtime: RuntimeContext,
 ) -> None:
+    eval_grn_config = _prepare_evaluation_config(eval_grn_config)
     config = {
         "model": sfm_config,
         **eval_grn_config,
@@ -367,7 +377,7 @@ def run_evaluation(
     logger = ExperimentLogger(name="evaluate_grn", paths=paths, runtime=runtime)
     results_dir = paths.root / "results"
 
-    data_assets = build_pretraining_assets(config=config, runtime=runtime)
+    data_assets = build_evaluation_assets(config=config, runtime=runtime)
     evaluation_grn_df = _load_evaluation_grn(evaluator_cfg["evaluation_grn_path"])
     eval_cache = build_evaluation_grn_cache(
         token_dict=data_assets.token_dict,
@@ -387,11 +397,6 @@ def run_evaluation(
         assets=resolve_model_assets(config["model_source"], require_model_weights=True),
     )
     model.load_state_dict(model_state)
-    model = maybe_compile_model(
-        model=model,
-        config=config,
-        runtime=runtime,
-    )
     model = maybe_wrap_fsdp(
         model=model,
         config=config,
@@ -404,7 +409,6 @@ def run_evaluation(
         _log_run_summary(
             logger=logger,
             runtime=runtime,
-            config=config,
             num_paths=len(data_assets.train_paths),
             num_eval_edges=int(eval_cache.pair_keys.numel()),
         )

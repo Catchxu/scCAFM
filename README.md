@@ -68,9 +68,10 @@ scCAFM now uses an asset package that is compatible with both a local directory 
 
 * `models/sfm_config.json`
 * `models/sfm_model.safetensors`
+* `models/cond_dict.json`
 * `models/vocab.json`
 * `models/vocab.safetensors`
-* flat CSV sidecars such as `cond_dict.csv`, `human_tfs.csv`, `mouse_tfs.csv`, `OmniPath.csv`, and `homologous.csv`
+* root-level CSV sidecars such as `human_tfs.csv`, `mouse_tfs.csv`, `OmniPath.csv`, and `homologous.csv`
 
 The canonical Hugging Face model ID for this project is:
 
@@ -93,7 +94,7 @@ For local development, you can still point to a locally downloaded `assets/` dir
 model_source: assets
 ```
 
-This makes it easy to work with either the published HF repo or a locally downloaded `assets/` directory. In the current package layout, model files live under `models/` and supporting CSV files stay at the asset root.
+This makes it easy to work with either the published HF repo or a locally downloaded `assets/` directory. In the current package layout, model files and JSON dictionaries live under `models/`, while supporting CSV files stay at the asset root.
 
 
 ## Data download

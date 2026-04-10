@@ -1,13 +1,9 @@
-model_source: kaichenxu/scCAFM
+model_source: assets
 
 runtime:
   precision:
     model_dtype: fp32
     autocast_dtype: bf16
-  compile:
-    enabled: true
-    dynamic: false
-    fullgraph: false
   fsdp:
     enabled: true
     sharding_strategy: FULL_SHARD
@@ -29,9 +25,6 @@ data:
   tissue_key: tissue
   disease_key: disease
   expr_pad_value: 0.0
-  condition_mask:
-    enabled: false
-    unk_ratio: 0.0
   preprocess:
     enabled: true
     min_genes: 200

@@ -8,8 +8,8 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 INDEX_DIR="${1:?Usage: demo_download.sh INDEX_DIR OUTPUT_DIR [QUERY] [TOKEN_DICT_PATH] [HOMOLOGY_PATH]}"
 OUTPUT_DIR="${2:?Usage: demo_download.sh INDEX_DIR OUTPUT_DIR [QUERY] [TOKEN_DICT_PATH] [HOMOLOGY_PATH]}"
 QUERY="${3:-brain}"
-TOKEN_DICT_PATH="${4:-${ROOT_DIR}/resources/token_dict.csv}"
-HOMOLOGY_PATH="${5:-${ROOT_DIR}/resources/homologous.csv}"
+TOKEN_DICT_PATH="${4:-${ROOT_DIR}/assets/models/vocab.json}"
+HOMOLOGY_PATH="${5:-${ROOT_DIR}/assets/homologous.csv}"
 DEMO_MAX_PARTITION_SIZE="${DEMO_MAX_PARTITION_SIZE:-5000}"
 
 for ORGANISM in "Homo sapiens" "Mus musculus"; do

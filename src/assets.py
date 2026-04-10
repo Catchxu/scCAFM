@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 
 from copy import deepcopy
 from dataclasses import dataclass
@@ -18,7 +19,7 @@ SFM_MODEL_NAME = "sfm_model.safetensors"
 VOCAB_NAME = "vocab.json"
 VOCAB_TENSORS_NAME = "vocab.safetensors"
 MODELS_DIR_NAME = "models"
-COND_DICT_NAME = "cond_dict.csv"
+COND_DICT_NAME = "cond_dict.json"
 HUMAN_TFS_NAME = "human_tfs.csv"
 MOUSE_TFS_NAME = "mouse_tfs.csv"
 OMNIPATH_NAME = "OmniPath.csv"
@@ -77,6 +78,7 @@ def resolve_model_assets(
     model_source: str | Path,
     *,
     require_model_weights: bool = False,
+    require_cond_dict: bool = True,
 ) -> ModelAssets:
     model_source_str = str(model_source)
     local_candidate = Path(model_source_str).expanduser()
@@ -93,7 +95,7 @@ def resolve_model_assets(
         sfm_model=_resolve_model_file(local_dir, SFM_MODEL_NAME),
         vocab=_resolve_model_file(local_dir, VOCAB_NAME),
         vocab_tensors=_resolve_model_file(local_dir, VOCAB_TENSORS_NAME),
-        cond_dict=local_dir / COND_DICT_NAME,
+        cond_dict=_resolve_model_file(local_dir, COND_DICT_NAME),
         human_tfs=local_dir / HUMAN_TFS_NAME,
         mouse_tfs=local_dir / MOUSE_TFS_NAME,
         omnipath=local_dir / OMNIPATH_NAME,
@@ -103,10 +105,11 @@ def resolve_model_assets(
         "sfm_config": assets.sfm_config,
         "vocab": assets.vocab,
         "vocab_tensors": assets.vocab_tensors,
-        "cond_dict": assets.cond_dict,
         "human_tfs": assets.human_tfs,
         "mouse_tfs": assets.mouse_tfs,
     }
+    if require_cond_dict:
+        required_paths["cond_dict"] = assets.cond_dict
     if require_model_weights:
         required_paths["sfm_model"] = assets.sfm_model
 
@@ -118,6 +121,69 @@ def resolve_model_assets(
         )
 
     return assets
+
+
+def _copy_file_if_needed(source: Path, destination: Path, *, overwrite: bool = False) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists() and not overwrite:
+        return
+    shutil.copy2(source, destination)
+
+
+def materialize_model_package(
+    source_assets: ModelAssets,
+    target_dir: str | Path,
+    *,
+    include_model_weights: bool = True,
+    include_cond_dict: bool = True,
+    overwrite: bool = False,
+) -> ModelAssets:
+    target_path = Path(target_dir).expanduser().resolve()
+    target_path.mkdir(parents=True, exist_ok=True)
+
+    _copy_file_if_needed(source_assets.sfm_config, target_path / SFM_CONFIG_NAME, overwrite=overwrite)
+    _copy_file_if_needed(source_assets.vocab, target_path / VOCAB_NAME, overwrite=overwrite)
+    _copy_file_if_needed(
+        source_assets.vocab_tensors,
+        target_path / VOCAB_TENSORS_NAME,
+        overwrite=overwrite,
+    )
+
+    target_model_path = target_path / SFM_MODEL_NAME
+    if include_model_weights:
+        if source_assets.sfm_model.exists():
+            _copy_file_if_needed(
+                source_assets.sfm_model,
+                target_model_path,
+                overwrite=overwrite,
+            )
+        elif overwrite and target_model_path.exists():
+            target_model_path.unlink()
+
+    target_cond_path = target_path / COND_DICT_NAME
+    if include_cond_dict:
+        if source_assets.cond_dict.exists():
+            _copy_file_if_needed(
+                source_assets.cond_dict,
+                target_cond_path,
+                overwrite=overwrite,
+            )
+    elif overwrite and target_cond_path.exists():
+        target_cond_path.unlink()
+
+    return ModelAssets(
+        model_source=str(target_path),
+        local_dir=target_path,
+        model_dir=target_path,
+        sfm_config=target_path / SFM_CONFIG_NAME,
+        sfm_model=target_model_path,
+        vocab=target_path / VOCAB_NAME,
+        vocab_tensors=target_path / VOCAB_TENSORS_NAME,
+        cond_dict=target_cond_path,
+        human_tfs=source_assets.human_tfs,
+        mouse_tfs=source_assets.mouse_tfs,
+        omnipath=source_assets.omnipath,
+    )
 
 
 def load_json(path: str | Path) -> Any:
@@ -147,12 +213,21 @@ def save_sfm_config(path: str | Path, payload: dict[str, Any]) -> None:
     save_json(path, payload)
 
 
-def load_vocab_json(path: str | Path) -> pd.DataFrame:
+def load_table_json(path: str | Path) -> pd.DataFrame:
     payload = load_json(path)
     if not isinstance(payload, list):
-        raise ValueError(f"`{path}` must contain a JSON array of token records.")
+        raise ValueError(f"`{path}` must contain a JSON array of records.")
 
-    token_dict = pd.DataFrame(payload)
+    return pd.DataFrame(payload)
+
+
+def save_table_json(path: str | Path, table: pd.DataFrame) -> None:
+    records = table.where(pd.notna(table), None).to_dict(orient="records")
+    save_json(path, records)
+
+
+def load_vocab_json(path: str | Path) -> pd.DataFrame:
+    token_dict = load_table_json(path)
     required_columns = {"token_index", "gene_symbol", "gene_id"}
     missing = required_columns.difference(token_dict.columns)
     if missing:
@@ -176,8 +251,7 @@ def save_vocab_json(path: str | Path, token_dict: pd.DataFrame) -> None:
 
     export_df = token_dict[required_columns].copy()
     export_df = export_df.sort_values("token_index").reset_index(drop=True)
-    records = export_df.where(pd.notna(export_df), None).to_dict(orient="records")
-    save_json(path, records)
+    save_table_json(path, export_df)
 
 
 def load_model_state_dict(path: str | Path) -> dict[str, torch.Tensor]:

@@ -9,32 +9,16 @@ import anndata as ad
 import pandas as pd
 
 from dataclasses import dataclass
-from torch.utils.data import DataLoader, Dataset, DistributedSampler, RandomSampler
+from torch.utils.data import DataLoader, DistributedSampler, RandomSampler
 
 from .collator import ScBatchCollator
-from .dataset import ScDataset
+from .dataset import PreprocessedScDataset
 from .tokenizer import CondTokenizer, ExprTokenizer, GeneTokenizer, ScTokenizer
-from ..assets import load_vocab_json
+from ..assets import load_table_json, load_vocab_json, save_table_json
 from ..distributed import RuntimeContext, broadcast_object
 
 if TYPE_CHECKING:
     from .preprocess import ScPreprocessor
-
-
-class PreprocessedScDataset(ScDataset):
-    def __init__(
-        self,
-        adata,
-        tokenizer: ScTokenizer,
-        gene_key: Optional[str] = None,
-        preprocessor: Optional[ScPreprocessor] = None,
-    ) -> None:
-        self.raw_n_obs = int(adata.n_obs)
-        self.raw_n_vars = int(adata.n_vars)
-        processed = preprocessor(adata) if preprocessor is not None else adata
-        self.processed_n_obs = int(processed.n_obs)
-        self.processed_n_vars = int(processed.n_vars)
-        super().__init__(adata=processed, tokenizer=tokenizer, gene_key=gene_key)
 
 
 @dataclass
@@ -45,6 +29,7 @@ class PretrainingAssets:
     preprocessor: Optional[ScPreprocessor]
     gene_key: str | None
     cond_vocab_size: int
+    collator: ScBatchCollator
 
 
 @dataclass
@@ -109,17 +94,20 @@ def _shuffle_train_paths(
 def _load_table(path: str) -> pd.DataFrame:
     resolved = Path(path).expanduser().resolve()
     if resolved.suffix.lower() == ".json":
-        return load_vocab_json(resolved)
-    return pd.read_csv(resolved)
+        return load_table_json(resolved)
 
+    with resolved.open("r", encoding="utf-8") as handle:
+        prefix = handle.read(256)
+    stripped_prefix = prefix.lstrip()
+    if stripped_prefix.startswith("[") or stripped_prefix.startswith("{"):
+        return load_table_json(resolved)
 
-def _load_optional_table(path: str | None) -> pd.DataFrame | None:
-    if not path:
-        return None
-    resolved = Path(path).expanduser().resolve()
-    if not resolved.exists():
-        return None
-    return pd.read_csv(resolved)
+    try:
+        return pd.read_csv(resolved)
+    except pd.errors.ParserError as exc:
+        raise pd.errors.ParserError(
+            f"Failed to parse table at {resolved}. JSON tables must contain an array of records."
+        ) from exc
 
 
 def _build_preprocessor(config: dict[str, Any], token_dict: pd.DataFrame) -> Optional[ScPreprocessor]:
@@ -135,9 +123,36 @@ def _build_preprocessor(config: dict[str, Any], token_dict: pd.DataFrame) -> Opt
     return ScPreprocessor(**kwargs)
 
 
-def _build_tokenizer(config: dict[str, Any], token_dict: pd.DataFrame) -> ScTokenizer:
+def _condition_vocab_regenerate_enabled(config: dict[str, Any]) -> bool:
+    condition_vocab_cfg = config.get("condition_vocab", {})
+    return bool(condition_vocab_cfg.get("regenerate", False))
+
+
+def _resolve_condition_vocab_table(config: dict[str, Any]) -> pd.DataFrame | None:
     cond_dict_path = config.get("cond_dict_path")
-    cond_dict = _load_optional_table(cond_dict_path)
+    regenerate = _condition_vocab_regenerate_enabled(config)
+    resolved = Path(cond_dict_path).expanduser().resolve() if cond_dict_path else None
+
+    if regenerate:
+        if resolved is not None and resolved.exists():
+            return _load_table(str(resolved))
+        return None
+
+    if not cond_dict_path:
+        raise ValueError(
+            "`data.cond_dict_path` is required when `data.condition_vocab.regenerate` is false."
+        )
+
+    if not resolved.exists():
+        raise FileNotFoundError(
+            f"Condition vocab not found at {resolved}. Set `data.condition_vocab.regenerate: true` "
+            "to rebuild it during pretraining."
+        )
+    return _load_table(str(resolved))
+
+
+def _build_tokenizer(config: dict[str, Any], token_dict: pd.DataFrame) -> ScTokenizer:
+    cond_dict = _resolve_condition_vocab_table(config)
     human_tfs = _load_table(config["human_tfs_path"])
     mouse_tfs = _load_table(config["mouse_tfs_path"])
     condition_mask_cfg = config.get("condition_mask", {})
@@ -172,6 +187,8 @@ def _build_tokenizer(config: dict[str, Any], token_dict: pd.DataFrame) -> ScToke
 
 
 def _fit_condition_vocab(paths: list[Path], tokenizer: ScTokenizer) -> None:
+    if not tokenizer.cond_tokenizer.allow_new_conditions:
+        return
     for path in paths:
         adata = ad.read_h5ad(path, backed="r")
         try:
@@ -183,17 +200,26 @@ def _fit_condition_vocab(paths: list[Path], tokenizer: ScTokenizer) -> None:
 
 def _save_condition_vocab(config: dict[str, Any], tokenizer: ScTokenizer, runtime: RuntimeContext) -> None:
     cond_dict_path = config.get("cond_dict_path")
-    if not cond_dict_path or not runtime.is_main:
+    if not cond_dict_path or not runtime.is_main or not tokenizer.cond_tokenizer.allow_new_conditions:
         return
 
     output_path = Path(cond_dict_path).expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    tokenizer.cond_tokenizer.cond_dict.to_csv(output_path, index=False)
+    save_table_json(output_path, tokenizer.cond_tokenizer.cond_dict)
+
+
+def build_evaluation_assets(config: dict[str, Any], runtime: RuntimeContext) -> PretrainingAssets:
+    eval_config = dict(config)
+    data_cfg = dict(config["data"])
+    data_cfg["condition_vocab"] = {"regenerate": False}
+    data_cfg["condition_mask"] = {"enabled": False, "unk_ratio": 0.0}
+    eval_config["data"] = data_cfg
+    return build_pretraining_assets(config=eval_config, runtime=runtime)
 
 
 def build_pretraining_assets(config: dict[str, Any], runtime: RuntimeContext) -> PretrainingAssets:
     data_cfg = config["data"]
-    token_dict = _load_table(data_cfg["token_dict_path"])
+    token_dict = load_vocab_json(data_cfg["token_dict_path"])
     tokenizer = _build_tokenizer(data_cfg, token_dict=token_dict)
     preprocessor = _build_preprocessor(data_cfg, token_dict=token_dict)
     train_paths = resolve_train_paths(data_cfg.get("train_paths"))
@@ -215,6 +241,7 @@ def build_pretraining_assets(config: dict[str, Any], runtime: RuntimeContext) ->
         preprocessor=preprocessor,
         gene_key=gene_key,
         cond_vocab_size=tokenizer.cond_tokenizer.next_index,
+        collator=ScBatchCollator(),
     )
 
 
@@ -230,7 +257,7 @@ def _build_dataset_for_path(
     logger: Any | None = None,
     file_index: int | None = None,
     num_files: int | None = None,
-) -> Dataset:
+) -> PreprocessedScDataset:
     dataset = PreprocessedScDataset(
         adata=_read_adata(path),
         tokenizer=tokenizer,
@@ -251,6 +278,19 @@ def _build_dataset_for_path(
             dataset.processed_n_vars,
         )
     return dataset
+
+
+def _build_dataloader_kwargs(data_cfg: dict[str, Any]) -> dict[str, Any]:
+    num_workers = int(data_cfg.get("num_workers", 0))
+    kwargs: dict[str, Any] = {
+        "num_workers": num_workers,
+        "pin_memory": bool(data_cfg.get("pin_memory", True)),
+        "drop_last": bool(data_cfg.get("drop_last", False)),
+    }
+    if num_workers > 0:
+        kwargs["persistent_workers"] = bool(data_cfg.get("persistent_workers", True))
+        kwargs["prefetch_factor"] = int(data_cfg.get("prefetch_factor", 2))
+    return kwargs
 
 
 def build_data_bundle_for_path(
@@ -288,10 +328,8 @@ def build_data_bundle_for_path(
         batch_size=int(data_cfg["batch_size"]),
         sampler=train_sampler,
         shuffle=False,
-        num_workers=int(data_cfg.get("num_workers", 0)),
-        pin_memory=bool(data_cfg.get("pin_memory", True)),
-        drop_last=bool(data_cfg.get("drop_last", False)),
-        collate_fn=ScBatchCollator(),
+        collate_fn=assets.collator,
+        **_build_dataloader_kwargs(data_cfg),
     )
     return PretrainingDataBundle(
         train_loader=train_loader,

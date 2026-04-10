@@ -1,13 +1,10 @@
 from __future__ import annotations
 
 from anndata import AnnData
-from torch.utils.data import DataLoader
 from torch.utils.data import Dataset
 
 from typing import Any, Optional
 
-from ..assets import load_vocab_json
-from .collator import ScBatchCollator
 from .tokenizer import ScTokenizer, ScTokenizerOutput
 
 
@@ -24,6 +21,7 @@ class ScDataset(Dataset):
         adata: AnnData,
         tokenizer: ScTokenizer,
         gene_key: Optional[str] = None,
+        preprocessor: Any | None = None,
     ) -> None:
         if not isinstance(adata, AnnData):
             raise TypeError(f"`adata` must be an AnnData object, got {type(adata).__name__}.")
@@ -32,12 +30,18 @@ class ScDataset(Dataset):
                 f"`tokenizer` must be a ScTokenizer object, got {type(tokenizer).__name__}."
             )
 
-        self.adata = adata
+        self.raw_n_obs = int(adata.n_obs)
+        self.raw_n_vars = int(adata.n_vars)
+        processed = preprocessor(adata) if preprocessor is not None else adata
+        self.processed_n_obs = int(processed.n_obs)
+        self.processed_n_vars = int(processed.n_vars)
+
+        self.adata = processed
         self.tokenizer = tokenizer
         self.gene_key = gene_key
 
         self.tokenized: ScTokenizerOutput = self.tokenizer(
-            adata,
+            processed,
             gene_key=gene_key,
         )
 
@@ -69,6 +73,22 @@ class ScDataset(Dataset):
         self.tokenized = None
 
 
+class PreprocessedScDataset(ScDataset):
+    def __init__(
+        self,
+        adata: AnnData,
+        tokenizer: ScTokenizer,
+        gene_key: Optional[str] = None,
+        preprocessor: Any | None = None,
+    ) -> None:
+        super().__init__(
+            adata=adata,
+            tokenizer=tokenizer,
+            gene_key=gene_key,
+            preprocessor=preprocessor,
+        )
+
+
 
 
 if __name__ == "__main__":
@@ -76,8 +96,11 @@ if __name__ == "__main__":
 
     import numpy as np
     import pandas as pd
+    from torch.utils.data import DataLoader
 
+    from ..assets import load_vocab_json
     from ..assets import resolve_model_assets
+    from .collator import ScBatchCollator
 
     root_dir = Path(__file__).resolve().parents[2]
     assets = resolve_model_assets(root_dir / "assets")

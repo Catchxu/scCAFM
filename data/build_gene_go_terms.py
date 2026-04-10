@@ -5,13 +5,19 @@ from pybiomart import Dataset
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-TOKEN_DICT_PATH = ROOT_DIR / "resources" / "token_dict.csv"
-OUTPUT_PATH = ROOT_DIR / "resources" / "gene_go_terms.csv"
+TOKEN_DICT_PATH = ROOT_DIR / "assets" / "models" / "vocab.json"
+OUTPUT_PATH = ROOT_DIR / "checkpoints" / "gene_go_terms.csv"
 ENSEMBL_HOST = "http://www.ensembl.org"
+
+from src.assets import load_vocab_json
 
 
 def load_gene_tokens(path):
-    token_df = pd.read_csv(path)
+    token_path = Path(path).expanduser().resolve()
+    if token_path.suffix.lower() == ".json":
+        token_df = load_vocab_json(token_path)
+    else:
+        token_df = pd.read_csv(token_path)
     token_df = token_df.dropna(subset=["gene_id"]).copy()
     token_df["gene_id"] = token_df["gene_id"].astype(str).str.strip()
     token_df = token_df[token_df["gene_id"].str.startswith("ENSG")].copy()

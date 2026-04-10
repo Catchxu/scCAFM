@@ -9,7 +9,7 @@ INDEX_DIR="${2:?Usage: download_partition.sh QUERY INDEX_DIR OUTPUT_DIR [ORGANIS
 OUTPUT_DIR="${3:?Usage: download_partition.sh QUERY INDEX_DIR OUTPUT_DIR [ORGANISM] [TOKEN_DICT_PATH] [HOMOLOGY_PATH] [PARTITION_IDX]}"
 ORGANISM="${4:-Homo sapiens}"
 TOKEN_DICT_PATH="${5:-}"
-HOMOLOGY_PATH="${6:-${ROOT_DIR}/resources/homologous.csv}"
+HOMOLOGY_PATH="${6:-${ROOT_DIR}/assets/homologous.csv}"
 PARTITION_IDX="${7:-}"
 
 MAX_PARTITION_SIZE="${MAX_PARTITION_SIZE:-200000}"

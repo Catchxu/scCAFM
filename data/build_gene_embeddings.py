@@ -5,12 +5,14 @@ import pandas as pd
 import torch
 from transformers import AutoModel, AutoTokenizer
 
+from src.assets import load_vocab_json, save_vocab_tensor_file
+
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_MODEL_NAME = "/data1021/xukaichen/data/LLM/pubmedbert-base-embeddings"
-DEFAULT_TOKEN_DICT_CSV = ROOT_DIR / "resources" / "token_dict.csv"
-DEFAULT_INPUT_CSV = ROOT_DIR / "resources" / "gene_go_terms.csv"
-DEFAULT_OUTPUT_CKPT = ROOT_DIR / "checkpoints" / "gene_embeddings.pt"
+DEFAULT_TOKEN_DICT_JSON = ROOT_DIR / "assets" / "models" / "vocab.json"
+DEFAULT_INPUT_CSV = ROOT_DIR / "checkpoints" / "gene_go_terms.csv"
+DEFAULT_OUTPUT_CKPT = ROOT_DIR / "checkpoints" / "models" / "vocab.safetensors"
 DEFAULT_BATCH_SIZE = 1024
 UNKNOWN_TERM_TEXT = "GO term: unknown. Domain: unknown."
 
@@ -18,7 +20,7 @@ UNKNOWN_TERM_TEXT = "GO term: unknown. Domain: unknown."
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-name", default=DEFAULT_MODEL_NAME)
-    parser.add_argument("--token-dict", type=Path, default=DEFAULT_TOKEN_DICT_CSV)
+    parser.add_argument("--token-dict", type=Path, default=DEFAULT_TOKEN_DICT_JSON)
     parser.add_argument("--input-csv", type=Path, default=DEFAULT_INPUT_CSV)
     parser.add_argument("--output-ckpt", type=Path, default=DEFAULT_OUTPUT_CKPT)
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
@@ -46,7 +48,11 @@ def parse_gpu_ids(gpus_arg):
 
 
 def load_gene_tokens(path):
-    token_df = pd.read_csv(path)
+    token_path = Path(path).expanduser().resolve()
+    if token_path.suffix.lower() == ".json":
+        token_df = load_vocab_json(token_path)
+    else:
+        token_df = pd.read_csv(token_path)
     token_df = token_df.dropna(subset=["gene_symbol", "gene_id"]).copy()
     token_df["gene_symbol"] = token_df["gene_symbol"].astype(str).str.strip()
     token_df["gene_id"] = token_df["gene_id"].astype(str).str.strip()
@@ -183,13 +189,16 @@ def main():
     gene_symbols, embeddings = build_gene_embeddings(gene_text_df, text_to_embedding)
 
     args.output_ckpt.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "gene_symbols": gene_symbols,
-            "embeddings": embeddings,
-        },
-        args.output_ckpt,
-    )
+    if args.output_ckpt.suffix.lower() == ".safetensors":
+        save_vocab_tensor_file(args.output_ckpt, embeddings)
+    else:
+        torch.save(
+            {
+                "gene_symbols": gene_symbols,
+                "embeddings": embeddings,
+            },
+            args.output_ckpt,
+        )
 
     print(
         f"Saved {len(gene_symbols)} gene embeddings to {args.output_ckpt} "

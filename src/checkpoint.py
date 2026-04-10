@@ -91,7 +91,7 @@ class CheckpointManager:
 
         return {
             "saved_at_utc": datetime.now(timezone.utc).isoformat(),
-            "model_source": self.assets.model_source,
+            "model_source": str(self.config.get("model_source", self.assets.model_source)),
             "asset_dir": str(self.assets.local_dir),
             "model_weights_path": str(self.model_weights_path()),
             "resume_state_path": str(self.latest_resume_state_path()),

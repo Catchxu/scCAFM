@@ -85,7 +85,7 @@ def main():
         "--token-dict-path",
         type=str,
         default=None,
-        help="Optional path to token_dict.csv. If provided, redownloaded partitions will keep only genes found in the token dictionary.",
+        help="Optional path to the token dictionary asset. If provided, redownloaded partitions will keep only genes found in the token dictionary.",
     )
     parser.add_argument(
         "--homology-path",

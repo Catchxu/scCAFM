@@ -7,7 +7,12 @@ from typing import Any
 
 import torch
 
-from ..assets import apply_model_assets_to_runtime_config, load_sfm_config, resolve_model_assets
+from ..assets import (
+    apply_model_assets_to_runtime_config,
+    load_sfm_config,
+    materialize_model_package,
+    resolve_model_assets,
+)
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from tqdm import tqdm
 
@@ -15,8 +20,6 @@ from .builders import (
     build_model,
     build_optimizer,
     build_scheduler,
-    maybe_compile_model,
-    resolve_compile_settings,
     maybe_wrap_fsdp,
 )
 from ..checkpoint import CheckpointManager
@@ -104,9 +107,9 @@ def _log_run_summary(
     scheduler_cfg = config["scheduler"]
     trainer_cfg = config["trainer"]
     precision_cfg = runtime_cfg.get("precision", {})
-    compile_cfg = resolve_compile_settings(config)
     preprocess_cfg = data_cfg.get("preprocess", {})
     condition_mask_cfg = data_cfg.get("condition_mask", {})
+    condition_vocab_cfg = data_cfg.get("condition_vocab", {})
     batch_size = int(data_cfg["batch_size"])
     grad_accum_steps = int(data_cfg.get("gradient_accumulation_steps", 1))
     global_batch_size = batch_size * int(runtime.world_size) * grad_accum_steps
@@ -121,14 +124,6 @@ def _log_run_summary(
         "Precision: model_dtype=%s, autocast_dtype=%s",
         precision_cfg.get("model_dtype", "fp32"),
         precision_cfg.get("autocast_dtype", "fp32"),
-    )
-    logger.info(
-        "Compile: enabled=%s, backend=%s, mode=%s, dynamic=%s, fullgraph=%s",
-        compile_cfg["enabled"],
-        compile_cfg["backend"],
-        compile_cfg["mode"],
-        compile_cfg["dynamic"],
-        compile_cfg["fullgraph"],
     )
     logger.info(
         "Data: num_adata=%s, batch_size=%s, gradient_accumulation_steps=%s, global_batch_size=%s, max_length=%s",
@@ -172,6 +167,11 @@ def _log_run_summary(
         condition_mask_cfg.get("enabled", False),
         condition_mask_cfg.get("unk_ratio", 0.1),
         "platform,tissue,disease",
+    )
+    logger.info(
+        "Condition vocab: regenerate=%s, cond_vocab_size=%s",
+        condition_vocab_cfg.get("regenerate", False),
+        data_assets.cond_vocab_size,
     )
     logger.info("=================================")
 
@@ -429,14 +429,14 @@ def main() -> None:
     try:
         pretrain_config = load_yaml_config(args.pretrain_config)
         model_source = pretrain_config["model_source"]
-        assets = resolve_model_assets(model_source=model_source, require_model_weights=False)
-        sfm_config = load_sfm_config(assets.sfm_config)
+        source_assets = resolve_model_assets(model_source=model_source, require_model_weights=False)
+        sfm_config = load_sfm_config(source_assets.sfm_config)
         config = apply_model_assets_to_runtime_config(
             {
                 "model": sfm_config,
                 **pretrain_config,
             },
-            assets,
+            source_assets,
             require_model_weights=False,
         )
 
@@ -450,6 +450,22 @@ def main() -> None:
             runtime=runtime,
         )
 
+        regenerate_condition_vocab = bool(
+            config["data"].get("condition_vocab", {}).get("regenerate", False)
+        )
+        checkpoint_assets = materialize_model_package(
+            source_assets=source_assets,
+            target_dir=paths.model_package_dir,
+            include_model_weights=True,
+            include_cond_dict=not regenerate_condition_vocab,
+            overwrite=args.resume is None,
+        )
+        config = apply_model_assets_to_runtime_config(
+            config,
+            checkpoint_assets,
+            require_model_weights=False,
+        )
+
         data_assets = build_pretraining_assets(config=config, runtime=runtime)
         model = build_model(
             sfm_config=config["model"],
@@ -461,7 +477,7 @@ def main() -> None:
                 train_size=0,
                 path=data_assets.train_paths[0],
             ),
-            assets=assets,
+            assets=checkpoint_assets,
         )
 
         total_steps = estimate_total_training_steps(
@@ -478,7 +494,7 @@ def main() -> None:
 
         checkpoint_manager = CheckpointManager(
             paths=paths,
-            assets=assets,
+            assets=checkpoint_assets,
             runtime=runtime,
             logger=logger,
             config=config,
@@ -496,11 +512,6 @@ def main() -> None:
         if resume_payload is not None:
             loss_manager.load_state_dict(resume_payload["loss_manager_state_dict"])
 
-        model = maybe_compile_model(
-            model=model,
-            config=config,
-            runtime=runtime,
-        )
         model = maybe_wrap_fsdp(
             model=model,
             config=config,
