@@ -178,6 +178,7 @@ cython_debug/
 assets/
 logs/
 results/
+checkpoints/
 .codex
 slurm-*.out
 slurm-*.err

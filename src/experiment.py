@@ -37,7 +37,10 @@ def prepare_experiment_paths(
 ) -> ExperimentPaths:
     if resume_path:
         checkpoint_path = Path(resume_path).expanduser().resolve()
-        root = checkpoint_path.parent
+        if checkpoint_path.parent.name == "checkpoints":
+            root = checkpoint_path.parent.parent
+        else:
+            root = checkpoint_path.parent
     elif runtime.is_main:
         root = Path.cwd().resolve()
     else:
@@ -59,8 +62,8 @@ def prepare_experiment_paths(
         checkpoints=checkpoints,
         model_package_dir=model_package_dir,
         log_file=logs / "pretrain.log",
-        resume_manifest_file=logs / "resume_manifest.json",
-        resume_state_file=root / "sfm_train_state.pt",
+        resume_manifest_file=checkpoints / "resume_manifest.json",
+        resume_state_file=checkpoints / "sfm_train_state.pt",
     )
 
 

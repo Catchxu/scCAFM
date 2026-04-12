@@ -61,7 +61,7 @@ class CheckpointManager:
 
     @staticmethod
     def _resume_manifest_path_for_resume_file(resume_state_path: Path) -> Path:
-        return resume_state_path.parent / "logs" / "resume_manifest.json"
+        return resume_state_path.parent / "resume_manifest.json"
 
     @staticmethod
     def _current_train_path(train_state: dict[str, Any], train_paths: list[Path]) -> str | None:

@@ -504,7 +504,7 @@ def main() -> None:
         resume_payload = checkpoint_manager.load_resume_state(args.resume)
         if resume_payload is not None and model_state is None:
             raise FileNotFoundError(
-                f"Full resume requires model weights at {assets.sfm_model}, but none were found."
+                f"Full resume requires model weights at {checkpoint_assets.sfm_model}, but none were found."
             )
 
         if model_state is not None:

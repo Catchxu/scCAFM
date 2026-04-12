@@ -251,8 +251,8 @@ def prepare_evaluation_paths(
         checkpoints=checkpoints,
         model_package_dir=model_package_dir,
         log_file=logs / "evaluate_grn.log",
-        resume_manifest_file=logs / "resume_manifest.json",
-        resume_state_file=root / "sfm_train_state.pt",
+        resume_manifest_file=checkpoints / "resume_manifest.json",
+        resume_state_file=checkpoints / "sfm_train_state.pt",
     )
 
 
