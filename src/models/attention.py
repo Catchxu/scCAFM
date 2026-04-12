@@ -46,6 +46,8 @@ class FlashMHA(nn.Module):
         out_bias: bool = True,
         rotary_base: float = 10000.0,
         rotary_interleaved: bool = False,
+        force_fa2: bool = False,
+        fa4_min_cc: int = 90,
     ):
         super().__init__()
 
@@ -62,7 +64,10 @@ class FlashMHA(nn.Module):
         self._fa4_available = (
             cute_flash_attn_func is not None and cute_flash_attn_varlen_func is not None
         )
-        self._fa4_runtime_disabled = False
+        self._fa4_runtime_disabled = bool(force_fa2)
+        self._fa4_checked = False
+        self._fa4_supported = False
+        self._fa4_min_cc = int(fa4_min_cc)
 
         self.qkv_proj = nn.Linear(embed_dim, 3 * embed_dim, bias=qkv_bias)
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=out_bias)
@@ -82,7 +87,22 @@ class FlashMHA(nn.Module):
             self.rotary_emb = None
 
     def _should_try_fa4(self) -> bool:
-        return self._fa4_available and not self._fa4_runtime_disabled
+        if not self._fa4_available or self._fa4_runtime_disabled:
+            return False
+        if not self._fa4_checked:
+            self._fa4_supported = self._check_fa4_support()
+            self._fa4_checked = True
+        return self._fa4_supported
+
+    def _check_fa4_support(self) -> bool:
+        if not torch.cuda.is_available():
+            return False
+        try:
+            major, minor = torch.cuda.get_device_capability()
+        except Exception:
+            return False
+        cc = major * 10 + minor
+        return cc >= self._fa4_min_cc
 
     def _disable_fa4(self, exc: Exception) -> None:
         if not self._fa4_runtime_disabled:
@@ -105,7 +125,7 @@ class FlashMHA(nn.Module):
 
     def _run_fa2_dense(self, qkv: torch.Tensor, *, causal: bool) -> torch.Tensor:
         return flash_attn_qkvpacked_func(
-            qkv,
+            qkv.contiguous(),
             dropout_p=0.0,
             softmax_scale=self.softmax_scale,
             causal=causal,
@@ -117,7 +137,7 @@ class FlashMHA(nn.Module):
         *,
         causal: bool,
     ) -> torch.Tensor:
-        q, k, v = qkv.unbind(dim=2)
+        q, k, v = qkv.contiguous().unbind(dim=2)
         return self._normalize_attention_output(
             cute_flash_attn_func(
                 q,
@@ -137,7 +157,7 @@ class FlashMHA(nn.Module):
         causal: bool,
     ) -> torch.Tensor:
         return flash_attn_varlen_qkvpacked_func(
-            qkv_unpad,
+            qkv_unpad.contiguous(),
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
             dropout_p=0.0,
@@ -153,7 +173,7 @@ class FlashMHA(nn.Module):
         max_seqlen: int,
         causal: bool,
     ) -> torch.Tensor:
-        q_unpad, k_unpad, v_unpad = qkv_unpad.unbind(dim=1)
+        q_unpad, k_unpad, v_unpad = qkv_unpad.contiguous().unbind(dim=1)
         return self._normalize_attention_output(
             cute_flash_attn_varlen_func(
                 q_unpad,
