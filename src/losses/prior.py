@@ -118,6 +118,37 @@ class PriorLoss(nn.Module):
         return supervise_mask, target
 
     @staticmethod
+    def _bound_probability(
+        edge_prob: torch.Tensor,
+        eps: float = 1e-8,
+    ) -> torch.Tensor:
+        if not 0.0 < eps < 0.5:
+            raise ValueError(f"`eps` must be in (0, 0.5), got {eps}.")
+
+        dtype_eps = torch.finfo(edge_prob.dtype).eps
+        eps = max(float(eps), float(dtype_eps))
+        if not 0.0 < eps < 0.5:
+            raise ValueError(f"Resolved `eps` must be in (0, 0.5), got {eps}.")
+
+        edge_prob = torch.nan_to_num(edge_prob, nan=0.0, posinf=1.0, neginf=0.0)
+        edge_prob = edge_prob.clamp(min=0.0, max=1.0)
+
+        # Keep probabilities in the open interval (eps, 1 - eps) without
+        # flattening gradients at exact 0/1 values. This matters here because
+        # sparse routers can produce exact zero overlap for many candidate edges.
+        return edge_prob * (1.0 - 2.0 * eps) + eps
+
+    @classmethod
+    def _edge_logits_from_factors(
+        cls,
+        factors: FactorState,
+        eps: float = 1e-8,
+    ) -> torch.Tensor:
+        edge_prob = torch.bmm(factors.u, factors.v.transpose(1, 2))
+        edge_prob = cls._bound_probability(edge_prob, eps=eps)
+        return torch.logit(edge_prob)
+
+    @staticmethod
     def _sample_negative_mask(
         supervise_mask: torch.BoolTensor,
         target: torch.Tensor,
@@ -196,8 +227,7 @@ class PriorLoss(nn.Module):
         if not supervise_mask.any():
             return factors.u.new_zeros(())
 
-        edge_prob = torch.bmm(factors.u, factors.v.transpose(1, 2)).clamp(1e-8, 1.0 - 1e-8)
-        edge_logits = torch.logit(edge_prob)
+        edge_logits = self._edge_logits_from_factors(factors)
         target_f = target.to(edge_logits.dtype)
         loss = F.binary_cross_entropy_with_logits(edge_logits, target_f, reduction="none")
         weight = target_f * self.pos_weight + (

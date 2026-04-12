@@ -121,7 +121,8 @@ hf upload-large-folder \
   "${HF_REPO_ID}" "${ASSETS_DIR}" \
   --repo-type "${HF_REPO_TYPE}" \
   --revision "${HF_REVISION}" \
-  --exclude ".cache/**" "__pycache__/**" \
+  --exclude ".cache/**" \
+  --exclude "__pycache__/**" \
   --no-bars
 
 echo "Pushed ${ASSETS_DIR} to https://huggingface.co/${HF_REPO_ID} via API sync"

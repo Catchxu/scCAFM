@@ -8,6 +8,7 @@ from typing import Any
 import torch
 
 from ..assets import (
+    ModelAssets,
     apply_model_assets_to_runtime_config,
     load_sfm_config,
     materialize_model_package,
@@ -33,12 +34,13 @@ from ..data import (
 )
 from ..distributed import (
     RuntimeContext,
+    barrier,
     cleanup_distributed,
     initialize_distributed,
     move_batch_to_device,
     reduce_scalar_dict,
 )
-from ..experiment import ExperimentLogger, format_metric_value, prepare_experiment_paths
+from ..experiment import ExperimentLogger, prepare_experiment_paths
 from ..losses import PretrainingLossManager
 from ..models.router import QBGating
 
@@ -173,11 +175,10 @@ def _log_run_summary(
         total_steps,
     )
     logger.info(
-        "Trainer: epochs=%s, grad_clip_norm=%s, save_every_epochs=%s, log_every_steps=%s",
+        "Trainer: epochs=%s, grad_clip_norm=%s, save_every_epochs=%s",
         trainer_cfg["epochs"],
         trainer_cfg.get("grad_clip_norm"),
         trainer_cfg.get("save_every_epochs", 1),
-        trainer_cfg.get("log_every_steps", 10),
     )
     logger.info(
         "Preprocess: enabled=%s, min_genes=%s, min_cells=%s, n_top_genes=%s, hvg_flavor=%s",
@@ -258,35 +259,6 @@ class PretrainingTrainer:
             return float(grad_norm.detach().item())
         return float(grad_norm)
 
-    def _log_step(
-        self,
-        metrics: dict[str, float],
-        current_step: int,
-        total_steps: int,
-        next_log_step: int,
-    ) -> int:
-        log_every_steps = int(self.train_cfg.get("log_every_steps", 10))
-        if log_every_steps <= 0:
-            raise ValueError(f"`trainer.log_every_steps` must be positive, got {log_every_steps}.")
-
-        if current_step < next_log_step:
-            return next_log_step
-
-        reduced = reduce_scalar_dict(metrics, self.runtime)
-        metric_text = ", ".join(
-            f"{key}={format_metric_value(value)}" for key, value in reduced.items()
-        )
-        self.logger.info(
-            "[train step=%s/%s] %s",
-            int(current_step),
-            int(total_steps),
-            metric_text,
-        )
-
-        while next_log_step <= current_step:
-            next_log_step += log_every_steps
-        return next_log_step
-
     def _maybe_save_checkpoint(self, epoch: int) -> None:
         save_every_epochs = int(self.train_cfg.get("save_every_epochs", 1))
         if epoch % save_every_epochs != 0:
@@ -365,8 +337,6 @@ class PretrainingTrainer:
                         desc=f"adata {file_index}/{len(train_paths)} epoch {epoch + 1}/{epochs}",
                     )
                     try:
-                        total_forward_steps = len(data_bundle.train_loader) * int(self.runtime.world_size)
-                        next_log_step = int(self.train_cfg.get("log_every_steps", 10))
                         self.optimizer.zero_grad(set_to_none=True)
                         accum_metric_sums: dict[str, float] = {}
                         accum_micro_steps = 0
@@ -400,14 +370,6 @@ class PretrainingTrainer:
                             epoch_steps += 1
                             for key, value in metrics.items():
                                 epoch_metric_sums[key] = epoch_metric_sums.get(key, 0.0) + float(value)
-
-                            global_forward_step = batch_idx * int(self.runtime.world_size)
-                            next_log_step = self._log_step(
-                                metrics,
-                                current_step=global_forward_step,
-                                total_steps=total_forward_steps,
-                                next_log_step=next_log_step,
-                            )
 
                             if should_step:
                                 self._clip_grad_norm()
@@ -475,22 +437,54 @@ def main() -> None:
             runtime=runtime,
         )
 
-        regenerate_condition_vocab = bool(
+        requested_regenerate_condition_vocab = bool(
             config["data"].get("condition_vocab", {}).get("regenerate", False)
         )
-        include_model_weights = args.resume is not None
-        checkpoint_assets = materialize_model_package(
-            source_assets=source_assets,
-            target_dir=paths.model_package_dir,
-            include_model_weights=include_model_weights,
-            include_cond_dict=not regenerate_condition_vocab,
-            overwrite=args.resume is None,
+        is_resume = args.resume is not None
+        regenerate_condition_vocab = requested_regenerate_condition_vocab and not is_resume
+        if runtime.is_main and requested_regenerate_condition_vocab and is_resume:
+            logger.info(
+                "Resume detected: disabling condition-vocab regeneration and reusing checkpoint cond_dict.json."
+            )
+        # A fresh pretraining run starts from scratch by default. We still stage
+        # the run-local package under `checkpoints/models`, but only a true
+        # resume should load model weights from that package.
+        include_model_weights = is_resume
+        if runtime.is_main:
+            checkpoint_assets = materialize_model_package(
+                source_assets=source_assets,
+                target_dir=paths.model_package_dir,
+                include_model_weights=include_model_weights,
+                include_cond_dict=is_resume or (not regenerate_condition_vocab),
+                overwrite=not is_resume,
+            )
+        barrier()
+        checkpoint_assets = ModelAssets(
+            model_source=str(paths.model_package_dir),
+            local_dir=paths.model_package_dir,
+            model_dir=paths.model_package_dir,
+            sfm_config=paths.model_package_dir / "sfm_config.json",
+            sfm_model=paths.model_package_dir / "sfm_model.safetensors",
+            vocab=paths.model_package_dir / "vocab.json",
+            vocab_tensors=paths.model_package_dir / "vocab.safetensors",
+            cond_dict=paths.model_package_dir / "cond_dict.json",
+            human_tfs=source_assets.human_tfs,
+            mouse_tfs=source_assets.mouse_tfs,
+            omnipath=source_assets.omnipath,
         )
+        runtime_assets = source_assets
         config = apply_model_assets_to_runtime_config(
             config,
-            checkpoint_assets,
+            runtime_assets,
             require_model_weights=False,
         )
+        if is_resume:
+            config["data"]["condition_vocab"] = {"regenerate": False}
+            config["data"]["cond_dict_path"] = str(checkpoint_assets.cond_dict)
+            config["data"].pop("cond_dict_output_path", None)
+        elif regenerate_condition_vocab:
+            config["data"]["cond_dict_output_path"] = str(checkpoint_assets.cond_dict)
+            config["data"]["cond_dict_path"] = str(checkpoint_assets.cond_dict)
 
         data_assets = build_pretraining_assets(config=config, runtime=runtime)
         model = build_model(
@@ -503,7 +497,7 @@ def main() -> None:
                 train_size=0,
                 path=data_assets.train_paths[0],
             ),
-            assets=checkpoint_assets,
+            assets=runtime_assets,
         )
 
         total_steps = estimate_total_training_steps(

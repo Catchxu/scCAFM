@@ -130,6 +130,13 @@ def _copy_file_if_needed(source: Path, destination: Path, *, overwrite: bool = F
     shutil.copy2(source, destination)
 
 
+def _safe_unlink(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
 def materialize_model_package(
     source_assets: ModelAssets,
     target_dir: str | Path,
@@ -158,7 +165,7 @@ def materialize_model_package(
                 overwrite=overwrite,
             )
         elif overwrite and target_model_path.exists():
-            target_model_path.unlink()
+            _safe_unlink(target_model_path)
 
     target_cond_path = target_path / COND_DICT_NAME
     if include_cond_dict:
@@ -169,7 +176,7 @@ def materialize_model_package(
                 overwrite=overwrite,
             )
     elif overwrite and target_cond_path.exists():
-        target_cond_path.unlink()
+        _safe_unlink(target_cond_path)
 
     return ModelAssets(
         model_source=str(target_path),

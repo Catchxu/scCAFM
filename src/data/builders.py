@@ -199,7 +199,7 @@ def _fit_condition_vocab(paths: list[Path], tokenizer: ScTokenizer) -> None:
 
 
 def _save_condition_vocab(config: dict[str, Any], tokenizer: ScTokenizer, runtime: RuntimeContext) -> None:
-    cond_dict_path = config.get("cond_dict_path")
+    cond_dict_path = config.get("cond_dict_output_path") or config.get("cond_dict_path")
     if not cond_dict_path or not runtime.is_main or not tokenizer.cond_tokenizer.allow_new_conditions:
         return
 
