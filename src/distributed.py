@@ -36,10 +36,10 @@ def initialize_distributed() -> RuntimeContext:
         backend = "gloo"
 
     if distributed and not dist.is_initialized():
-        init_kwargs: dict[str, Any] = {"backend": backend}
-        if device.type == "cuda":
-            init_kwargs["device_id"] = device
-        dist.init_process_group(**init_kwargs)
+        # Let NCCL initialize lazily instead of forcing an eager single-device
+        # connect during process-group setup. This is more robust across Slurm
+        # environments where CUDA/NCCL library resolution can be finicky.
+        dist.init_process_group(backend=backend)
 
     return RuntimeContext(
         rank=rank,

@@ -288,7 +288,9 @@ def _build_dataloader_kwargs(data_cfg: dict[str, Any]) -> dict[str, Any]:
         "drop_last": bool(data_cfg.get("drop_last", False)),
     }
     if num_workers > 0:
-        kwargs["persistent_workers"] = bool(data_cfg.get("persistent_workers", True))
+        # This pipeline builds one DataLoader per `.h5ad`, so persisting workers
+        # across loader instances mostly keeps extra CPU-side state alive longer.
+        kwargs["persistent_workers"] = bool(data_cfg.get("persistent_workers", False))
         kwargs["prefetch_factor"] = int(data_cfg.get("prefetch_factor", 2))
     return kwargs
 

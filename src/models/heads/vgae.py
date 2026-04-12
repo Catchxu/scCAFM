@@ -211,22 +211,27 @@ class VGAE(nn.Module):
         if factors is None:
             raise ValueError("`factors` must be provided.")
 
-        expression_values = require_tensor(tokens, "expression_values")
+        expression_values = require_tensor(tokens, "expression_values").float()
         active_mask = build_active_value_mask(
             values=expression_values,
             padding_mask=tokens.get("padding_mask"),
         )
         validate_factor_shapes(factors=factors, input_shape_prefix=expression_values.shape)
 
+        factors_fp32 = FactorState(
+            u=factors.u.float(),
+            v=factors.v.float(),
+        )
+
         mu_z, sigma_z = self.encoder(
             expression_values=expression_values,
-            factors=factors,
+            factors=factors_fp32,
             active_mask=active_mask,
         )
         z = reparameterize(mu_z, sigma_z)
         mu_h, sigma_h, p_drop = self.decoder.decode(
             z=z,
-            factors=factors,
+            factors=factors_fp32,
             active_mask=active_mask,
         )
 

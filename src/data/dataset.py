@@ -45,8 +45,15 @@ class ScDataset(Dataset):
             gene_key=gene_key,
         )
 
+        # After tokenization, the training pipeline only reads from the cached
+        # token tensors. Releasing the AnnData object here avoids keeping a full
+        # CPU-side copy of the processed matrix alive for the whole file.
+        if getattr(self.adata, "file", None) is not None:
+            self.adata.file.close()
+        self.adata = None
+
     def __len__(self) -> int:
-        return int(self.adata.n_obs)
+        return self.processed_n_obs
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         if not 0 <= index < len(self):

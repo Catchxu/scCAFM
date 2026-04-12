@@ -5,11 +5,12 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --gpus=1
-#SBATCH --mem=32G
+#SBATCH --gpus=2
+#SBATCH --mem=64G
 #SBATCH --time=48:00:00
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=kxu248@emory.edu
+
 
 set -euo pipefail
 
@@ -31,7 +32,28 @@ else
   exit 1
 fi
 
-NPROC_PER_NODE="${NPROC_PER_NODE:-1}"
+if [[ -z "${NPROC_PER_NODE:-}" ]]; then
+  if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+    IFS=',' read -ra _GPU_LIST <<< "${CUDA_VISIBLE_DEVICES}"
+    NPROC_PER_NODE="${#_GPU_LIST[@]}"
+  elif [[ -n "${SLURM_GPUS_ON_NODE:-}" ]]; then
+    IFS=',' read -ra _GPU_LIST <<< "${SLURM_GPUS_ON_NODE}"
+    NPROC_PER_NODE="${#_GPU_LIST[@]}"
+  elif command -v nvidia-smi >/dev/null 2>&1; then
+    NPROC_PER_NODE="$(nvidia-smi -L | wc -l | tr -d '[:space:]')"
+  else
+    NPROC_PER_NODE=1
+  fi
+fi
+
+if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+  IFS=',' read -ra _VISIBLE_GPU_LIST <<< "${CUDA_VISIBLE_DEVICES}"
+  VISIBLE_GPU_COUNT="${#_VISIBLE_GPU_LIST[@]}"
+  if [[ "${VISIBLE_GPU_COUNT}" -gt 0 && "${NPROC_PER_NODE}" -gt "${VISIBLE_GPU_COUNT}" ]]; then
+    echo "Warning: NPROC_PER_NODE=${NPROC_PER_NODE} exceeds CUDA_VISIBLE_DEVICES count (${VISIBLE_GPU_COUNT}). Clamping to ${VISIBLE_GPU_COUNT}." >&2
+    NPROC_PER_NODE="${VISIBLE_GPU_COUNT}"
+  fi
+fi
 SFM_PRETRAIN_CONFIG="${SFM_PRETRAIN_CONFIG:-${PRETRAIN_CONFIG:-${ROOT_DIR}/configs/sfm_pretrain.yaml}}"
 EXTRA_ARGS=()
 

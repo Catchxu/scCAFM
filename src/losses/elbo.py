@@ -29,6 +29,9 @@ class ELBOLoss(nn.Module):
         eps: float = 1e-8,
     ) -> torch.Tensor:
         x = x.to(mu.dtype)
+        mu = torch.nan_to_num(mu, nan=0.0, posinf=1e4, neginf=-1e4)
+        sigma = torch.nan_to_num(sigma, nan=1.0, posinf=1e4, neginf=1e-5)
+        p_drop = torch.nan_to_num(p_drop, nan=0.0, posinf=1.0, neginf=0.0)
         sigma = sigma.clamp_min(1e-5)
         p_drop = p_drop.clamp(min=1e-5, max=1.0 - 1e-5)
 
@@ -48,6 +51,8 @@ class ELBOLoss(nn.Module):
         sigma: torch.Tensor,
         active_mask: torch.BoolTensor,
     ) -> torch.Tensor:
+        mu = torch.nan_to_num(mu, nan=0.0, posinf=1e4, neginf=-1e4)
+        sigma = torch.nan_to_num(sigma, nan=1.0, posinf=1e4, neginf=1e-5)
         sigma = sigma.clamp_min(1e-5)
         kl = 0.5 * (
             mu.pow(2) + sigma.pow(2) - 1.0 - torch.log(sigma.pow(2))

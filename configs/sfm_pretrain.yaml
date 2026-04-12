@@ -16,7 +16,7 @@ data:
   shuffle_train_paths: true
   shuffle_train_paths_seed: 0
   batch_size: 64
-  gradient_accumulation_steps: 4
+  gradient_accumulation_steps: 2
   num_workers: 4
   pin_memory: true
   drop_last: false
@@ -77,12 +77,12 @@ loss:
       final: 0.1
       span_epochs: null
   dag:
-    enabled: False
+    enabled: true
     kwargs:
       lambda_dag: 1.0
 
 trainer:
   epochs: 1
   grad_clip_norm: 1.0
-  log_every_steps: 10000
+  log_every_steps: 5000
   save_every_epochs: 1

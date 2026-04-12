@@ -478,10 +478,11 @@ def main() -> None:
         regenerate_condition_vocab = bool(
             config["data"].get("condition_vocab", {}).get("regenerate", False)
         )
+        include_model_weights = args.resume is not None
         checkpoint_assets = materialize_model_package(
             source_assets=source_assets,
             target_dir=paths.model_package_dir,
-            include_model_weights=True,
+            include_model_weights=include_model_weights,
             include_cond_dict=not regenerate_condition_vocab,
             overwrite=args.resume is None,
         )
@@ -525,7 +526,7 @@ def main() -> None:
             config=config,
             data_assets=data_assets,
         )
-        model_state = checkpoint_manager.load_model_weights()
+        model_state = checkpoint_manager.load_model_weights() if include_model_weights else None
         resume_payload = checkpoint_manager.load_resume_state(args.resume)
         if resume_payload is not None and model_state is None:
             raise FileNotFoundError(
@@ -537,13 +538,6 @@ def main() -> None:
                 model_state,
                 enabled=regenerate_condition_vocab and resume_payload is None,
             )
-            if runtime.is_main and removed_keys:
-                logger.info(
-                    "Skipping %s pretrained condition-embedding parameter(s) because "
-                    "data.condition_vocab.regenerate=true: %s",
-                    len(removed_keys),
-                    ",".join(removed_keys),
-                )
             model.load_state_dict(filtered_model_state, strict=not bool(removed_keys))
         if resume_payload is not None:
             loss_manager.load_state_dict(resume_payload["loss_manager_state_dict"])
