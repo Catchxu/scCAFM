@@ -61,7 +61,7 @@ def prepare_experiment_paths(
         logs=logs,
         checkpoints=checkpoints,
         model_package_dir=model_package_dir,
-        log_file=logs / "pretrain.log",
+        log_file=logs / "sfm_pretrain.log",
         resume_manifest_file=checkpoints / "resume_manifest.json",
         resume_state_file=checkpoints / "sfm_train_state.pt",
     )
