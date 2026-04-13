@@ -184,13 +184,10 @@ class CheckpointManager:
             self.logger.info("Model weights saved to %s", model_weights_path)
             self.logger.info("Resume state saved to %s", resume_state_path)
             self.logger.info(
-                "Resume manifest saved to %s (global_step=%s, epoch=%s, file_index=%s, optimizer=%s, scheduler=%s)",
+                "Resume manifest saved to %s (global_step=%s, epoch=%s)",
                 resume_manifest_path,
                 int(train_state.get("global_step", 0)),
                 int(train_state.get("epoch", 0)),
-                int(train_state.get("file_index", 0)),
-                optimizer.__class__.__name__,
-                scheduler.__class__.__name__,
             )
 
         barrier()

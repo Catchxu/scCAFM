@@ -16,7 +16,7 @@ data:
   shuffle_train_paths: true
   shuffle_train_paths_seed: 0
   batch_size: 64
-  gradient_accumulation_steps: 1
+  gradient_accumulation_steps: 2
   num_workers: 0
   pin_memory: false
   drop_last: false

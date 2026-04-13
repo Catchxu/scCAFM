@@ -5,8 +5,8 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --gpus=4
-#SBATCH --mem=64G
+#SBATCH --gpus=2
+#SBATCH --mem=128G
 #SBATCH --time=48:00:00
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=kxu248@emory.edu
