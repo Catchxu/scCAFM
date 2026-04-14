@@ -315,6 +315,10 @@ class PretrainingTrainer:
                 )
 
                 start_epoch = int(self.train_state.get("epoch", 0)) if file_offset == start_file_index else 0
+                if start_epoch >= epochs:
+                    # If a resume checkpoint was saved after completing the file's last epoch,
+                    # retrain the file instead of silently skipping it.
+                    start_epoch = 0
                 for epoch in range(start_epoch, epochs):
                     epoch_metric_sums: dict[str, float] = {}
                     epoch_steps = 0
