@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=pretrain
 #SBATCH --account=general
-#SBATCH --partition=h200-8-gm1128-c192-m2048
+#SBATCH --partition=rp6b-8-gm768-c192-m2048
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
