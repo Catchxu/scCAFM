@@ -9,13 +9,13 @@ scCAFM is a causality-aware foundation model designed for large-scale single-cel
 <br/>
 
 
-## Key features
-**Structure foundation module (SFM)**
+## Key Features
+**Structure Foundation Module (SFM)**
 * Efficient, context-aware causal GRN inference in a latent factor space.
 * Uses a Mixture-of-Experts (MoE) architecture so different latent experts capture distinct regulatory contexts; this enables per-cell GRN specialization without learning a full causal model per cell.
 * Outputs: per-cell directed edges with causal confidence, context assignment, and compact latent summaries.
 
-**Embedding foundation module (EFM)**
+**Embedding Foundation Module (EFM)**
 * Learns gene and cell embeddings guided by the SFM-inferred causal structure (e.g., contrastive/cause-aware objectives).
 * Embeddings are transferable: they improve downstream supervised and unsupervised tasks (drug sensitivity, perturbation response prediction, trajectory/lineage inference).
 
@@ -63,7 +63,7 @@ python -m src.models.attention
 ```
 
 
-## Hugging Face assets
+## Hugging Face Assets
 scCAFM now uses an asset package that is compatible with both a local directory and a Hugging Face model repository. The canonical asset files are:
 
 * `models/sfm_config.json`
@@ -97,7 +97,7 @@ model_source: assets
 This makes it easy to work with either the published HF repo or a locally downloaded `assets/` directory. In the current package layout, model files and JSON dictionaries live under `models/`, while supporting CSV files stay at the asset root.
 
 
-## Data download
+## Data Download
 The data pipeline supports both `Homo sapiens` and `Mus musculus`, writes species-specific folders, adds a `species` column to each downloaded partition, and can keep only genes found in `assets/models/vocab.json`. The supported workflow is now shell-based, including a small demo download before the full SLURM run.
 
 For complete data pipeline details, see [Data Download Guide](data/README.md).
