@@ -37,8 +37,8 @@ class PriorLoss(nn.Module):
     ) -> None:
         super().__init__()
 
-        self.symbol_to_index, self.ensembl_to_index, self.pad_index = build_token_lookup_maps(
-            token_dict=token_dict
+        self.symbol_to_index, self.ensembl_to_index, self.pad_index = (
+            build_token_lookup_maps(token_dict=token_dict)
         )
         token_max_1 = max(int(token_dict["token_index"].max()) + 1, 1)
         self._pair_key_base = int(token_max_1)
@@ -50,6 +50,16 @@ class PriorLoss(nn.Module):
         self._cached_prior_ref: Optional[pd.DataFrame] = None
         self.register_buffer(
             "_cached_pair_keys",
+            torch.empty(0, dtype=torch.long),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_cached_src_ids",
+            torch.empty(0, dtype=torch.long),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_cached_tgt_ids",
             torch.empty(0, dtype=torch.long),
             persistent=False,
         )
@@ -71,7 +81,10 @@ class PriorLoss(nn.Module):
             raise ValueError("`true_grn_df` must contain columns: 'Gene1' and 'Gene2'.")
 
         pair_keys: list[int] = []
-        for src_name, tgt_name in zip(true_grn_df["Gene1"].tolist(), true_grn_df["Gene2"].tolist()):
+        for src_name, tgt_name in zip(
+            true_grn_df["Gene1"].tolist(),
+            true_grn_df["Gene2"].tolist(),
+        ):
             src_id = self._map_gene_to_token(src_name)
             tgt_id = self._map_gene_to_token(tgt_name)
             if src_id is None or tgt_id is None:
@@ -86,36 +99,22 @@ class PriorLoss(nn.Module):
             cached_pair_keys = torch.unique(torch.tensor(pair_keys, dtype=torch.long))
 
         self._cached_pair_keys = cached_pair_keys
+        self._cached_src_ids = cached_pair_keys // self._pair_key_base
+        self._cached_tgt_ids = cached_pair_keys % self._pair_key_base
         self._cached_prior_ref = true_grn_df
 
-    def _resolve_prior_pair_keys(
+    def _resolve_prior_edges(
         self,
         true_grn_df: Optional[pd.DataFrame],
         device: torch.device,
-    ) -> torch.LongTensor:
+    ) -> tuple[torch.LongTensor, torch.LongTensor, torch.LongTensor]:
         if true_grn_df is not None and true_grn_df is not self._cached_prior_ref:
             self._prepare_prior_cache(true_grn_df)
-        return self._cached_pair_keys.to(device=device)
-
-    def _build_targets(
-        self,
-        input_ids: torch.LongTensor,
-        tf_mask: torch.BoolTensor,
-        active_gene_mask: torch.BoolTensor,
-        prior_pair_keys: torch.LongTensor,
-    ) -> tuple[torch.BoolTensor, torch.Tensor]:
-        supervise_mask = tf_mask.unsqueeze(2) & active_gene_mask.unsqueeze(1)
-        if prior_pair_keys.numel() == 0:
-            target = torch.zeros_like(supervise_mask, dtype=torch.float32)
-            return supervise_mask, target
-
-        pair_keys = (
-            input_ids.unsqueeze(2).to(torch.long) * self._pair_key_base
-            + input_ids.unsqueeze(1).to(torch.long)
+        return (
+            self._cached_src_ids.to(device=device),
+            self._cached_tgt_ids.to(device=device),
+            self._cached_pair_keys.to(device=device),
         )
-        positive_mask = torch.isin(pair_keys, prior_pair_keys) & supervise_mask
-        target = positive_mask.to(dtype=torch.float32)
-        return supervise_mask, target
 
     @staticmethod
     def _bound_probability(
@@ -138,53 +137,87 @@ class PriorLoss(nn.Module):
         # sparse routers can produce exact zero overlap for many candidate edges.
         return edge_prob * (1.0 - 2.0 * eps) + eps
 
-    @classmethod
-    def _edge_logits_from_factors(
-        cls,
-        factors: FactorState,
-        eps: float = 1e-8,
-    ) -> torch.Tensor:
-        edge_prob = torch.bmm(factors.u, factors.v.transpose(1, 2))
-        edge_prob = cls._bound_probability(edge_prob, eps=eps)
-        return torch.logit(edge_prob)
+    @staticmethod
+    def _lookup_positions(
+        query_ids: torch.LongTensor,
+        candidate_ids: torch.LongTensor,
+        candidate_pos: torch.LongTensor,
+    ) -> tuple[torch.LongTensor, torch.BoolTensor]:
+        missing = torch.full_like(query_ids, fill_value=-1)
+        if query_ids.numel() == 0 or candidate_ids.numel() == 0:
+            return missing, torch.zeros_like(query_ids, dtype=torch.bool)
+
+        order = torch.argsort(candidate_ids)
+        sorted_ids = candidate_ids[order]
+        sorted_pos = candidate_pos[order]
+        idx = torch.searchsorted(sorted_ids, query_ids)
+        in_bounds = idx < sorted_ids.numel()
+        safe_idx = idx.clamp(max=sorted_ids.numel() - 1)
+        found = in_bounds & sorted_ids[safe_idx].eq(query_ids)
+
+        positions = missing
+        positions[found] = sorted_pos[safe_idx[found]]
+        return positions, found
 
     @staticmethod
-    def _sample_negative_mask(
-        supervise_mask: torch.BoolTensor,
-        target: torch.Tensor,
-        neg_sample_ratio: Optional[float],
-    ) -> torch.BoolTensor:
-        if neg_sample_ratio is None or neg_sample_ratio <= 0:
-            return supervise_mask
+    def _sample_negative_edges(
+        tf_pos: torch.LongTensor,
+        tgt_pos: torch.LongTensor,
+        positive_pos_keys: torch.LongTensor,
+        sample_k: Optional[int],
+        seq_len: int,
+    ) -> tuple[torch.LongTensor, torch.LongTensor]:
+        total_count = int(tf_pos.numel() * tgt_pos.numel())
+        if total_count == 0:
+            return tf_pos.new_empty(0), tgt_pos.new_empty(0)
 
-        sampled_mask = torch.zeros_like(supervise_mask, dtype=torch.bool)
-        batch_size = supervise_mask.shape[0]
-        for batch_idx in range(batch_size):
-            valid_mask = supervise_mask[batch_idx]
-            pos_mask = (target[batch_idx] > 0.5) & valid_mask
-            neg_mask = (~(target[batch_idx] > 0.5)) & valid_mask
+        positive_pos_keys = torch.unique(positive_pos_keys)
+        neg_count = total_count - int(positive_pos_keys.numel())
+        if neg_count <= 0:
+            return tf_pos.new_empty(0), tgt_pos.new_empty(0)
 
-            pos_count = int(pos_mask.sum().item())
-            neg_count = int(neg_mask.sum().item())
+        if sample_k is None:
+            flat = torch.arange(total_count, device=tf_pos.device)
+            src = tf_pos[flat // tgt_pos.numel()]
+            tgt = tgt_pos[flat % tgt_pos.numel()]
+            keep = ~torch.isin(src * seq_len + tgt, positive_pos_keys)
+            return src[keep], tgt[keep]
 
-            if pos_count == 0 or neg_count == 0:
-                sampled_mask[batch_idx] = valid_mask
+        sample_k = min(int(sample_k), neg_count)
+        if sample_k <= 0:
+            return tf_pos.new_empty(0), tgt_pos.new_empty(0)
+
+        sampled_keys: list[torch.Tensor] = []
+        sampled_count = 0
+        for _ in range(20):
+            draw_count = max((sample_k - sampled_count) * 2, 64)
+            flat = torch.randint(total_count, (draw_count,), device=tf_pos.device)
+            src = tf_pos[flat // tgt_pos.numel()]
+            tgt = tgt_pos[flat % tgt_pos.numel()]
+            keys = torch.unique(src * seq_len + tgt)
+            keep = ~torch.isin(keys, positive_pos_keys)
+            if sampled_keys:
+                keep = keep & ~torch.isin(keys, torch.cat(sampled_keys))
+            keys = keys[keep]
+            if keys.numel() == 0:
                 continue
+            sampled_keys.append(keys)
+            sampled_count += int(keys.numel())
+            if sampled_count >= sample_k:
+                break
 
-            sample_k = min(neg_count, int(pos_count * neg_sample_ratio))
-            if sample_k <= 0:
-                sampled_mask[batch_idx] = pos_mask
-                continue
+        if sampled_count < sample_k:
+            flat = torch.arange(total_count, device=tf_pos.device)
+            src = tf_pos[flat // tgt_pos.numel()]
+            tgt = tgt_pos[flat % tgt_pos.numel()]
+            keys = src * seq_len + tgt
+            keep = ~torch.isin(keys, positive_pos_keys)
+            if sampled_keys:
+                keep = keep & ~torch.isin(keys, torch.cat(sampled_keys))
+            sampled_keys.append(keys[keep])
 
-            neg_indices = torch.nonzero(neg_mask, as_tuple=False)
-            chosen = neg_indices[
-                torch.randperm(neg_indices.shape[0], device=neg_indices.device)[:sample_k]
-            ]
-            sampled_neg_mask = torch.zeros_like(neg_mask)
-            sampled_neg_mask[chosen[:, 0], chosen[:, 1]] = True
-            sampled_mask[batch_idx] = pos_mask | sampled_neg_mask
-
-        return sampled_mask
+        neg_keys = torch.cat(sampled_keys)[:sample_k]
+        return neg_keys // seq_len, neg_keys % seq_len
 
     def forward(
         self,
@@ -209,7 +242,7 @@ class PriorLoss(nn.Module):
             non_tf_mask=non_tf_mask,
             padding_mask=padding_mask,
         )
-        prior_pair_keys = self._resolve_prior_pair_keys(
+        prior_src_ids, prior_tgt_ids, prior_pair_keys = self._resolve_prior_edges(
             true_grn_df=true_grn_df,
             device=input_ids.device,
         )
@@ -217,30 +250,103 @@ class PriorLoss(nn.Module):
         if prior_pair_keys.numel() == 0:
             return factors.u.new_zeros(())
 
-        supervise_mask, target = self._build_targets(
-            input_ids=input_ids,
-            tf_mask=tf_mask,
-            active_gene_mask=active_gene_mask,
-            prior_pair_keys=prior_pair_keys,
-        )
-
-        if not supervise_mask.any():
+        if not tf_mask.any() or not active_gene_mask.any():
             return factors.u.new_zeros(())
 
-        edge_logits = self._edge_logits_from_factors(factors)
-        target_f = target.to(edge_logits.dtype)
-        loss = F.binary_cross_entropy_with_logits(edge_logits, target_f, reduction="none")
-        weight = target_f * self.pos_weight + (
-            1.0 - target_f
-        ) * self.neg_weight
+        batch_indices: list[torch.Tensor] = []
+        src_indices: list[torch.Tensor] = []
+        tgt_indices: list[torch.Tensor] = []
+        labels: list[torch.Tensor] = []
+        weights: list[torch.Tensor] = []
 
-        sampled_mask = self._sample_negative_mask(
-            supervise_mask=supervise_mask,
-            target=target,
-            neg_sample_ratio=self.neg_sample_ratio,
+        batch_size, seq_len = input_ids.shape
+        for batch_idx in range(batch_size):
+            tf_pos = torch.nonzero(tf_mask[batch_idx], as_tuple=False).flatten()
+            tgt_pos = torch.nonzero(active_gene_mask[batch_idx], as_tuple=False).flatten()
+            if tf_pos.numel() == 0 or tgt_pos.numel() == 0:
+                continue
+
+            src_pos, src_found = self._lookup_positions(
+                query_ids=prior_src_ids,
+                candidate_ids=input_ids[batch_idx, tf_pos],
+                candidate_pos=tf_pos,
+            )
+            tgt_pos_for_prior, tgt_found = self._lookup_positions(
+                query_ids=prior_tgt_ids,
+                candidate_ids=input_ids[batch_idx, tgt_pos],
+                candidate_pos=tgt_pos,
+            )
+            positive_mask = src_found & tgt_found
+            if not positive_mask.any():
+                continue
+
+            pos_src = src_pos[positive_mask]
+            pos_tgt = tgt_pos_for_prior[positive_mask]
+            positive_pos_keys = torch.unique(pos_src * seq_len + pos_tgt)
+            pos_src = positive_pos_keys // seq_len
+            pos_tgt = positive_pos_keys % seq_len
+            pos_count = int(pos_src.numel())
+
+            if self.neg_sample_ratio is None or self.neg_sample_ratio <= 0:
+                neg_sample_k = None
+            else:
+                neg_sample_k = int(pos_count * self.neg_sample_ratio)
+            neg_src, neg_tgt = self._sample_negative_edges(
+                tf_pos=tf_pos,
+                tgt_pos=tgt_pos,
+                positive_pos_keys=positive_pos_keys,
+                sample_k=neg_sample_k,
+                seq_len=seq_len,
+            )
+
+            batch_pos = torch.full_like(pos_src, fill_value=batch_idx)
+            batch_indices.append(batch_pos)
+            src_indices.append(pos_src)
+            tgt_indices.append(pos_tgt)
+            labels.append(
+                torch.ones(pos_count, device=input_ids.device, dtype=factors.u.dtype)
+            )
+            weights.append(
+                torch.full(
+                    (pos_count,),
+                    fill_value=self.pos_weight,
+                    device=input_ids.device,
+                    dtype=factors.u.dtype,
+                )
+            )
+
+            if neg_src.numel() > 0:
+                neg_count = int(neg_src.numel())
+                batch_indices.append(torch.full_like(neg_src, fill_value=batch_idx))
+                src_indices.append(neg_src)
+                tgt_indices.append(neg_tgt)
+                labels.append(
+                    torch.zeros(neg_count, device=input_ids.device, dtype=factors.u.dtype)
+                )
+                weights.append(
+                    torch.full(
+                        (neg_count,),
+                        fill_value=self.neg_weight,
+                        device=input_ids.device,
+                        dtype=factors.u.dtype,
+                    )
+                )
+
+        if not batch_indices:
+            return factors.u.new_zeros(())
+
+        batch_idx = torch.cat(batch_indices)
+        src_idx = torch.cat(src_indices)
+        tgt_idx = torch.cat(tgt_indices)
+        target = torch.cat(labels)
+        weight = torch.cat(weights)
+
+        edge_prob = (factors.u[batch_idx, src_idx] * factors.v[batch_idx, tgt_idx]).sum(
+            dim=-1
         )
-        sampled_mask_f = sampled_mask.to(dtype=edge_logits.dtype)
+        edge_prob = self._bound_probability(edge_prob)
+        loss = F.binary_cross_entropy(edge_prob, target, reduction="none")
 
-        numer = (loss * weight * sampled_mask_f).sum()
-        denom = (weight * sampled_mask_f).sum()
+        numer = (loss * weight).sum()
+        denom = weight.sum()
         return numer / (denom + 1e-8)

@@ -11,7 +11,7 @@ runtime:
     limit_all_gathers: true
 
 data:
-  train_paths: /data1021/xukaichen/data/CTA/pbmc.h5ad
+  train_paths: /data1021/xukaichen/data/GRN/datasets/hESC.h5ad
   shuffle_train_paths: false
   shuffle_train_paths_seed: 0
   batch_size: 32
@@ -20,9 +20,9 @@ data:
   drop_last: false
   max_length: 2048
   gene_key: null
-  platform_key: assay
-  species_key: null
-  tissue_key: tissue
+  platform_key: null
+  species_key: species
+  tissue_key: null
   disease_key: disease
   expr_pad_value: 0.0
   preprocess:
@@ -43,5 +43,5 @@ data:
     inplace: false
 
 evaluator:
-  evaluation_grn_path: /data1021/xukaichen/data/GRN/networks/hSTRING.csv
+  evaluation_grn_path: /data1021/xukaichen/data/GRN/networks/hChIP-seq.csv
   foundation_name: sfm

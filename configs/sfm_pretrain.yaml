@@ -69,11 +69,11 @@ loss:
   prior:
     enabled: true
     kwargs:
-      pos_weight: 20.0
+      pos_weight: 10.0
       neg_weight: 1.0
-      neg_sample_ratio: 5.0
+      neg_sample_ratio: 10.0
     weight_schedule:
-      initial: 10.0
+      initial: 2.0
       final: 0.1
       span_epochs: null
   dag:
