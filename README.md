@@ -64,7 +64,7 @@ python -m src.models.attention
 
 
 ## Hugging Face Assets
-scCAFM now uses an asset package that is compatible with both a local directory and a Hugging Face model repository. The canonical asset files are:
+scCAFM now uses an asset package that is compatible with both a local directory and a [Hugging Face](https://huggingface.co/kaichenxu/scCAFM) model repository. The canonical asset files are:
 
 * `models/sfm_config.json`
 * `models/sfm_model.safetensors`
