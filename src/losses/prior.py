@@ -345,7 +345,8 @@ class PriorLoss(nn.Module):
             dim=-1
         )
         edge_prob = self._bound_probability(edge_prob)
-        loss = F.binary_cross_entropy(edge_prob, target, reduction="none")
+        edge_logits = torch.logit(edge_prob)
+        loss = F.binary_cross_entropy_with_logits(edge_logits, target, reduction="none")
 
         numer = (loss * weight).sum()
         denom = weight.sum()

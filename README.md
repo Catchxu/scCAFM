@@ -21,7 +21,7 @@ scCAFM is a causality-aware foundation model designed for large-scale single-cel
 
 
 ## Installation
-scCAFM is a Python package for causal modeling of single-cell RNA-seq data. It requires Python 3.10–3.14 (Python 3.13.9 recommended).
+scCAFM is a Python package for causal modeling of single-cell RNA-seq data. It requires Python 3.10–3.14 (Python 3.12.9 recommended).
 
 First, you can download this repository and install it locally:
 ```bash
@@ -70,17 +70,12 @@ scCAFM now uses an asset package that is compatible with both a local directory 
 * `models/sfm_model.safetensors`
 * `models/cond_dict.json`
 * `models/vocab.json`
-* `models/vocab.safetensors`
 * root-level CSV sidecars such as `human_tfs.csv`, `mouse_tfs.csv`, `OmniPath.csv`, and `homologous.csv`
-
-The canonical Hugging Face model ID for this project is:
-
-* `kaichenxu/scCAFM`
 
 Runtime code resolves these files through a single `model_source` setting:
 
 * If `model_source` is a local directory, scCAFM loads assets from that directory directly.
-* Otherwise, scCAFM treats `model_source` as a Hugging Face model ID and downloads the asset package before loading.
+* Otherwise, scCAFM treats `model_source` as our Hugging Face model ID, `kaichenxu/scCAFM`, and downloads the asset package before loading.
 
 Project configs now default to:
 
