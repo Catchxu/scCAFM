@@ -1,6 +1,5 @@
 # Building a causality-aware single-cell RNA-seq foundation model via context-specific causal regulation modeling
 scCAFM is a causality-aware foundation model designed for large-scale single-cell transcriptomic analysis. Unlike existing single-cell foundation models that mainly learn associative gene relationships or operate only at the dataset‐ or cell-type level, scCAFM enables cell-specific causal inference at atlas scale while simultaneously learning transferable gene and cell embeddings enriched with causal semantics. By jointly modeling gene regulatory structure and context-dependent embeddings, scCAFM provides a powerful foundation for studying heterogeneous cellular states, developmental trajectories, disease progression, and perturbation responses.
-
 <br/>
 <div align=center>
 <img src="/docs/Fig1.png" width="70%">
@@ -39,24 +38,22 @@ If you encounter dependency conflicts while using scCAFM, please report them at 
 ```bash
 pip install .[py312]
 ```
-
 Please note that GPU-specific packages such as FlashAttention still depend on your CUDA, PyTorch, compiler, and GPU stack.
 
 
 ## FlashAttention
-scCAFM are developed with the latest FlashAttention-4 (FA4) to enhance the compuational performance, where FA4 is optimized and available for Blackwell GPUs (e.g. B200). If your hardware or FlashAttention build only supports FA2, change config files under `configs` as:
+scCAFM are developed with the latest FlashAttention-4 (FA4) to enhance the compuational performance, where FA4 is optimized and only available for Blackwell GPUs (e.g. B200). If your hardware or FlashAttention build only supports FA2, change config files under `configs` as:
 ```yaml
 runtime:
   attention_backend: fa2
 ```
 
-If you haven't installed any FA, please install suitable FA according to your specific hardware and software environment. You can follow the [official repository instructions](https://github.com/Dao-AILab/flash-attention).
+If you haven't installed any FA, please install suitable FA according to your specific hardware and software environment. You can follow the [official repository instructions](https://github.com/Dao-AILab/flash-attention) to install it.
 
 Before training on a new machine, it can be helpful to run the backend smoke test:
 ```bash
 python test/FA4.py # or test/FA2.py
 ```
-
 The smoke tests use scCAFM's `FlashMHA` wrapper, so they check the same FA2/FA4 path used by training and evaluation.
 
 
