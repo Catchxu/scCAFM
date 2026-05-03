@@ -1,6 +1,8 @@
 model_source: assets
 
 runtime:
+  # Use fa4 by default; set to fa2 for broader GPU compatibility.
+  attention_backend: fa4
   precision:
     model_dtype: fp32
     autocast_dtype: bf16

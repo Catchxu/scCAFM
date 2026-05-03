@@ -166,7 +166,7 @@ def _log_run_summary(
     )
     logger.info(
         "Model: attention_backend=%s",
-        sfm_cfg.get("attention_backend", "fa2"),
+        runtime_cfg.get("attention_backend", sfm_cfg.get("attention_backend", "fa4")),
     )
     logger.info(
         "Data: num_adata=%s, batch_size=%s, gradient_accumulation_steps=%s, global_batch_size=%s, max_length=%s",
@@ -440,8 +440,8 @@ def main() -> None:
         sfm_config = load_sfm_config(source_assets.sfm_config)
         config = apply_model_assets_to_runtime_config(
             {
-                "model": sfm_config,
                 **pretrain_config,
+                "model": sfm_config,
             },
             source_assets,
             require_model_weights=False,
@@ -545,6 +545,7 @@ def main() -> None:
                 path=data_assets.train_paths[0],
             ),
             assets=runtime_assets,
+            runtime_config=config.get("runtime", {}),
         )
 
         total_steps = estimate_total_training_steps(

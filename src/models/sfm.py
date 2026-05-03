@@ -63,7 +63,7 @@ class SFM(nn.Module):
         num_heads: int = 8,
         backbone_mlp_hidden_dim: Optional[int] = None,
         backbone_mlp_dropout: float = 0.1,
-        attention_backend: str = "fa2",
+        attention_backend: str = "fa4",
         use_rotary: bool = False,
         qkv_bias: bool = True,
         out_bias: bool = True,

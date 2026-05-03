@@ -33,6 +33,8 @@ def build_model(
     sfm_config: dict[str, Any],
     data_bundle: PretrainingDataBundle,
     assets: ModelAssets,
+    *,
+    runtime_config: dict[str, Any] | None = None,
 ) -> ModelWrapper:
     sfm_kwargs = dict(sfm_config["sfm"])
     configured_cond_vocab_size = sfm_kwargs.pop("cond_vocab_size", None)
@@ -42,6 +44,8 @@ def build_model(
             f"({configured_cond_vocab_size}) and data bundle ({data_bundle.cond_vocab_size})."
         )
     sfm_kwargs.pop("gene_embedding_ckpt", None)
+    if runtime_config is not None and "attention_backend" in runtime_config:
+        sfm_kwargs["attention_backend"] = runtime_config["attention_backend"]
 
     sfm_module = SFM(
         token_dict=data_bundle.token_dict,

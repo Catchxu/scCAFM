@@ -1,22 +1,17 @@
+from __future__ import annotations
+
 import torch
 import torch.nn as nn
 
-from flash_attn import flash_attn_qkvpacked_func, flash_attn_varlen_qkvpacked_func
-from flash_attn.layers.rotary import RotaryEmbedding
-from flash_attn.bert_padding import unpad_input, pad_input
 
-try:
-    from flash_attn.cute import flash_attn_func as cute_flash_attn_func
-except ImportError:
-    cute_flash_attn_func = None
+class FlashAttentionBackend(nn.Module):
+    """Shared interface for FlashAttention backend adapters."""
 
-
-class _FlashAttentionBackend(nn.Module):
     def __init__(
         self,
         embed_dim: int,
         num_heads: int,
-    ):
+    ) -> None:
         super().__init__()
         self.embed_dim = embed_dim
         self.num_heads = num_heads
@@ -24,7 +19,7 @@ class _FlashAttentionBackend(nn.Module):
         self.softmax_scale = self.head_dim ** -0.5
 
     @staticmethod
-    def _normalize_attention_output(output: torch.Tensor | tuple[torch.Tensor, ...]) -> torch.Tensor:
+    def normalize_attention_output(output: torch.Tensor | tuple[torch.Tensor, ...]) -> torch.Tensor:
         if torch.is_tensor(output):
             return output
         if isinstance(output, tuple) and output and torch.is_tensor(output[0]):
@@ -36,184 +31,47 @@ class _FlashAttentionBackend(nn.Module):
 
     def forward(
         self,
-        *args,
-        **kwargs,
-    ) -> torch.Tensor:
-        raise NotImplementedError
-
-
-class FlashMHAFA2(_FlashAttentionBackend):
-    """FA2 backend: packed QKV dense kernel, packed QKV varlen kernel for padding."""
-
-    def _run_dense(self, qkv: torch.Tensor, *, causal: bool) -> torch.Tensor:
-        return flash_attn_qkvpacked_func(
-            qkv.contiguous(),
-            dropout_p=0.0,
-            softmax_scale=self.softmax_scale,
-            causal=causal,
-        )
-
-    def _run_varlen(
-        self,
-        qkv_unpad: torch.Tensor,
-        *,
-        cu_seqlens: torch.Tensor,
-        max_seqlen: int,
-        causal: bool,
-    ) -> torch.Tensor:
-        return flash_attn_varlen_qkvpacked_func(
-            qkv_unpad.contiguous(),
-            cu_seqlens=cu_seqlens,
-            max_seqlen=max_seqlen,
-            dropout_p=0.0,
-            softmax_scale=self.softmax_scale,
-            causal=causal,
-        )
-
-    def forward(
-        self,
         qkv: torch.Tensor,
         key_padding_mask: torch.Tensor | None = None,
         causal: bool = False,
     ) -> torch.Tensor:
-        B, L = qkv.shape[:2]
-        if key_padding_mask is None:
-            return self._run_dense(qkv, causal=causal)
+        raise NotImplementedError
 
-        attention_mask = ~key_padding_mask
-        unpad_outputs = unpad_input(qkv, attention_mask)
-        if len(unpad_outputs) == 4:
-            qkv_unpad, indices, cu_seqlens, max_seqlen = unpad_outputs
-        elif len(unpad_outputs) == 5:
-            qkv_unpad, indices, cu_seqlens, max_seqlen, _ = unpad_outputs
-        else:
-            raise ValueError(
-                f"Unexpected number of outputs from unpad_input: {len(unpad_outputs)}"
-            )
 
-        if qkv_unpad.shape[0] == 0:
-            return qkv.new_zeros(B, L, self.num_heads, self.head_dim)
+def build_flash_attention_backend(
+    attention_backend: str,
+    *,
+    embed_dim: int,
+    num_heads: int,
+) -> FlashAttentionBackend:
+    """
+    Build a FlashAttention backend adapter with a unified QKV-packed API.
 
-        out_unpad = self._run_varlen(
-            qkv_unpad,
-            cu_seqlens=cu_seqlens,
-            max_seqlen=max_seqlen,
-            causal=causal,
+    All backend adapters accept:
+    - `qkv`: (B, L, 3, H, D)
+    - `key_padding_mask`: optional (B, L), True where padded
+    - `causal`: whether to use causal masking
+    """
+
+    normalized = str(attention_backend).lower()
+    if normalized == "fa2":
+        from .FA2 import FlashMHAFA2
+
+        return FlashMHAFA2(
+            embed_dim=embed_dim,
+            num_heads=num_heads,
         )
-        return pad_input(out_unpad, indices, B, L)
+    if normalized == "fa4":
+        from .FA4 import FlashMHAFA4
 
-
-class FlashMHAFA4(_FlashAttentionBackend):
-    """FA4 backend: official CuTe `flash_attn_func(q, k, v, ...)` API."""
-
-    def __init__(
-        self,
-        embed_dim: int,
-        num_heads: int,
-        fa4_min_cc: int = 90,
-    ):
-        super().__init__(embed_dim=embed_dim, num_heads=num_heads)
-        self._fa4_available = cute_flash_attn_func is not None
-        self._fa4_min_cc = int(fa4_min_cc)
-        self._validate_support()
-
-    def _validate_support(self) -> None:
-        if not self._fa4_available:
-            raise RuntimeError("`attention_backend='fa4'` requires flash_attn.cute kernels.")
-        if not torch.cuda.is_available():
-            raise RuntimeError("`attention_backend='fa4'` requires CUDA.")
-        try:
-            major, minor = torch.cuda.get_device_capability()
-        except Exception as exc:
-            raise RuntimeError("Could not determine CUDA device capability for FA4.") from exc
-        cc = major * 10 + minor
-        if cc < self._fa4_min_cc:
-            raise RuntimeError(
-                f"`attention_backend='fa4'` requires CUDA capability >= sm{self._fa4_min_cc}, "
-                f"got sm{cc}."
-            )
-
-    def _run_dense(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        *,
-        causal: bool,
-    ) -> torch.Tensor:
-        return self._normalize_attention_output(
-            cute_flash_attn_func(
-                q.contiguous(),
-                k.contiguous(),
-                v.contiguous(),
-                softmax_scale=self.softmax_scale,
-                causal=causal,
-            )
+        return FlashMHAFA4(
+            embed_dim=embed_dim,
+            num_heads=num_heads,
         )
 
-    @staticmethod
-    def _right_padding_lengths(
-        key_padding_mask: torch.Tensor,
-    ) -> torch.Tensor | None:
-        valid_lengths = (~key_padding_mask).sum(dim=1)
-        if valid_lengths.numel() == 0:
-            return None
-
-        positions = torch.arange(
-            key_padding_mask.shape[1],
-            device=key_padding_mask.device,
-        )
-        expected_mask = positions.unsqueeze(0) >= valid_lengths.unsqueeze(1)
-        if not torch.equal(key_padding_mask, expected_mask):
-            return None
-        return valid_lengths
-
-    def _run_right_padded(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        key_padding_mask: torch.Tensor,
-        *,
-        causal: bool,
-    ) -> torch.Tensor:
-        B, L = key_padding_mask.shape
-        valid_lengths = self._right_padding_lengths(key_padding_mask)
-        if valid_lengths is None:
-            raise RuntimeError(
-                "`attention_backend='fa4'` supports padding masks only when valid "
-                "tokens form a left-aligned prefix in each sequence."
-            )
-
-        out = q.new_zeros(B, L, self.num_heads, self.head_dim)
-        for length in torch.unique(valid_lengths, sorted=True):
-            trim_len = int(length.item())
-            if trim_len == 0:
-                continue
-
-            batch_indices = torch.nonzero(
-                valid_lengths == length,
-                as_tuple=False,
-            ).flatten()
-            group_q = q.index_select(0, batch_indices)[:, :trim_len]
-            group_k = k.index_select(0, batch_indices)[:, :trim_len]
-            group_v = v.index_select(0, batch_indices)[:, :trim_len]
-            group_out = self._run_dense(group_q, group_k, group_v, causal=causal)
-            out[batch_indices, :trim_len] = group_out
-
-        return out
-
-    def forward(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        key_padding_mask: torch.Tensor | None = None,
-        causal: bool = False,
-    ) -> torch.Tensor:
-        if key_padding_mask is None:
-            return self._run_dense(q, k, v, causal=causal)
-        return self._run_right_padded(q, k, v, key_padding_mask, causal=causal)
+    raise ValueError(
+        f"`attention_backend` must be one of ['fa2', 'fa4'], got {attention_backend!r}."
+    )
 
 
 class FlashMHA(nn.Module):
@@ -225,7 +83,7 @@ class FlashMHA(nn.Module):
 
     Supported backends:
     - `fa2`: FlashAttention 2 packed-QKV kernels
-    - `fa4`: CuTe / FA4-style kernels, explicit opt-in
+    - `fa4`: CuTe / FA4-style kernels
 
     Args:
         embed_dim: model dimension
@@ -242,14 +100,13 @@ class FlashMHA(nn.Module):
         self,
         embed_dim: int,
         num_heads: int = 8,
-        attention_backend: str = "fa2",
+        attention_backend: str = "fa4",
         use_rotary: bool = False,
         qkv_bias: bool = True,
         out_bias: bool = True,
         rotary_base: float = 10000.0,
         rotary_interleaved: bool = False,
-        fa4_min_cc: int = 90,
-    ):
+    ) -> None:
         super().__init__()
 
         if embed_dim % num_heads != 0:
@@ -261,12 +118,12 @@ class FlashMHA(nn.Module):
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
         self.attention_backend = str(attention_backend).lower()
-        if self.attention_backend not in {"fa2", "fa4"}:
-            raise ValueError(
-                f"`attention_backend` must be one of ['fa2', 'fa4'], got {attention_backend!r}."
-            )
+        self.attention = build_flash_attention_backend(
+            self.attention_backend,
+            embed_dim=self.embed_dim,
+            num_heads=self.num_heads,
+        )
         self.use_rotary = use_rotary
-        self.attention = self._build_backend(fa4_min_cc=fa4_min_cc)
 
         self.qkv_proj = nn.Linear(embed_dim, 3 * embed_dim, bias=qkv_bias)
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=out_bias)
@@ -276,6 +133,12 @@ class FlashMHA(nn.Module):
                 raise ValueError(
                     f"Rotary embedding requires even head_dim, got {self.head_dim}."
                 )
+            try:
+                from flash_attn.layers.rotary import RotaryEmbedding
+            except ImportError as exc:
+                raise RuntimeError(
+                    "`use_rotary=True` requires flash_attn.layers.rotary.RotaryEmbedding."
+                ) from exc
 
             self.rotary_emb = RotaryEmbedding(
                 dim=self.head_dim,
@@ -284,18 +147,6 @@ class FlashMHA(nn.Module):
             )
         else:
             self.rotary_emb = None
-
-    def _build_backend(self, *, fa4_min_cc: int) -> _FlashAttentionBackend:
-        if self.attention_backend == "fa4":
-            return FlashMHAFA4(
-                embed_dim=self.embed_dim,
-                num_heads=self.num_heads,
-                fa4_min_cc=fa4_min_cc,
-            )
-        return FlashMHAFA2(
-            embed_dim=self.embed_dim,
-            num_heads=self.num_heads,
-        )
 
     def _normalize_key_padding_mask(
         self,
@@ -318,33 +169,17 @@ class FlashMHA(nn.Module):
         return key_padding_mask
 
     def _project_qkv(self, x: torch.Tensor) -> torch.Tensor:
-        B, L = x.shape[:2]
-        qkv = self.qkv_proj(x).reshape(B, L, 3, self.num_heads, self.head_dim)
+        batch_size, seq_len = x.shape[:2]
+        qkv = self.qkv_proj(x).reshape(
+            batch_size,
+            seq_len,
+            3,
+            self.num_heads,
+            self.head_dim,
+        )
         if self.rotary_emb is not None:
             qkv = self.rotary_emb(qkv)
         return qkv.contiguous()
-
-    def _run_attention(
-        self,
-        qkv: torch.Tensor,
-        *,
-        key_padding_mask: torch.Tensor | None,
-        causal: bool,
-    ) -> torch.Tensor:
-        if self.attention_backend == "fa4":
-            q, k, v = qkv.unbind(dim=2)
-            return self.attention(
-                q,
-                k,
-                v,
-                key_padding_mask=key_padding_mask,
-                causal=causal,
-            )
-        return self.attention(
-            qkv,
-            key_padding_mask=key_padding_mask,
-            causal=causal,
-        )
 
     def forward(
         self,
@@ -364,32 +199,30 @@ class FlashMHA(nn.Module):
         if x.ndim != 3:
             raise ValueError(f"x must have shape (B, L, D), got {tuple(x.shape)}")
 
-        B, L, D = x.shape
-        if D != self.embed_dim:
+        batch_size, seq_len, embed_dim = x.shape
+        if embed_dim != self.embed_dim:
             raise ValueError(
-                f"Expected input last dim {self.embed_dim}, got {D}."
+                f"Expected input last dim {self.embed_dim}, got {embed_dim}."
             )
 
         key_padding_mask = self._normalize_key_padding_mask(
             key_padding_mask,
-            batch_size=B,
-            seq_len=L,
+            batch_size=batch_size,
+            seq_len=seq_len,
         )
 
         qkv = self._project_qkv(x)
-        out = self._run_attention(
+        out = self.attention(
             qkv,
             key_padding_mask=key_padding_mask,
             causal=causal,
         )
 
-        out = out.reshape(B, L, self.embed_dim)
+        out = out.reshape(batch_size, seq_len, self.embed_dim)
         out = self.out_proj(out)
         if key_padding_mask is not None:
             out = out.masked_fill(key_padding_mask.unsqueeze(-1), 0.0)
         return out
-
-
 
 
 if __name__ == "__main__":
@@ -402,8 +235,8 @@ if __name__ == "__main__":
     model = FlashMHA(
         embed_dim=64,
         num_heads=8,
-        attention_backend="fa2",
-        use_rotary=True
+        attention_backend="fa4",
+        use_rotary=False,
     ).to(device)
     model = model.half()
     model.eval()

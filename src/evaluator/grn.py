@@ -364,8 +364,8 @@ def run_evaluation(
 ) -> None:
     eval_grn_config = _prepare_evaluation_config(eval_grn_config)
     config = {
-        "model": sfm_config,
         **eval_grn_config,
+        "model": sfm_config,
     }
     evaluator_cfg = config["evaluator"]
     checkpoint_path = Path(str(evaluator_cfg["checkpoint_path"])).expanduser().resolve()
@@ -394,6 +394,7 @@ def run_evaluation(
             path=data_assets.train_paths[0],
         ),
         assets=resolve_model_assets(config["model_source"], require_model_weights=True),
+        runtime_config=config.get("runtime", {}),
     )
     model.load_state_dict(model_state)
     model = maybe_wrap_fsdp(
