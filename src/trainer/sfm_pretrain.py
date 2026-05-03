@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import contextlib
 import gc
+import os
+import shutil
 from typing import Any
 
 import torch
@@ -54,6 +56,14 @@ def parse_args() -> argparse.Namespace:
         default="configs/sfm_pretrain.yaml",
     )
     parser.add_argument("--resume", default=None)
+    parser.add_argument(
+        "--init-model-source",
+        default=None,
+        help=(
+            "Model package to load weights from for a new pretraining run. "
+            "Ignored with a warning when --resume is also set."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -133,6 +143,8 @@ def _log_run_summary(
     optimizer_cfg = config["optimizer"]
     scheduler_cfg = config["scheduler"]
     trainer_cfg = config["trainer"]
+    model_cfg = config.get("model", {})
+    sfm_cfg = model_cfg.get("sfm", {}) if isinstance(model_cfg, dict) else {}
     precision_cfg = runtime_cfg.get("precision", {})
     preprocess_cfg = data_cfg.get("preprocess", {})
     condition_mask_cfg = data_cfg.get("condition_mask", {})
@@ -151,6 +163,10 @@ def _log_run_summary(
         "Precision: model_dtype=%s, autocast_dtype=%s",
         precision_cfg.get("model_dtype", "fp32"),
         precision_cfg.get("autocast_dtype", "fp32"),
+    )
+    logger.info(
+        "Model: attention_backend=%s",
+        sfm_cfg.get("attention_backend", "fa2"),
     )
     logger.info(
         "Data: num_adata=%s, batch_size=%s, gradient_accumulation_steps=%s, global_batch_size=%s, max_length=%s",
@@ -440,28 +456,55 @@ def main() -> None:
             paths=paths,
             runtime=runtime,
         )
+        if runtime.is_main:
+            logger.info(
+                "Launch environment: CUDA_VISIBLE_DEVICES=%s, NCCL_NET=%s, NCCL_SHM_DISABLE=%s, NCCL_P2P_DISABLE=%s",
+                os.environ.get("CUDA_VISIBLE_DEVICES", "<unset>"),
+                os.environ.get("NCCL_NET", "<unset>"),
+                os.environ.get("NCCL_SHM_DISABLE", "<unset>"),
+                os.environ.get("NCCL_P2P_DISABLE", "<unset>"),
+            )
 
         requested_regenerate_condition_vocab = bool(
             config["data"].get("condition_vocab", {}).get("regenerate", False)
         )
         is_resume = args.resume is not None
+        if runtime.is_main and is_resume and args.init_model_source is not None:
+            logger.warning(
+                "--resume was provided together with --init-model-source=%s; "
+                "ignoring --init-model-source and continuing from the resume checkpoint.",
+                args.init_model_source,
+            )
+        init_model_source = args.init_model_source
+        init_model_source_enabled = (not is_resume) and init_model_source is not None
+        init_assets = (
+            resolve_model_assets(
+                model_source=init_model_source,
+                require_model_weights=True,
+                require_cond_dict=False,
+            )
+            if init_model_source_enabled
+            else None
+        )
+        config["init_model_source"] = str(init_model_source) if init_model_source is not None else None
         regenerate_condition_vocab = requested_regenerate_condition_vocab and not is_resume
         if runtime.is_main and requested_regenerate_condition_vocab and is_resume:
             logger.info(
                 "Resume detected: disabling condition-vocab regeneration and reusing checkpoint cond_dict.json."
             )
-        # A fresh pretraining run starts from scratch by default. We still stage
-        # the run-local package under `checkpoints/models`, but only a true
-        # resume should load model weights from that package.
-        include_model_weights = is_resume
+        # Resume is exact continuation, including optimizer/scheduler state.
+        # Warm-start is only model-weight initialization for a new run.
+        include_model_weights = is_resume or init_model_source_enabled
         if runtime.is_main:
             checkpoint_assets = materialize_model_package(
                 source_assets=source_assets,
                 target_dir=paths.model_package_dir,
-                include_model_weights=include_model_weights,
+                include_model_weights=is_resume,
                 include_cond_dict=is_resume or (not regenerate_condition_vocab),
                 overwrite=not is_resume,
             )
+            if init_assets is not None:
+                shutil.copy2(init_assets.sfm_model, paths.model_package_dir / "sfm_model.safetensors")
         barrier()
         checkpoint_assets = ModelAssets(
             model_source=str(paths.model_package_dir),
@@ -537,6 +580,11 @@ def main() -> None:
                 enabled=regenerate_condition_vocab and resume_payload is None,
             )
             model.load_state_dict(filtered_model_state, strict=not bool(removed_keys))
+            if runtime.is_main:
+                if resume_payload is None:
+                    logger.info("Initialized model weights from %s", checkpoint_assets.sfm_model)
+                else:
+                    logger.info("Loaded resume model weights from %s", checkpoint_assets.sfm_model)
         if resume_payload is not None:
             loss_manager.load_state_dict(resume_payload["loss_manager_state_dict"])
 
@@ -544,7 +592,7 @@ def main() -> None:
             model=model,
             config=config,
             runtime=runtime,
-            sync_module_states=(model_state is not None or resume_payload is not None),
+            sync_module_states=runtime.distributed,
         )
         optimizer = build_optimizer(model=model, config=config)
         scheduler = build_scheduler(

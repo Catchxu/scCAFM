@@ -12,10 +12,10 @@ runtime:
 
 data:
   # Each entry can be a `.h5ad` file or a directory; directories are expanded to all nested `.h5ad` files.
-  train_paths: /scratch/kxu248/data/Atlas/
+  train_paths: /scratch/kxu248/data/Atlas/human/blood/partition_0.h5ad
   shuffle_train_paths: true
   shuffle_train_paths_seed: 0
-  batch_size: 128
+  batch_size: 64 # 128
   gradient_accumulation_steps: 4
   num_workers: 0
   pin_memory: false

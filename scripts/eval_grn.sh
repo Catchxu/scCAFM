@@ -22,6 +22,7 @@ else
 fi
 cd "${ROOT_DIR}"
 export PYTHONPATH="${ROOT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
+export NCCL_SHM_DISABLE="${NCCL_SHM_DISABLE:-1}"
 
 if command -v python3 >/dev/null 2>&1; then
   PYTHON_BIN="python3"

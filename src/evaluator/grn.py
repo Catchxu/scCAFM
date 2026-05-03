@@ -242,7 +242,6 @@ def prepare_evaluation_paths(
     if runtime.is_main:
         logs.mkdir(parents=True, exist_ok=True)
         results.mkdir(parents=True, exist_ok=True)
-        model_package_dir.mkdir(parents=True, exist_ok=True)
     barrier()
 
     return ExperimentPaths(

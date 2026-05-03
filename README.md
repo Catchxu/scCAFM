@@ -91,7 +91,6 @@ model_source: assets
 
 This makes it easy to work with either the published HF repo or a locally downloaded `assets/` directory. In the current package layout, model files and JSON dictionaries live under `models/`, while supporting CSV files stay at the asset root.
 
-
 ## Data Download
 The data pipeline supports both `Homo sapiens` and `Mus musculus`, writes species-specific folders, adds a `species` column to each downloaded partition, and can keep only genes found in `assets/models/vocab.json`. The supported workflow is now shell-based, including a small demo download before the full SLURM run.
 
