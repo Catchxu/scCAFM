@@ -51,11 +51,11 @@ runtime:
 
 If you haven't installed any FA, please install suitable FA according to your specific hardware and software environment. You can follow the [official repository instructions](https://github.com/Dao-AILab/flash-attention) to install it.
 
-Before training on a new machine, it can be helpful to run the backend smoke test:
+Before using scCAFM on a new machine, we recommend running a FlashAttention smoke test:
 ```bash
-python test/FA4.py # or test/FA2.py
+python test/test_FA4.py # or test/test_FA2.py
 ```
-The smoke tests use scCAFM's `FlashMHA` wrapper, so they check the same FA2/FA4 path used by training and evaluation.
+These tests directly validate the current FA2/FA4 implementations used by the codebase, including the dense and variable-length attention paths required for training and evaluation.
 
 
 ## Data Download
