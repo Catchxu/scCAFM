@@ -1,4 +1,36 @@
+import warnings
+
 import torch
+
+_CUTLASS_SCALAR_PTR_WARNING = "Use explicit `struct.scalar.ptr` for pointer instead."
+
+
+def _suppress_cutlass_scalar_ptr_warning() -> None:
+    previous_showwarning = warnings.showwarning
+    if getattr(previous_showwarning, "_sccafm_suppresses_cutlass_scalar_ptr", False):
+        return
+
+    def showwarning(
+        message,
+        category,
+        filename,
+        lineno,
+        file=None,
+        line=None,
+    ):
+        if (
+            issubclass(category, DeprecationWarning)
+            and _CUTLASS_SCALAR_PTR_WARNING in str(message)
+            and "nvidia_cutlass_dsl" in str(filename)
+        ):
+            return
+        previous_showwarning(message, category, filename, lineno, file=file, line=line)
+
+    showwarning._sccafm_suppresses_cutlass_scalar_ptr = True
+    warnings.showwarning = showwarning
+
+
+_suppress_cutlass_scalar_ptr_warning()
 
 from flash_attn.cute import flash_attn_func
 from flash_attn.cute import flash_attn_varlen_func

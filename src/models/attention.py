@@ -45,7 +45,7 @@ def build_flash_attention_backend(
     num_heads: int,
 ) -> FlashAttentionBackend:
     """
-    Build a FlashAttention backend adapter with a unified QKV-packed API.
+    Build a FlashAttention backend adapter with a unified model-facing QKV API.
 
     All backend adapters accept:
     - `qkv`: (B, L, 3, H, D)
@@ -82,8 +82,8 @@ class FlashMHA(nn.Module):
     - `L`: full sequence length
 
     Supported backends:
-    - `fa2`: FlashAttention 2 packed-QKV kernels
-    - `fa4`: CuTe / FA4-style kernels
+    - `fa2`: FlashAttention 2 q/k/v kernels
+    - `fa4`: CuTe / FA4 q/k/v kernels
 
     Args:
         embed_dim: model dimension
