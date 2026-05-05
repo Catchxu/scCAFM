@@ -12,6 +12,7 @@ from typing import Optional
 from ..assets import load_vocab_json
 from .backbone import TransformerBackbone
 from .embedding import ScEmbedding
+from .initialization import init_module_xavier
 from .router import GeneRouter
 
 
@@ -48,15 +49,14 @@ class SFM(nn.Module):
         token_dict: pd.DataFrame,
         cond_vocab_size: int = 4096,
         embed_dim: int = 512,
+        expr_num_bins: int = 32,
         expr_hidden_dim: int = 256,
-        expr_dropout: float = 0.1,
-        expr_value_scale: float = 1.0,
-        mod_hidden_dim: int = 256,
-        mod_dropout: float = 0.1,
+        expr_tau: float = 1.0,
+        batch_num_bins: int = 32,
+        batch_hidden_dim: int = 128,
+        batch_tau: float = 1.0,
         cond_dropout: float = 0.1,
-        context_hidden_dim: int = 256,
-        context_dropout: float = 0.1,
-        embedding_dropout: float = 0.1,
+        out_dropout: float = 0.1,
         gene_embedding_ckpt: Optional[str] = None,
         freeze_loaded_gene_embeddings: bool = False,
         num_layers: int = 4,
@@ -93,15 +93,14 @@ class SFM(nn.Module):
             token_dict=token_dict,
             cond_vocab_size=cond_vocab_size,
             embed_dim=embed_dim,
+            expr_num_bins=expr_num_bins,
             expr_hidden_dim=expr_hidden_dim,
-            expr_dropout=expr_dropout,
-            expr_value_scale=expr_value_scale,
-            mod_hidden_dim=mod_hidden_dim,
-            mod_dropout=mod_dropout,
+            expr_tau=expr_tau,
+            batch_num_bins=batch_num_bins,
+            batch_hidden_dim=batch_hidden_dim,
+            batch_tau=batch_tau,
             cond_dropout=cond_dropout,
-            context_hidden_dim=context_hidden_dim,
-            context_dropout=context_dropout,
-            embedding_dropout=embedding_dropout,
+            out_dropout=out_dropout,
             gene_embedding_ckpt=gene_embedding_ckpt,
             freeze_loaded_gene_embeddings=freeze_loaded_gene_embeddings,
         )
@@ -142,10 +141,7 @@ class SFM(nn.Module):
 
     @staticmethod
     def _init_weights(module: nn.Module) -> None:
-        if isinstance(module, nn.Linear):
-            nn.init.xavier_uniform_(module.weight)
-            if module.bias is not None:
-                nn.init.zeros_(module.bias)
+        init_module_xavier(module)
 
     @staticmethod
     def _validate_token_batch(tokens: dict[str, torch.Tensor | None]) -> None:

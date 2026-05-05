@@ -11,26 +11,13 @@ from dataclasses import dataclass
 from typing import Optional
 
 from ..assets import load_vocab_json, load_vocab_tensor_file
-
-
-EMBEDDING_INIT_STD = 0.02
-
-
-def _init_embedding(
-    module: nn.Embedding,
-    *,
-    std: float = EMBEDDING_INIT_STD,
-    zero_padding_idx: bool = False,
-) -> None:
-    nn.init.normal_(module.weight, mean=0.0, std=std)
-    if zero_padding_idx and module.padding_idx is not None:
-        with torch.no_grad():
-            module.weight[module.padding_idx].zero_()
-
-
-def _zero_parameter(param: nn.Parameter) -> None:
-    with torch.no_grad():
-        param.zero_()
+from .initialization import (
+    EMBEDDING_INIT_STD,
+    init_embedding,
+    init_linear_xavier,
+    init_parameter_normal,
+    zero_parameter,
+)
 
 
 @dataclass
@@ -48,38 +35,48 @@ class ScEmbeddingOutput:
     key_padding_mask: Optional[torch.BoolTensor]
 
 
-class ExpressionValueEmbedding(nn.Module):
+class ExpressionEmbedding(nn.Module):
     """
-    Continuous expression embedding with a dedicated zero-expression vector.
+    Prototype-based soft-bin expression embedding with a dedicated zero-expression bin.
     """
 
     def __init__(
         self,
         embed_dim: int,
+        num_bins: int = 32,
         hidden_dim: int = 256,
-        dropout: float = 0.1,
-        value_scale: float = 1.0,
+        tau: float = 1.0,
     ) -> None:
         super().__init__()
-        if value_scale <= 0:
-            raise ValueError(f"`value_scale` must be positive, got {value_scale}.")
+        if embed_dim <= 0:
+            raise ValueError(f"`embed_dim` must be positive, got {embed_dim}.")
+        if num_bins < 2:
+            raise ValueError(f"`num_bins` must be at least 2, got {num_bins}.")
+        if hidden_dim <= 0:
+            raise ValueError(f"`hidden_dim` must be positive, got {hidden_dim}.")
+        if tau <= 0:
+            raise ValueError(f"`tau` must be positive, got {tau}.")
 
-        self.embed_dim = embed_dim
-        self.value_scale = float(value_scale)
-        self.zero_embedding = nn.Parameter(torch.zeros(embed_dim))
-        self.encoder = nn.Sequential(
+        self.embed_dim = int(embed_dim)
+        self.num_bins = int(num_bins)
+        self.hidden_dim = int(hidden_dim)
+        self.tau = float(tau)
+        self.bin_embeddings = nn.Parameter(torch.empty(num_bins, embed_dim))
+        self.bin_prototypes = nn.Parameter(torch.empty(num_bins - 1, hidden_dim))
+        self.value_encoder = nn.Sequential(
             nn.Linear(1, hidden_dim),
             nn.SiLU(),
-            nn.Dropout(dropout),
+            nn.RMSNorm(hidden_dim),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.SiLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, embed_dim),
         )
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        _zero_parameter(self.zero_embedding)
+        init_parameter_normal(self.bin_embeddings, std=EMBEDDING_INIT_STD)
+        init_parameter_normal(self.bin_prototypes, std=EMBEDDING_INIT_STD)
+        for module in self.value_encoder:
+            if isinstance(module, nn.Linear):
+                init_linear_xavier(module)
 
     def forward(self, expression_values: torch.Tensor) -> torch.Tensor:
         if expression_values.ndim != 2:
@@ -87,49 +84,110 @@ class ExpressionValueEmbedding(nn.Module):
                 f"`expression_values` must have shape (C, G), got {tuple(expression_values.shape)}."
             )
 
-        values = expression_values.to(torch.float32).unsqueeze(-1) / self.value_scale
-        out = self.encoder(values)
+        batch_size, seq_len = expression_values.shape
         zero_mask = expression_values == 0
+        nonzero_mask = ~zero_mask
+        out = torch.zeros(
+            batch_size,
+            seq_len,
+            self.embed_dim,
+            device=expression_values.device,
+            dtype=self.bin_embeddings.dtype,
+        )
+        if nonzero_mask.any():
+            values = expression_values[nonzero_mask].to(self.bin_embeddings.dtype).unsqueeze(-1)
+            encoded = self.value_encoder(values)
+            dist2 = (encoded.unsqueeze(1) - self.bin_prototypes.unsqueeze(0)).pow(2).sum(dim=-1)
+            probs = F.softmax(-dist2 / self.tau, dim=-1)
+            out[nonzero_mask] = torch.matmul(probs, self.bin_embeddings[1:]).to(out.dtype)
         if zero_mask.any():
-            out = out.clone()
-            out[zero_mask] = self.zero_embedding.to(out.dtype)
+            out[zero_mask] = self.bin_embeddings[0].to(out.dtype)
         return out
 
 
-class ExpressionFeatureModulator(nn.Module):
+class BatchEmbedding(nn.Module):
     """
-    Generate feature-wise scale and shift from expression values.
+    Prototype-based soft-bin cell-level batch embedding estimated with attention pooling.
     """
 
     def __init__(
         self,
         embed_dim: int,
-        hidden_dim: int = 256,
-        dropout: float = 0.1,
+        num_bins: int = 32,
+        hidden_dim: int = 128,
+        tau: float = 1.0,
     ) -> None:
         super().__init__()
-        self.proj = nn.Sequential(
+        if embed_dim <= 0:
+            raise ValueError(f"`embed_dim` must be positive, got {embed_dim}.")
+        if num_bins < 1:
+            raise ValueError(f"`num_bins` must be positive, got {num_bins}.")
+        if hidden_dim <= 0:
+            raise ValueError(f"`hidden_dim` must be positive, got {hidden_dim}.")
+        if tau <= 0:
+            raise ValueError(f"`tau` must be positive, got {tau}.")
+
+        self.embed_dim = int(embed_dim)
+        self.num_bins = int(num_bins)
+        self.hidden_dim = int(hidden_dim)
+        self.tau = float(tau)
+        self.bin_embeddings = nn.Parameter(torch.empty(num_bins, embed_dim))
+        self.bin_prototypes = nn.Parameter(torch.empty(num_bins, hidden_dim))
+        self.value_encoder = nn.Sequential(
             nn.Linear(1, hidden_dim),
             nn.SiLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, 2 * embed_dim),
+            nn.RMSNorm(hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim),
         )
+        self.attention_score = nn.Linear(hidden_dim, 1)
+        self.reset_parameters()
 
-    def forward(self, expression_values: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def reset_parameters(self) -> None:
+        init_parameter_normal(self.bin_embeddings, std=EMBEDDING_INIT_STD)
+        init_parameter_normal(self.bin_prototypes, std=EMBEDDING_INIT_STD)
+        for module in self.value_encoder:
+            if isinstance(module, nn.Linear):
+                init_linear_xavier(module)
+        init_linear_xavier(self.attention_score)
+
+    def forward(
+        self,
+        expression_values: torch.Tensor,
+        padding_mask: Optional[torch.BoolTensor] = None,
+    ) -> torch.Tensor:
         if expression_values.ndim != 2:
             raise ValueError(
                 f"`expression_values` must have shape (C, G), got {tuple(expression_values.shape)}."
             )
+        if padding_mask is not None:
+            if padding_mask.shape != expression_values.shape:
+                raise ValueError(
+                    "`padding_mask` must match `expression_values` shape, "
+                    f"got {tuple(padding_mask.shape)} vs {tuple(expression_values.shape)}."
+                )
+            if padding_mask.dtype != torch.bool:
+                padding_mask = padding_mask.to(torch.bool)
 
-        mod = self.proj(expression_values.to(torch.float32).unsqueeze(-1))
-        scale, shift = mod.chunk(2, dim=-1)
-        scale = torch.sigmoid(scale)
-        return scale, shift
+        token_latents = self.value_encoder(expression_values.to(self.bin_embeddings.dtype).unsqueeze(-1))
+        attention_logits = self.attention_score(token_latents).squeeze(-1)
+        if padding_mask is not None:
+            all_padded = padding_mask.all(dim=1, keepdim=True)
+            attention_logits = attention_logits.masked_fill(padding_mask, torch.finfo(attention_logits.dtype).min)
+            attention_logits = attention_logits.masked_fill(all_padded, 0.0)
+        attention_weights = F.softmax(attention_logits, dim=1)
+        if padding_mask is not None:
+            attention_weights = attention_weights.masked_fill(padding_mask, 0.0)
+            attention_weights = attention_weights / attention_weights.sum(dim=1, keepdim=True).clamp_min(1e-6)
+
+        cell_latent = torch.sum(token_latents * attention_weights.unsqueeze(-1), dim=1)
+        dist2 = (cell_latent.unsqueeze(1) - self.bin_prototypes.unsqueeze(0)).pow(2).sum(dim=-1)
+        probs = F.softmax(-dist2 / self.tau, dim=-1)
+        return torch.matmul(probs, self.bin_embeddings)
 
 
-class ConditionEncoder(nn.Module):
+class ConditionEmbedding(nn.Module):
     """
-    Encode four condition tokens into a prefix token and a global context bias.
+    Encode four condition tokens into a prefix token.
     """
 
     def __init__(
@@ -140,73 +198,34 @@ class ConditionEncoder(nn.Module):
     ) -> None:
         super().__init__()
         self.cond_embedding = nn.Embedding(cond_vocab_size, embed_dim)
-        self.prefix_proj = nn.Sequential(
-            nn.Linear(4 * embed_dim, 2 * embed_dim),
+        self.cond_position_embedding = nn.Embedding(4, embed_dim)
+        self.cond_encoder = nn.Sequential(
+            nn.Linear(4 * embed_dim, embed_dim),
             nn.SiLU(),
+            nn.RMSNorm(embed_dim),
+            nn.Linear(embed_dim, embed_dim),
             nn.Dropout(dropout),
-            nn.Linear(2 * embed_dim, embed_dim),
-        )
-        self.context_proj = nn.Sequential(
-            nn.Linear(4 * embed_dim, 2 * embed_dim),
-            nn.SiLU(),
-            nn.Dropout(dropout),
-            nn.Linear(2 * embed_dim, embed_dim),
         )
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        _init_embedding(self.cond_embedding, std=EMBEDDING_INIT_STD)
+        init_embedding(self.cond_embedding, std=EMBEDDING_INIT_STD)
+        init_embedding(self.cond_position_embedding, std=EMBEDDING_INIT_STD)
+        for module in self.cond_encoder:
+            if isinstance(module, nn.Linear):
+                init_linear_xavier(module)
 
-    def forward(self, condition_ids: torch.LongTensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, condition_ids: torch.LongTensor) -> torch.Tensor:
         if condition_ids.ndim != 2 or condition_ids.shape[1] != 4:
             raise ValueError(
                 f"`condition_ids` must have shape (C, 4), got {tuple(condition_ids.shape)}."
             )
 
+        position_ids = torch.arange(4, device=condition_ids.device, dtype=torch.long)
         cond_emb = self.cond_embedding(condition_ids)
+        cond_emb = cond_emb + self.cond_position_embedding(position_ids).unsqueeze(0)
         flat = cond_emb.reshape(condition_ids.shape[0], -1)
-        prefix_token = self.prefix_proj(flat).unsqueeze(1)
-        context_bias = self.context_proj(flat).unsqueeze(1)
-        return prefix_token, context_bias
-
-
-class CellContextEncoder(nn.Module):
-    """
-    Pool gene-token information into a learned cell context token.
-    """
-
-    def __init__(
-        self,
-        embed_dim: int,
-        hidden_dim: int = 256,
-        dropout: float = 0.1,
-    ) -> None:
-        super().__init__()
-        self.pool_proj = nn.Sequential(
-            nn.Linear(embed_dim, hidden_dim),
-            nn.SiLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, embed_dim),
-        )
-
-    def forward(
-        self,
-        token_embeddings: torch.Tensor,
-        padding_mask: Optional[torch.BoolTensor] = None,
-    ) -> torch.Tensor:
-        if token_embeddings.ndim != 3:
-            raise ValueError(
-                f"`token_embeddings` must have shape (C, G, D), got {tuple(token_embeddings.shape)}."
-            )
-
-        if padding_mask is None:
-            pooled = token_embeddings.mean(dim=1)
-        else:
-            valid_mask = (~padding_mask).unsqueeze(-1).to(token_embeddings.dtype)
-            pooled = (token_embeddings * valid_mask).sum(dim=1)
-            pooled = pooled / valid_mask.sum(dim=1).clamp_min(1.0)
-
-        return self.pool_proj(pooled).unsqueeze(1)
+        return self.cond_encoder(flat).unsqueeze(1)
 
 
 class ScEmbedding(nn.Module):
@@ -235,17 +254,16 @@ class ScEmbedding(nn.Module):
     def __init__(
         self,
         token_dict: pd.DataFrame,
-        cond_vocab_size: int = 4096,
-        embed_dim: int = 256,
-        expr_hidden_dim: int = 256,
-        expr_dropout: float = 0.1,
-        expr_value_scale: float = 1.0,
-        mod_hidden_dim: int = 256,
-        mod_dropout: float = 0.1,
+        cond_vocab_size: int = 256,
+        embed_dim: int = 768,
+        expr_num_bins: int = 32,
+        expr_hidden_dim: int = 128,
+        expr_tau: float = 1.0,
+        batch_num_bins: int = 128,
+        batch_hidden_dim: int = 128,
+        batch_tau: float = 1.0,
         cond_dropout: float = 0.1,
-        context_hidden_dim: int = 256,
-        context_dropout: float = 0.1,
-        embedding_dropout: float = 0.1,
+        out_dropout: float = 0.1,
         gene_embedding_ckpt: Optional[str] = None,
         freeze_loaded_gene_embeddings: bool = False,
     ) -> None:
@@ -261,34 +279,29 @@ class ScEmbedding(nn.Module):
             embed_dim,
             padding_idx=self.pad_index,
         )
-        self.expr_embedding = ExpressionValueEmbedding(
+        self.expr_embedding = ExpressionEmbedding(
             embed_dim=embed_dim,
+            num_bins=expr_num_bins,
             hidden_dim=expr_hidden_dim,
-            dropout=expr_dropout,
-            value_scale=expr_value_scale,
+            tau=expr_tau,
         )
-        self.expr_modulator = ExpressionFeatureModulator(
+        self.batch_embedding = BatchEmbedding(
             embed_dim=embed_dim,
-            hidden_dim=mod_hidden_dim,
-            dropout=mod_dropout,
+            num_bins=batch_num_bins,
+            hidden_dim=batch_hidden_dim,
+            tau=batch_tau,
         )
-        self.condition_encoder = ConditionEncoder(
+        self.condition_embedding = ConditionEmbedding(
             cond_vocab_size=cond_vocab_size,
             embed_dim=embed_dim,
             dropout=cond_dropout,
         )
-        self.cell_context_encoder = CellContextEncoder(
-            embed_dim=embed_dim,
-            hidden_dim=context_hidden_dim,
-            dropout=context_dropout,
-        )
 
         self.tf_type_embedding = nn.Embedding(2, embed_dim)
-        self.position_embedding = nn.Embedding(8192, embed_dim)
         self.prefix_type_embedding = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.gene_type_embedding = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.final_norm = nn.RMSNorm(embed_dim)
-        self.dropout = nn.Dropout(embedding_dropout)
+        self.dropout = nn.Dropout(out_dropout)
 
         self._loaded_gene_embedding_mask: Optional[torch.BoolTensor] = None
         self.loaded_gene_embedding_ckpt: Optional[str] = None
@@ -304,15 +317,14 @@ class ScEmbedding(nn.Module):
             )
 
     def reset_parameters(self) -> None:
-        _init_embedding(
+        init_embedding(
             self.gene_embedding,
             std=EMBEDDING_INIT_STD,
             zero_padding_idx=True,
         )
-        _init_embedding(self.tf_type_embedding, std=EMBEDDING_INIT_STD)
-        _init_embedding(self.position_embedding, std=EMBEDDING_INIT_STD)
-        _zero_parameter(self.prefix_type_embedding)
-        _zero_parameter(self.gene_type_embedding)
+        init_embedding(self.tf_type_embedding, std=EMBEDDING_INIT_STD)
+        zero_parameter(self.prefix_type_embedding)
+        zero_parameter(self.gene_type_embedding)
         self.final_norm.reset_parameters()
 
     @classmethod
@@ -339,10 +351,6 @@ class ScEmbedding(nn.Module):
         if len(pad_rows) == 0:
             raise ValueError("`token_dict` must contain the '<pad>' token in `gene_id`.")
         return int(pad_rows["token_index"].iloc[0])
-
-    @staticmethod
-    def _build_position_ids(batch_size: int, seq_len: int, device: torch.device) -> torch.LongTensor:
-        return torch.arange(seq_len, device=device, dtype=torch.long).unsqueeze(0).expand(batch_size, -1)
 
     @staticmethod
     def _build_key_padding_mask(
@@ -537,11 +545,11 @@ class ScEmbedding(nn.Module):
         batch_size, seq_len = input_ids.shape
         device = input_ids.device
 
-        if condition_ids.max().item() >= self.condition_encoder.cond_embedding.num_embeddings:
+        if condition_ids.max().item() >= self.condition_embedding.cond_embedding.num_embeddings:
             raise ValueError(
                 "Found `condition_ids` outside the configured `cond_vocab_size`. "
                 f"Max value: {condition_ids.max().item()}, "
-                f"vocab size: {self.condition_encoder.cond_embedding.num_embeddings}."
+                f"vocab size: {self.condition_embedding.cond_embedding.num_embeddings}."
             )
 
         if non_tf_mask is None:
@@ -553,32 +561,21 @@ class ScEmbedding(nn.Module):
 
         gene_emb = self.gene_embedding(input_ids)
         expr_emb = self.expr_embedding(expression_values).to(gene_emb.dtype)
-        expr_scale, expr_shift = self.expr_modulator(expression_values)
-        expr_scale = expr_scale.to(gene_emb.dtype)
-        expr_shift = expr_shift.to(gene_emb.dtype)
 
         tf_type_ids = non_tf_mask.long()
         tf_type_emb = self.tf_type_embedding(tf_type_ids).to(gene_emb.dtype)
-        token_emb = gene_emb * (1.0 + expr_scale) + expr_shift + expr_emb + tf_type_emb
+        token_emb = gene_emb + expr_emb + tf_type_emb
 
         if padding_mask is not None:
             token_emb = token_emb.masked_fill(padding_mask.unsqueeze(-1), 0.0)
 
-        prefix_token, context_bias = self.condition_encoder(condition_ids)
+        prefix_token = self.condition_embedding(condition_ids)
         prefix_token = prefix_token.to(gene_emb.dtype)
-        context_bias = context_bias.to(gene_emb.dtype)
-        token_emb = token_emb + context_bias
-
-        cell_token = prefix_token + self.cell_context_encoder(
-            token_emb,
-            padding_mask=padding_mask,
-        ).to(gene_emb.dtype)
+        batch_emb = self.batch_embedding(expression_values, padding_mask=padding_mask).unsqueeze(1)
+        cell_token = prefix_token + batch_emb.to(gene_emb.dtype)
 
         full_embeddings = torch.cat([cell_token, token_emb], dim=1)
 
-        position_ids = self._build_position_ids(batch_size, seq_len + 1, device=device)
-        position_emb = self.position_embedding(position_ids).to(full_embeddings.dtype)
-        full_embeddings = full_embeddings + position_emb
         full_embeddings[:, :1] = full_embeddings[:, :1] + self.prefix_type_embedding.to(full_embeddings.dtype)
         full_embeddings[:, 1:] = full_embeddings[:, 1:] + self.gene_type_embedding.to(full_embeddings.dtype)
 

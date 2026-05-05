@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ..sfm import FactorState
+from ..initialization import init_module_xavier
 from ...utils import build_active_value_mask, require_tensor, validate_factor_shapes
 
 
@@ -202,6 +203,7 @@ class VGAE(nn.Module):
             fp_steps=fp_steps,
             fp_damping=fp_damping,
         )
+        self.apply(init_module_xavier)
 
     def forward(
         self,

@@ -7,6 +7,8 @@ import torch.distributed as dist
 
 from typing import Optional
 
+from .initialization import init_module_xavier
+
 
 class QBGating(nn.Module):
     """
@@ -219,6 +221,7 @@ class GeneRouter(nn.Module):
             if topk is not None
             else None
         )
+        self.apply(init_module_xavier)
 
     @staticmethod
     def _normalize_gene_mask(

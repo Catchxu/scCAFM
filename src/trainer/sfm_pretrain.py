@@ -105,6 +105,7 @@ def _drop_regenerated_condition_embedding_weights(
         return model_state, []
 
     prefixes = (
+        "foundation_modules.sfm.embedding.condition_embedding.cond_embedding.",
         "foundation_modules.sfm.embedding.condition_encoder.cond_embedding.",
     )
     filtered_state = {
