@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import gc
 import warnings
 
 from datetime import datetime, timezone
@@ -9,6 +10,7 @@ from typing import Any
 
 import torch
 
+from torch.distributed.fsdp import FullOptimStateDictConfig
 from torch.distributed.fsdp import FullStateDictConfig
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import StateDictType
@@ -144,6 +146,7 @@ class CheckpointManager:
 
         if isinstance(model, FSDP):
             state_cfg = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+            optim_state_cfg = FullOptimStateDictConfig(offload_to_cpu=True, rank0_only=True)
             with warnings.catch_warnings():
                 warnings.filterwarnings(
                     "ignore",
@@ -154,9 +157,10 @@ class CheckpointManager:
                     model,
                     StateDictType.FULL_STATE_DICT,
                     state_dict_config=state_cfg,
+                    optim_state_dict_config=optim_state_cfg,
                 ):
                     model_state = model.state_dict()
-            optim_state = FSDP.optim_state_dict(model, optimizer)
+                    optim_state = FSDP.optim_state_dict(model, optimizer)
         else:
             model_state = model.state_dict()
             optim_state = optimizer.state_dict()
@@ -190,6 +194,11 @@ class CheckpointManager:
                 int(train_state.get("global_step", 0)),
                 int(train_state.get("epoch", 0)),
             )
+
+        del model_state, optim_state
+        gc.collect()
+        if self.runtime.device.type == "cuda":
+            torch.cuda.empty_cache()
 
         barrier()
         return model_weights_path, resume_state_path

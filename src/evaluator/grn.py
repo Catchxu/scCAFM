@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import gc
+import os
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,7 +49,12 @@ class EvaluationGRNCache:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate predicted cell-specific GRNs.")
-    parser.add_argument("--eval-grn-config", default="configs/eval_grn.yaml")
+    parser.add_argument(
+        "--eval-grn-config",
+        "--eval-config",
+        dest="eval_grn_config",
+        default="configs/eval_grn.yaml",
+    )
     return parser.parse_args()
 
 
@@ -294,14 +301,25 @@ def _summarize_metrics(metrics_df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame([summary])
 
 
-def _release_data_bundle(data_bundle: PretrainingDataBundle | None) -> None:
+def _release_data_bundle(data_bundle: PretrainingDataBundle | None, runtime: RuntimeContext) -> None:
     if data_bundle is None:
         return
 
     train_loader = getattr(data_bundle, "train_loader", None)
+    iterator = getattr(train_loader, "_iterator", None)
+    if iterator is not None and hasattr(iterator, "_shutdown_workers"):
+        iterator._shutdown_workers()
+
     dataset = getattr(train_loader, "dataset", None)
     if hasattr(dataset, "close"):
         dataset.close()
+
+    data_bundle.train_loader = None
+    data_bundle.train_sampler = None
+    del train_loader
+    gc.collect()
+    if runtime.device.type == "cuda":
+        torch.cuda.empty_cache()
 
 
 def _save_summary_metrics(
@@ -375,6 +393,14 @@ def run_evaluation(
     paths = prepare_evaluation_paths(runtime=runtime)
     logger = ExperimentLogger(name="evaluate_grn", paths=paths, runtime=runtime)
     results_dir = paths.root / "results"
+    if runtime.is_main:
+        logger.info(
+            "Launch environment: CUDA_VISIBLE_DEVICES=%s, NCCL_NET=%s, NCCL_SHM_DISABLE=%s, NCCL_P2P_DISABLE=%s",
+            os.environ.get("CUDA_VISIBLE_DEVICES", "<unset>"),
+            os.environ.get("NCCL_NET", "<unset>"),
+            os.environ.get("NCCL_SHM_DISABLE", "<unset>"),
+            os.environ.get("NCCL_P2P_DISABLE", "<unset>"),
+        )
 
     data_assets = build_evaluation_assets(config=config, runtime=runtime)
     evaluation_grn_df = _load_evaluation_grn(evaluator_cfg["evaluation_grn_path"])
@@ -418,39 +444,43 @@ def run_evaluation(
     metric_counts = {name: 0 for name in metric_names}
     with torch.no_grad():
         for file_index, path in enumerate(data_assets.train_paths, start=1):
-            data_bundle = build_data_bundle_for_path(
-                path=path,
-                assets=data_assets,
-                config=config,
-                runtime=runtime,
-                logger=logger,
-                file_index=file_index,
-                num_files=len(data_assets.train_paths),
-            )
-
-            batch_offset = 0
-            for batch_idx, batch in enumerate(data_bundle.train_loader, start=1):
-                tokens = move_batch_to_device(batch, runtime.device)
-                with _autocast_context(config=config, runtime=runtime):
-                    model_output = model(
-                        tokens,
-                        compute_grn={foundation_name: True},
-                        return_factors=False,
-                    )
-                pred_grn = _extract_predicted_grn(model_output, foundation_name=foundation_name)
-                batch_metrics = evaluate_cell_specific_grns(
-                    pred_grn=pred_grn,
-                    tokens=tokens,
-                    token_dict=data_assets.token_dict,
-                    evaluation_grn_df=evaluation_grn_df,
+            data_bundle = None
+            try:
+                data_bundle = build_data_bundle_for_path(
+                    path=path,
+                    assets=data_assets,
+                    config=config,
+                    runtime=runtime,
+                    logger=logger,
+                    file_index=file_index,
+                    num_files=len(data_assets.train_paths),
                 )
-                for name in metric_names:
-                    series = batch_metrics[name].dropna()
-                    metric_sums[name] += float(series.sum())
-                    metric_counts[name] += int(series.shape[0])
-                batch_offset += len(batch_metrics)
 
-            _release_data_bundle(data_bundle)
+                batch_offset = 0
+                for batch_idx, batch in enumerate(data_bundle.train_loader, start=1):
+                    tokens = move_batch_to_device(batch, runtime.device)
+                    with _autocast_context(config=config, runtime=runtime):
+                        model_output = model(
+                            tokens,
+                            compute_grn={foundation_name: True},
+                            return_factors=False,
+                        )
+                    pred_grn = _extract_predicted_grn(model_output, foundation_name=foundation_name)
+                    batch_metrics = evaluate_cell_specific_grns(
+                        pred_grn=pred_grn,
+                        tokens=tokens,
+                        token_dict=data_assets.token_dict,
+                        evaluation_grn_df=evaluation_grn_df,
+                    )
+                    for name in metric_names:
+                        series = batch_metrics[name].dropna()
+                        metric_sums[name] += float(series.sum())
+                        metric_counts[name] += int(series.shape[0])
+                    batch_offset += len(batch_metrics)
+
+                    del batch_metrics, pred_grn, model_output, tokens
+            finally:
+                _release_data_bundle(data_bundle, runtime=runtime)
 
     _save_summary_metrics(
         metric_sums=metric_sums,

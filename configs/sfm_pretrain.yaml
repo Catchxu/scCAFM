@@ -1,8 +1,9 @@
 model_source: assets
 
 runtime:
-  # Use fa4 by default; set to fa2 for broader GPU compatibility.
-  attention_backend: fa4
+  # Use FA4/CuTe for supported GPUs. Set to fa2 only when debugging kernel
+  # instability or running on hardware without FA4 support.
+  attention_backend: fa2
   precision:
     model_dtype: fp32
     autocast_dtype: bf16
@@ -17,7 +18,7 @@ data:
   train_paths: /scratch/kxu248/data/Atlas/
   shuffle_train_paths: true
   shuffle_train_paths_seed: 42
-  batch_size: 128
+  batch_size: 54
   gradient_accumulation_steps: 4
   num_workers: 0
   pin_memory: false

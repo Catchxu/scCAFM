@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=pretrain
 #SBATCH --account=general
-#SBATCH --partition=b200-8-gm1432-c192-m2048
+#SBATCH --partition=rp6b-8-gm768-c192-m2048
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --gpus=2
-#SBATCH --mem=96G
-#SBATCH --time=12:00:00
+#SBATCH --gpus=4
+#SBATCH --mem=256G
+#SBATCH --time=120:00:00
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=kxu248@emory.edu
 
@@ -24,6 +24,7 @@ cd "${ROOT_DIR}"
 export PYTHONPATH="${ROOT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 export NCCL_NET="${NCCL_NET:-Socket}"
 export NCCL_SHM_DISABLE="${NCCL_SHM_DISABLE:-1}"
+export NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-0}"
 
 if command -v python3 >/dev/null 2>&1; then
   PYTHON_BIN="python3"

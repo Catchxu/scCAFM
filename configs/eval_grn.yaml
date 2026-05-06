@@ -1,7 +1,7 @@
 model_source: assets
 
 runtime:
-  # Use fa4 by default; set to fa2 for broader GPU compatibility.
+  # Keep evaluation on the same safer attention backend used by pretraining.
   attention_backend: fa4
   precision:
     model_dtype: fp32

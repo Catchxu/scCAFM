@@ -24,6 +24,7 @@ cd "${ROOT_DIR}"
 export PYTHONPATH="${ROOT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 export NCCL_NET="${NCCL_NET:-Socket}"
 export NCCL_SHM_DISABLE="${NCCL_SHM_DISABLE:-1}"
+export NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-0}"
 
 if command -v python3 >/dev/null 2>&1; then
   PYTHON_BIN="python3"
@@ -39,8 +40,12 @@ if [[ -z "${NPROC_PER_NODE:-}" ]]; then
     IFS=',' read -ra _GPU_LIST <<< "${CUDA_VISIBLE_DEVICES}"
     NPROC_PER_NODE="${#_GPU_LIST[@]}"
   elif [[ -n "${SLURM_GPUS_ON_NODE:-}" ]]; then
-    IFS=',' read -ra _GPU_LIST <<< "${SLURM_GPUS_ON_NODE}"
-    NPROC_PER_NODE="${#_GPU_LIST[@]}"
+    if [[ "${SLURM_GPUS_ON_NODE}" =~ ^[0-9]+$ ]]; then
+      NPROC_PER_NODE="${SLURM_GPUS_ON_NODE}"
+    else
+      IFS=',' read -ra _GPU_LIST <<< "${SLURM_GPUS_ON_NODE}"
+      NPROC_PER_NODE="${#_GPU_LIST[@]}"
+    fi
   elif command -v nvidia-smi >/dev/null 2>&1; then
     NPROC_PER_NODE="$(nvidia-smi -L | wc -l | tr -d '[:space:]')"
   else
@@ -56,7 +61,7 @@ if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
     NPROC_PER_NODE="${VISIBLE_GPU_COUNT}"
   fi
 fi
-EVAL_GRN_CONFIG="${EVAL_GRN_CONFIG:-${ROOT_DIR}/configs/eval_grn.yaml}"
+EVAL_GRN_CONFIG="${EVAL_GRN_CONFIG:-${EVAL_CONFIG:-${ROOT_DIR}/configs/eval_grn.yaml}}"
 
 resolve_path() {
   local path="$1"
@@ -71,7 +76,7 @@ EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --eval-grn-config)
+    --eval-grn-config|--eval-config)
       EVAL_GRN_CONFIG="$(resolve_path "$2")"
       shift 2
       ;;

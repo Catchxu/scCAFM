@@ -122,10 +122,16 @@ def _release_data_bundle(data_bundle: PretrainingDataBundle | None, runtime: Run
         return
 
     train_loader = getattr(data_bundle, "train_loader", None)
+    iterator = getattr(train_loader, "_iterator", None)
+    if iterator is not None and hasattr(iterator, "_shutdown_workers"):
+        iterator._shutdown_workers()
+
     dataset = getattr(train_loader, "dataset", None)
     if hasattr(dataset, "close"):
         dataset.close()
 
+    data_bundle.train_loader = None
+    data_bundle.train_sampler = None
     del train_loader
     gc.collect()
     if runtime.device.type == "cuda":
@@ -276,11 +282,11 @@ class PretrainingTrainer:
             return float(grad_norm.detach().item())
         return float(grad_norm)
 
-    def _maybe_save_checkpoint(self, epoch: int) -> None:
+    def _should_save_checkpoint(self, epoch: int) -> bool:
         save_every_epochs = int(self.train_cfg.get("save_every_epochs", 1))
-        if epoch % save_every_epochs != 0:
-            return
+        return epoch % save_every_epochs == 0
 
+    def _save_checkpoint(self) -> None:
         self.checkpoint_manager.save(
             model=self.model,
             optimizer=self.optimizer,
@@ -320,6 +326,7 @@ class PretrainingTrainer:
                 )
 
             data_bundle: PretrainingDataBundle | None = None
+            save_after_data_release = False
             try:
                 data_bundle = build_data_bundle_for_path(
                     path=path,
@@ -352,12 +359,13 @@ class PretrainingTrainer:
                     if hasattr(data_bundle.train_sampler, "set_epoch"):
                         data_bundle.train_sampler.set_epoch(epoch)
 
-                    progress = tqdm(
-                        data_bundle.train_loader,
-                        disable=not self.runtime.is_main,
-                        desc=f"adata {file_index}/{len(train_paths)} epoch {epoch + 1}/{epochs}",
-                    )
+                    progress = None
                     try:
+                        progress = tqdm(
+                            data_bundle.train_loader,
+                            disable=not self.runtime.is_main,
+                            desc=f"adata {file_index}/{len(train_paths)} epoch {epoch + 1}/{epochs}",
+                        )
                         self.optimizer.zero_grad(set_to_none=True)
                         accum_metric_sums: dict[str, float] = {}
                         accum_micro_steps = 0
@@ -403,6 +411,12 @@ class PretrainingTrainer:
                                 accum_metric_sums = {}
                                 accum_micro_steps = 0
 
+                            # `model_output` contains large per-gene factor tensors.
+                            # Drop references before the next forward pass so the
+                            # allocator does not have to carry the previous
+                            # microbatch's outputs into the next microbatch peak.
+                            del loss_result, model_output, tokens
+
                         self.train_state["file_index"] = file_offset
                         self.train_state["epoch"] = epoch + 1
                         epoch_metrics = {
@@ -412,22 +426,26 @@ class PretrainingTrainer:
                         epoch_metrics = reduce_scalar_dict(epoch_metrics, self.runtime)
                         self.logger.log_metrics("train_epoch", self.train_state["global_step"], epoch_metrics)
 
-                        self._maybe_save_checkpoint(epoch + 1)
+                        if self._should_save_checkpoint(epoch + 1):
+                            if epoch + 1 == epochs:
+                                save_after_data_release = True
+                            else:
+                                self._save_checkpoint()
                     finally:
-                        progress.close()
+                        if progress is not None:
+                            progress.close()
+                            del progress
 
                 self.train_state["file_index"] = file_offset + 1
                 self.train_state["epoch"] = 0
             finally:
                 _release_data_bundle(data_bundle, self.runtime)
+                data_bundle = None
 
-        self.checkpoint_manager.save(
-            model=self.model,
-            optimizer=self.optimizer,
-            scheduler=self.scheduler,
-            loss_manager=self.loss_manager,
-            train_state=self.train_state,
-        )
+            if save_after_data_release:
+                self._save_checkpoint()
+
+        self._save_checkpoint()
 
 
 def main() -> None:
