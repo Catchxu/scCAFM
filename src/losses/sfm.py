@@ -22,15 +22,15 @@ class LossResult:
 
 
 class CosineValueSchedule:
-    def __init__(self, initial: float, final: float, span_epochs: int) -> None:
-        if span_epochs <= 0:
-            raise ValueError(f"`span_epochs` must be positive, got {span_epochs}.")
+    def __init__(self, initial: float, final: float, total_epochs: int) -> None:
+        if total_epochs <= 0:
+            raise ValueError(f"`total_epochs` must be positive, got {total_epochs}.")
         self.initial = float(initial)
         self.final = float(final)
-        self.span_epochs = int(span_epochs)
+        self.total_epochs = int(total_epochs)
 
     def value_at(self, epoch: int) -> float:
-        progress = min(max(epoch, 0), self.span_epochs) / self.span_epochs
+        progress = min(max(epoch, 0), self.total_epochs) / self.total_epochs
         cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
         return self.final + (self.initial - self.final) * cosine
 
@@ -78,12 +78,11 @@ class PretrainingLossManager(nn.Module):
         )
 
         schedule_cfg = prior_cfg.get("weight_schedule", {})
-        span_epochs = int(schedule_cfg.get("span_epochs") or total_epochs)
         self.prior_schedule = (
             CosineValueSchedule(
                 initial=float(schedule_cfg.get("initial", 1.0)),
                 final=float(schedule_cfg.get("final", 0.0)),
-                span_epochs=span_epochs,
+                total_epochs=total_epochs,
             )
             if self.use_prior
             else None

@@ -19,12 +19,14 @@ from ..utils import (
 
 class PriorLoss(nn.Module):
     """
-    Supervise TF->target edges against a prior GRN using the raw `u` and `v`.
+    Supervise top predicted TF->target edges against a prior GRN using raw `u` and `v`.
 
     Notes:
     - This loss constrains `u` and `v` only.
     - Source positions are restricted to active TF genes; target positions are
       restricted to active genes.
+    - Only top predicted edges per cell contribute to the loss, so unpredicted
+      prior edges do not incur a penalty.
     """
 
     def __init__(
@@ -33,7 +35,7 @@ class PriorLoss(nn.Module):
         true_grn_df: Optional[pd.DataFrame] = None,
         pos_weight: float = 1.0,
         neg_weight: float = 1.0,
-        neg_sample_ratio: Optional[float] = None,
+        pred_topk: Optional[int] = 256,
     ) -> None:
         super().__init__()
 
@@ -45,21 +47,13 @@ class PriorLoss(nn.Module):
 
         self.pos_weight = float(pos_weight)
         self.neg_weight = float(neg_weight)
-        self.neg_sample_ratio = None if neg_sample_ratio is None else float(neg_sample_ratio)
+        self.pred_topk = None if pred_topk is None else int(pred_topk)
+        if self.pred_topk is not None and self.pred_topk <= 0:
+            raise ValueError(f"`pred_topk` must be positive when provided, got {pred_topk}.")
 
         self._cached_prior_ref: Optional[pd.DataFrame] = None
         self.register_buffer(
             "_cached_pair_keys",
-            torch.empty(0, dtype=torch.long),
-            persistent=False,
-        )
-        self.register_buffer(
-            "_cached_src_ids",
-            torch.empty(0, dtype=torch.long),
-            persistent=False,
-        )
-        self.register_buffer(
-            "_cached_tgt_ids",
             torch.empty(0, dtype=torch.long),
             persistent=False,
         )
@@ -99,22 +93,16 @@ class PriorLoss(nn.Module):
             cached_pair_keys = torch.unique(torch.tensor(pair_keys, dtype=torch.long))
 
         self._cached_pair_keys = cached_pair_keys
-        self._cached_src_ids = cached_pair_keys // self._pair_key_base
-        self._cached_tgt_ids = cached_pair_keys % self._pair_key_base
         self._cached_prior_ref = true_grn_df
 
     def _resolve_prior_edges(
         self,
         true_grn_df: Optional[pd.DataFrame],
         device: torch.device,
-    ) -> tuple[torch.LongTensor, torch.LongTensor, torch.LongTensor]:
+    ) -> torch.LongTensor:
         if true_grn_df is not None and true_grn_df is not self._cached_prior_ref:
             self._prepare_prior_cache(true_grn_df)
-        return (
-            self._cached_src_ids.to(device=device),
-            self._cached_tgt_ids.to(device=device),
-            self._cached_pair_keys.to(device=device),
-        )
+        return self._cached_pair_keys.to(device=device)
 
     @staticmethod
     def _bound_probability(
@@ -138,86 +126,25 @@ class PriorLoss(nn.Module):
         return edge_prob * (1.0 - 2.0 * eps) + eps
 
     @staticmethod
-    def _lookup_positions(
-        query_ids: torch.LongTensor,
-        candidate_ids: torch.LongTensor,
-        candidate_pos: torch.LongTensor,
-    ) -> tuple[torch.LongTensor, torch.BoolTensor]:
-        missing = torch.full_like(query_ids, fill_value=-1)
-        if query_ids.numel() == 0 or candidate_ids.numel() == 0:
-            return missing, torch.zeros_like(query_ids, dtype=torch.bool)
-
-        order = torch.argsort(candidate_ids)
-        sorted_ids = candidate_ids[order]
-        sorted_pos = candidate_pos[order]
-        idx = torch.searchsorted(sorted_ids, query_ids)
-        in_bounds = idx < sorted_ids.numel()
-        safe_idx = idx.clamp(max=sorted_ids.numel() - 1)
-        found = in_bounds & sorted_ids[safe_idx].eq(query_ids)
-
-        positions = missing
-        positions[found] = sorted_pos[safe_idx[found]]
-        return positions, found
-
-    @staticmethod
-    def _sample_negative_edges(
-        tf_pos: torch.LongTensor,
-        tgt_pos: torch.LongTensor,
-        positive_pos_keys: torch.LongTensor,
-        sample_k: Optional[int],
-        seq_len: int,
-    ) -> tuple[torch.LongTensor, torch.LongTensor]:
-        total_count = int(tf_pos.numel() * tgt_pos.numel())
+    def _select_topk_edges(
+        edge_prob: torch.Tensor,
+        topk: Optional[int],
+    ) -> tuple[torch.LongTensor, torch.LongTensor, torch.Tensor]:
+        num_src, num_tgt = edge_prob.shape
+        total_count = int(num_src * num_tgt)
         if total_count == 0:
-            return tf_pos.new_empty(0), tgt_pos.new_empty(0)
+            empty_idx = torch.empty(0, device=edge_prob.device, dtype=torch.long)
+            empty_prob = torch.empty(0, device=edge_prob.device, dtype=edge_prob.dtype)
+            return empty_idx, empty_idx, empty_prob
 
-        positive_pos_keys = torch.unique(positive_pos_keys)
-        neg_count = total_count - int(positive_pos_keys.numel())
-        if neg_count <= 0:
-            return tf_pos.new_empty(0), tgt_pos.new_empty(0)
-
-        if sample_k is None:
-            flat = torch.arange(total_count, device=tf_pos.device)
-            src = tf_pos[flat // tgt_pos.numel()]
-            tgt = tgt_pos[flat % tgt_pos.numel()]
-            keep = ~torch.isin(src * seq_len + tgt, positive_pos_keys)
-            return src[keep], tgt[keep]
-
-        sample_k = min(int(sample_k), neg_count)
-        if sample_k <= 0:
-            return tf_pos.new_empty(0), tgt_pos.new_empty(0)
-
-        sampled_keys: list[torch.Tensor] = []
-        sampled_count = 0
-        for _ in range(20):
-            draw_count = max((sample_k - sampled_count) * 2, 64)
-            flat = torch.randint(total_count, (draw_count,), device=tf_pos.device)
-            src = tf_pos[flat // tgt_pos.numel()]
-            tgt = tgt_pos[flat % tgt_pos.numel()]
-            keys = torch.unique(src * seq_len + tgt)
-            keep = ~torch.isin(keys, positive_pos_keys)
-            if sampled_keys:
-                keep = keep & ~torch.isin(keys, torch.cat(sampled_keys))
-            keys = keys[keep]
-            if keys.numel() == 0:
-                continue
-            sampled_keys.append(keys)
-            sampled_count += int(keys.numel())
-            if sampled_count >= sample_k:
-                break
-
-        if sampled_count < sample_k:
-            flat = torch.arange(total_count, device=tf_pos.device)
-            src = tf_pos[flat // tgt_pos.numel()]
-            tgt = tgt_pos[flat % tgt_pos.numel()]
-            keys = src * seq_len + tgt
-            keep = ~torch.isin(keys, positive_pos_keys)
-            if sampled_keys:
-                keep = keep & ~torch.isin(keys, torch.cat(sampled_keys))
-            sampled_keys.append(keys[keep])
-
-        neg_keys = torch.cat(sampled_keys)[:sample_k]
-        return neg_keys // seq_len, neg_keys % seq_len
+        flat_prob = edge_prob.reshape(-1)
+        if topk is None:
+            selected_flat = torch.arange(total_count, device=edge_prob.device, dtype=torch.long)
+        else:
+            k = min(int(topk), total_count)
+            selected_flat = torch.topk(flat_prob.detach(), k=k, dim=0).indices
+        selected_prob = flat_prob[selected_flat]
+        return selected_flat // num_tgt, selected_flat % num_tgt, selected_prob
 
     def forward(
         self,
@@ -242,7 +169,7 @@ class PriorLoss(nn.Module):
             non_tf_mask=non_tf_mask,
             padding_mask=padding_mask,
         )
-        prior_src_ids, prior_tgt_ids, prior_pair_keys = self._resolve_prior_edges(
+        prior_pair_keys = self._resolve_prior_edges(
             true_grn_df=true_grn_df,
             device=input_ids.device,
         )
@@ -259,78 +186,42 @@ class PriorLoss(nn.Module):
         labels: list[torch.Tensor] = []
         weights: list[torch.Tensor] = []
 
-        batch_size, seq_len = input_ids.shape
+        batch_size, _ = input_ids.shape
         for batch_idx in range(batch_size):
             tf_pos = torch.nonzero(tf_mask[batch_idx], as_tuple=False).flatten()
             tgt_pos = torch.nonzero(active_gene_mask[batch_idx], as_tuple=False).flatten()
             if tf_pos.numel() == 0 or tgt_pos.numel() == 0:
                 continue
 
-            src_pos, src_found = self._lookup_positions(
-                query_ids=prior_src_ids,
-                candidate_ids=input_ids[batch_idx, tf_pos],
-                candidate_pos=tf_pos,
+            candidate_prob = torch.matmul(
+                factors.u[batch_idx, tf_pos],
+                factors.v[batch_idx, tgt_pos].transpose(0, 1),
             )
-            tgt_pos_for_prior, tgt_found = self._lookup_positions(
-                query_ids=prior_tgt_ids,
-                candidate_ids=input_ids[batch_idx, tgt_pos],
-                candidate_pos=tgt_pos,
+            candidate_prob = self._bound_probability(candidate_prob)
+            top_src_idx, top_tgt_idx, top_prob = self._select_topk_edges(
+                candidate_prob,
+                topk=self.pred_topk,
             )
-            positive_mask = src_found & tgt_found
-            if not positive_mask.any():
+            if top_prob.numel() == 0:
                 continue
 
-            pos_src = src_pos[positive_mask]
-            pos_tgt = tgt_pos_for_prior[positive_mask]
-            positive_pos_keys = torch.unique(pos_src * seq_len + pos_tgt)
-            pos_src = positive_pos_keys // seq_len
-            pos_tgt = positive_pos_keys % seq_len
-            pos_count = int(pos_src.numel())
+            src_pos = tf_pos[top_src_idx]
+            tgt_pos_selected = tgt_pos[top_tgt_idx]
+            src_ids = input_ids[batch_idx, src_pos]
+            tgt_ids = input_ids[batch_idx, tgt_pos_selected]
+            pair_keys = src_ids * self._pair_key_base + tgt_ids
+            is_reference = torch.isin(pair_keys, prior_pair_keys)
 
-            if self.neg_sample_ratio is None or self.neg_sample_ratio <= 0:
-                neg_sample_k = None
-            else:
-                neg_sample_k = int(pos_count * self.neg_sample_ratio)
-            neg_src, neg_tgt = self._sample_negative_edges(
-                tf_pos=tf_pos,
-                tgt_pos=tgt_pos,
-                positive_pos_keys=positive_pos_keys,
-                sample_k=neg_sample_k,
-                seq_len=seq_len,
+            batch_indices.append(torch.full_like(src_pos, fill_value=batch_idx))
+            src_indices.append(src_pos)
+            tgt_indices.append(tgt_pos_selected)
+            labels.append(is_reference.to(dtype=factors.u.dtype))
+            edge_weights = torch.where(
+                is_reference,
+                torch.full_like(top_prob, fill_value=self.pos_weight),
+                torch.full_like(top_prob, fill_value=self.neg_weight),
             )
-
-            batch_pos = torch.full_like(pos_src, fill_value=batch_idx)
-            batch_indices.append(batch_pos)
-            src_indices.append(pos_src)
-            tgt_indices.append(pos_tgt)
-            labels.append(
-                torch.ones(pos_count, device=input_ids.device, dtype=factors.u.dtype)
-            )
-            weights.append(
-                torch.full(
-                    (pos_count,),
-                    fill_value=self.pos_weight,
-                    device=input_ids.device,
-                    dtype=factors.u.dtype,
-                )
-            )
-
-            if neg_src.numel() > 0:
-                neg_count = int(neg_src.numel())
-                batch_indices.append(torch.full_like(neg_src, fill_value=batch_idx))
-                src_indices.append(neg_src)
-                tgt_indices.append(neg_tgt)
-                labels.append(
-                    torch.zeros(neg_count, device=input_ids.device, dtype=factors.u.dtype)
-                )
-                weights.append(
-                    torch.full(
-                        (neg_count,),
-                        fill_value=self.neg_weight,
-                        device=input_ids.device,
-                        dtype=factors.u.dtype,
-                    )
-                )
+            weights.append(edge_weights.to(dtype=factors.u.dtype))
 
         if not batch_indices:
             return factors.u.new_zeros(())

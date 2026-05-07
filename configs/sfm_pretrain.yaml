@@ -57,7 +57,7 @@ optimizer:
   lr: 0.0001
   betas: [0.9, 0.95]
   eps: 1.0e-8
-  weight_decay: 0.01
+  weight_decay: 0.05
 
 scheduler:
   name: cosine_with_warmup
@@ -72,13 +72,12 @@ loss:
   prior:
     enabled: true
     kwargs:
-      pos_weight: 10.0
-      neg_weight: 1.0
-      neg_sample_ratio: 10.0
+      pos_weight: 5.0
+      neg_weight: 0.1
+      pred_topk: 512
     weight_schedule:
-      initial: 2.0
-      final: 0.1
-      span_epochs: null
+      initial: 10.0
+      final: 1.0
   dag:
     enabled: false
     kwargs:
