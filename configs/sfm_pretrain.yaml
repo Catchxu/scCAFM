@@ -18,12 +18,12 @@ data:
   train_paths: /scratch/kxu248/data/Atlas/
   shuffle_train_paths: true
   shuffle_train_paths_seed: 42
-  batch_size: 54
-  gradient_accumulation_steps: 4
+  batch_size: 32
+  gradient_accumulation_steps: 8
   num_workers: 0
   pin_memory: false
   drop_last: false
-  max_length: 2048
+  max_length: 4096
   gene_key: feature_id
   platform_key: assay
   species_key: species
@@ -42,7 +42,7 @@ data:
     max_pct_counts_mt: 20.0
     target_sum: 10000.0
     log1p: true
-    n_top_genes: 2000
+    n_top_genes: 4095
     hvg_flavor: seurat
     subset_hvg: true
     remove_mito_genes: true
@@ -76,8 +76,8 @@ loss:
       neg_weight: 0.1
       pred_topk: 512
     weight_schedule:
-      initial: 10.0
-      final: 1.0
+      initial: 20.0
+      final: 10.0
   dag:
     enabled: false
     kwargs:

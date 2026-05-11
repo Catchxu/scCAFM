@@ -602,7 +602,13 @@ def main() -> None:
             model.load_state_dict(filtered_model_state, strict=not bool(removed_keys))
             if runtime.is_main:
                 if resume_payload is None:
-                    logger.info("Initialized model weights from %s", checkpoint_assets.sfm_model)
+                    if init_assets is not None:
+                        logger.info(
+                            "Initialized model weights from init source %s",
+                            init_assets.sfm_model,
+                        )
+                    else:
+                        logger.info("Initialized model weights from %s", checkpoint_assets.sfm_model)
                 else:
                     logger.info("Loaded resume model weights from %s", checkpoint_assets.sfm_model)
         if resume_payload is not None:
