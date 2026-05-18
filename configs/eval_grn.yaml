@@ -46,6 +46,7 @@ data:
 
 evaluator:
   checkpoint_path: null
+  aggregation: dataset
   evaluation_grn_path:
     - /scratch/kxu248/data/GRN/networks/hESC-ChIP-seq.csv
     - /scratch/kxu248/data/GRN/networks/hChIP-seq.csv
