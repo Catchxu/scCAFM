@@ -33,7 +33,7 @@ data:
     min_cells: 3
     max_pct_counts_mt: 20.0
     target_sum: 10000.0
-    log1p: true
+    log1p: false
     n_top_genes: 4095
     hvg_flavor: seurat
     subset_hvg: true
