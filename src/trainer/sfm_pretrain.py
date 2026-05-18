@@ -96,6 +96,23 @@ def _apply_qb_gating_updates(model: torch.nn.Module) -> None:
             module.apply_beta_update()
 
 
+def _normalize_checkpoint_frequency(config: dict[str, Any]) -> str:
+    frequency = str(
+        config.get("trainer", {}).get("checkpoint_frequency", "epoch")
+    ).strip().lower()
+    frequency = {
+        "file": "adata",
+        "dataset": "adata",
+        "pair": "adata",
+    }.get(frequency, frequency)
+    if frequency not in {"epoch", "adata"}:
+        raise ValueError(
+            "`trainer.checkpoint_frequency` must be either 'epoch' or 'adata', "
+            f"got {frequency!r}."
+        )
+    return frequency
+
+
 def _drop_regenerated_condition_embedding_weights(
     model_state: dict[str, torch.Tensor],
     *,
@@ -198,10 +215,10 @@ def _log_run_summary(
         total_steps,
     )
     logger.info(
-        "Trainer: epochs=%s, grad_clip_norm=%s, save_every_epochs=%s",
+        "Trainer: epochs=%s global passes over train_paths, grad_clip_norm=%s, checkpoint_frequency=%s",
         trainer_cfg["epochs"],
         trainer_cfg.get("grad_clip_norm"),
-        trainer_cfg.get("save_every_epochs", 1),
+        trainer_cfg.get("checkpoint_frequency", "epoch"),
     )
     logger.info(
         "Preprocess: enabled=%s, min_genes=%s, min_cells=%s, n_top_genes=%s, hvg_flavor=%s",
@@ -250,11 +267,23 @@ class PretrainingTrainer:
         self.config = config
         self.train_cfg = config["trainer"]
         self.runtime_cfg = config["runtime"]
-        self.train_state = train_state or {
-            "file_index": 0,
-            "epoch": 0,
-            "global_step": 0,
-        }
+        if train_state is None:
+            self.train_state = {
+                "file_index": 0,
+                "epoch": 0,
+                "global_step": 0,
+                "schedule": "epoch_then_file",
+            }
+        else:
+            self.train_state = train_state
+            if self.train_state.get("schedule") != "epoch_then_file":
+                if self.runtime.is_main:
+                    self.logger.info(
+                        "Loaded legacy pretrain resume state; restarting the new global epoch schedule."
+                    )
+                self.train_state["file_index"] = 0
+                self.train_state["epoch"] = 0
+                self.train_state["schedule"] = "epoch_then_file"
 
     def _autocast_context(self):
         precision_cfg = self.runtime_cfg.get("precision", {})
@@ -282,9 +311,8 @@ class PretrainingTrainer:
             return float(grad_norm.detach().item())
         return float(grad_norm)
 
-    def _should_save_checkpoint(self, epoch: int) -> bool:
-        save_every_epochs = int(self.train_cfg.get("save_every_epochs", 1))
-        return epoch % save_every_epochs == 0
+    def _checkpoint_frequency(self) -> str:
+        return _normalize_checkpoint_frequency(self.config)
 
     def _save_checkpoint(self) -> None:
         self.checkpoint_manager.save(
@@ -303,55 +331,70 @@ class PretrainingTrainer:
     def train(self) -> None:
         epochs = int(self.train_cfg["epochs"])
         train_paths = self.data_assets.train_paths
+        start_epoch = int(self.train_state.get("epoch", 0))
         start_file_index = int(self.train_state.get("file_index", 0))
+        checkpoint_frequency = self._checkpoint_frequency()
+        final_state_saved = False
         grad_accum_steps = int(self.config["data"].get("gradient_accumulation_steps", 1))
         if grad_accum_steps <= 0:
             raise ValueError(
                 f"`data.gradient_accumulation_steps` must be positive, got {grad_accum_steps}."
             )
+        if start_file_index >= len(train_paths):
+            start_epoch += 1
+            start_file_index = 0
+        if start_epoch >= epochs:
+            if self.runtime.is_main:
+                self.logger.info(
+                    "Pretraining already completed: epoch=%s/%s",
+                    start_epoch,
+                    epochs,
+                )
+            return
 
         self.model.train()
         self.loss_manager.train()
 
-        for file_offset, path in enumerate(train_paths[start_file_index:], start=start_file_index):
-            file_index = file_offset + 1
-            if self.runtime.is_main and file_offset > start_file_index:
-                self.logger.info("")
+        for epoch in range(start_epoch, epochs):
+            file_start_index = start_file_index if epoch == start_epoch else 0
             if self.runtime.is_main:
-                self.logger.info(
-                    "[adata %s/%s] Start processing %s",
-                    file_index,
-                    len(train_paths),
-                    path,
-                )
+                self.logger.info("")
+                self.logger.info("[epoch %s/%s] Start global pretraining pass", epoch + 1, epochs)
 
-            data_bundle: PretrainingDataBundle | None = None
-            save_after_data_release = False
-            try:
-                data_bundle = build_data_bundle_for_path(
-                    path=path,
-                    assets=self.data_assets,
-                    config=self.config,
-                    runtime=self.runtime,
-                    logger=self.logger,
-                    file_index=file_index,
-                    num_files=len(train_paths),
-                )
+            for file_offset, path in enumerate(train_paths[file_start_index:], start=file_start_index):
+                file_index = file_offset + 1
+                if self.runtime.is_main:
+                    self.logger.info(
+                        "[epoch %s/%s][adata %s/%s] Start processing %s",
+                        epoch + 1,
+                        epochs,
+                        file_index,
+                        len(train_paths),
+                        path,
+                    )
 
-                start_epoch = int(self.train_state.get("epoch", 0)) if file_offset == start_file_index else 0
-                if start_epoch >= epochs:
-                    # If a resume checkpoint was saved after completing the file's last epoch,
-                    # retrain the file instead of silently skipping it.
-                    start_epoch = 0
-                for epoch in range(start_epoch, epochs):
+                data_bundle: PretrainingDataBundle | None = None
+                save_after_data_release = False
+                try:
+                    data_bundle = build_data_bundle_for_path(
+                        path=path,
+                        assets=self.data_assets,
+                        config=self.config,
+                        runtime=self.runtime,
+                        logger=self.logger,
+                        file_index=file_index,
+                        num_files=len(train_paths),
+                    )
                     epoch_metric_sums: dict[str, float] = {}
                     epoch_steps = 0
 
                     if self.runtime.is_main:
                         self.logger.info(
-                            "[epoch %s/%s] Train on %s cells from %s",
+                            "[epoch %s/%s][adata %s/%s] Train on %s cells from %s",
                             epoch + 1,
                             epochs,
+                            file_index,
+                            len(train_paths),
                             data_bundle.train_size,
                             path,
                         )
@@ -364,7 +407,7 @@ class PretrainingTrainer:
                         progress = tqdm(
                             data_bundle.train_loader,
                             disable=not self.runtime.is_main,
-                            desc=f"adata {file_index}/{len(train_paths)} epoch {epoch + 1}/{epochs}",
+                            desc=f"epoch {epoch + 1}/{epochs} adata {file_index}/{len(train_paths)}",
                         )
                         self.optimizer.zero_grad(set_to_none=True)
                         accum_metric_sums: dict[str, float] = {}
@@ -417,35 +460,35 @@ class PretrainingTrainer:
                             # microbatch's outputs into the next microbatch peak.
                             del loss_result, model_output, tokens
 
-                        self.train_state["file_index"] = file_offset
-                        self.train_state["epoch"] = epoch + 1
                         epoch_metrics = {
                             key: value / max(epoch_steps, 1)
                             for key, value in epoch_metric_sums.items()
                         }
                         epoch_metrics = reduce_scalar_dict(epoch_metrics, self.runtime)
-                        self.logger.log_metrics("train_epoch", self.train_state["global_step"], epoch_metrics)
-
-                        if self._should_save_checkpoint(epoch + 1):
-                            if epoch + 1 == epochs:
-                                save_after_data_release = True
-                            else:
-                                self._save_checkpoint()
+                        self.logger.log_metrics("train_adata", self.train_state["global_step"], epoch_metrics)
                     finally:
                         if progress is not None:
                             progress.close()
                             del progress
 
-                self.train_state["file_index"] = file_offset + 1
-                self.train_state["epoch"] = 0
-            finally:
-                _release_data_bundle(data_bundle, self.runtime)
-                data_bundle = None
+                    self.train_state["epoch"] = epoch
+                    self.train_state["file_index"] = file_offset + 1
+                    save_after_data_release = checkpoint_frequency == "adata"
+                finally:
+                    _release_data_bundle(data_bundle, self.runtime)
+                    data_bundle = None
 
-            if save_after_data_release:
+                if save_after_data_release:
+                    self._save_checkpoint()
+
+            self.train_state["epoch"] = epoch + 1
+            self.train_state["file_index"] = 0
+            if checkpoint_frequency == "epoch":
                 self._save_checkpoint()
+                final_state_saved = epoch + 1 == epochs
 
-        self._save_checkpoint()
+        if not final_state_saved:
+            self._save_checkpoint()
 
 
 def main() -> None:
@@ -465,6 +508,7 @@ def main() -> None:
             source_assets,
             require_model_weights=False,
         )
+        _normalize_checkpoint_frequency(config)
 
         paths = prepare_experiment_paths(
             runtime=runtime,

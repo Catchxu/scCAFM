@@ -20,7 +20,7 @@ data:
   num_workers: 0
   pin_memory: true
   drop_last: false
-  max_length: 4096
+  max_length: 1024
   gene_key: null
   platform_key: null
   species_key: species
@@ -34,7 +34,7 @@ data:
     max_pct_counts_mt: 20.0
     target_sum: 10000.0
     log1p: false
-    n_top_genes: 4095
+    n_top_genes: 1023
     hvg_flavor: seurat
     subset_hvg: true
     remove_mito_genes: true
@@ -47,6 +47,7 @@ data:
 evaluator:
   checkpoint_path: null
   aggregation: dataset
+  candidate_source_universe: supported_tfs
   evaluation_grn_path:
     - /scratch/kxu248/data/GRN/networks/hESC-ChIP-seq.csv
     - /scratch/kxu248/data/GRN/networks/hChIP-seq.csv

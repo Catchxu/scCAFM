@@ -20,42 +20,112 @@ def _validate_binary_inputs(
 
     scores = scores.detach().to(dtype=torch.float64, device="cpu")
     labels = labels.detach().to(dtype=torch.float64, device="cpu")
+    if not torch.isfinite(scores).all():
+        raise ValueError("`scores` must contain only finite values.")
+    if not torch.isfinite(labels).all():
+        raise ValueError("`labels` must contain only finite values.")
+    if not torch.all((labels == 0.0) | (labels == 1.0)):
+        raise ValueError("`labels` must be binary values in {0, 1}.")
     return scores, labels
 
 
+def _sort_by_score_desc(scores: torch.Tensor, labels: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    order = torch.argsort(scores, descending=True, stable=True)
+    return scores[order], labels[order]
+
+
 def binary_auprc(scores: torch.Tensor, labels: torch.Tensor) -> float:
+    """Average-precision style AUPRC, computed over score thresholds.
+
+    Tied scores are evaluated as one threshold group, so the result does not
+    depend on arbitrary ordering within tied predictions.
+    """
     scores, labels = _validate_binary_inputs(scores, labels)
     pos_total = int(labels.sum().item())
     if pos_total <= 0:
         return float("nan")
 
-    order = torch.argsort(scores, descending=True)
-    labels_sorted = labels[order]
-    tp = torch.cumsum(labels_sorted, dim=0)
-    precision = tp / torch.arange(1, labels_sorted.numel() + 1, dtype=torch.float64)
-    recall = tp / float(pos_total)
+    scores_sorted, labels_sorted = _sort_by_score_desc(scores, labels)
+    _, counts = torch.unique_consecutive(scores_sorted, return_counts=True)
+    group_pos = torch.tensor(
+        [float(chunk.sum().item()) for chunk in labels_sorted.split(counts.tolist())],
+        dtype=torch.float64,
+    )
+    group_count = counts.to(dtype=torch.float64)
 
-    recall_prev = torch.cat([torch.zeros(1, dtype=torch.float64), recall[:-1]], dim=0)
-    ap = torch.sum((recall - recall_prev) * precision)
+    cum_tp = torch.cumsum(group_pos, dim=0)
+    cum_count = torch.cumsum(group_count, dim=0)
+    precision = cum_tp / cum_count
+    delta_recall = group_pos / float(pos_total)
+    ap = torch.sum(delta_recall * precision)
     return float(ap.item())
 
 
 def binary_auroc(scores: torch.Tensor, labels: torch.Tensor) -> float:
+    """Tie-aware AUROC using average ranks for equal scores."""
     scores, labels = _validate_binary_inputs(scores, labels)
     pos_total = int(labels.sum().item())
     neg_total = int(labels.numel() - pos_total)
     if pos_total <= 0 or neg_total <= 0:
         return float("nan")
 
-    order = torch.argsort(scores, descending=True)
+    order = torch.argsort(scores, descending=False, stable=True)
+    scores_sorted = scores[order]
     labels_sorted = labels[order]
-    tp = torch.cumsum(labels_sorted, dim=0)
-    fp = torch.cumsum(1.0 - labels_sorted, dim=0)
+    _, counts = torch.unique_consecutive(scores_sorted, return_counts=True)
+    count_values = counts.to(dtype=torch.float64)
+    group_ends = torch.cumsum(count_values, dim=0)
+    group_starts = group_ends - count_values + 1.0
+    average_ranks = (group_starts + group_ends) / 2.0
+    ranks_sorted = torch.repeat_interleave(average_ranks, counts)
 
-    tpr = torch.cat([torch.zeros(1, dtype=torch.float64), tp / float(pos_total)], dim=0)
-    fpr = torch.cat([torch.zeros(1, dtype=torch.float64), fp / float(neg_total)], dim=0)
-    auc = torch.trapz(tpr, fpr)
+    positive_rank_sum = torch.sum(ranks_sorted * labels_sorted)
+    auc = (positive_rank_sum - (pos_total * (pos_total + 1) / 2.0)) / (
+        float(pos_total) * float(neg_total)
+    )
     return float(auc.item())
+
+
+def early_precision(
+    scores: torch.Tensor,
+    labels: torch.Tensor,
+    topk: int | None = None,
+) -> float:
+    """Tie-aware precision at k.
+
+    If the cutoff falls inside a score tie, the tied boundary contributes its
+    expected positive fraction rather than an arbitrary subset.
+    """
+    scores, labels = _validate_binary_inputs(scores, labels)
+    pos_total = int(labels.sum().item())
+    total = int(labels.numel())
+    if pos_total <= 0 or total <= 0:
+        return float("nan")
+
+    k = pos_total if topk is None else int(topk)
+    k = max(min(k, total), 1)
+
+    scores_sorted, labels_sorted = _sort_by_score_desc(scores, labels)
+    _, counts = torch.unique_consecutive(scores_sorted, return_counts=True)
+    group_pos = torch.tensor(
+        [float(chunk.sum().item()) for chunk in labels_sorted.split(counts.tolist())],
+        dtype=torch.float64,
+    )
+    group_count = counts.to(dtype=torch.float64)
+    group_ends = torch.cumsum(group_count, dim=0)
+    group_starts = group_ends - group_count
+    k_float = float(k)
+
+    fully_selected = group_ends <= k_float
+    selected_pos = torch.sum(group_pos[fully_selected])
+
+    boundary = torch.nonzero((group_starts < k_float) & (group_ends > k_float), as_tuple=False)
+    if boundary.numel() > 0:
+        idx = int(boundary[0].item())
+        remaining = k_float - float(group_starts[idx].item())
+        selected_pos = selected_pos + group_pos[idx] * (remaining / group_count[idx])
+
+    return float((selected_pos / k_float).item())
 
 
 def early_precision_ratio(
@@ -69,15 +139,9 @@ def early_precision_ratio(
     if pos_total <= 0 or total <= 0:
         return float("nan")
 
-    k = pos_total if topk is None else int(topk)
-    k = max(min(k, total), 1)
-
-    order = torch.argsort(scores, descending=True)[:k]
-    precision_at_k = float(labels[order].sum().item()) / float(k)
+    ep = early_precision(scores, labels, topk=topk)
     random_precision = float(pos_total) / float(total)
-    if random_precision <= 0.0:
-        return float("nan")
-    return precision_at_k / random_precision
+    return float("nan") if random_precision <= 0.0 else ep / random_precision
 
 
 def summarize_binary_metrics(
@@ -96,6 +160,7 @@ def summarize_binary_metrics(
 
     auprc = binary_auprc(scores, labels)
     auroc = binary_auroc(scores, labels)
+    ep = early_precision(scores, labels, topk=topk)
     ep_ratio = early_precision_ratio(scores, labels, topk=topk)
 
     if math.isnan(auprc) or math.isnan(random_auprc) or random_auprc <= 0.0:
@@ -104,7 +169,9 @@ def summarize_binary_metrics(
         auprc_ratio = auprc / random_auprc
 
     return {
+        "auprc": auprc,
         "auprc_ratio": auprc_ratio,
         "auroc": auroc,
+        "ep": ep,
         "ep_ratio": ep_ratio,
     }

@@ -46,7 +46,14 @@ from ..utils import build_active_gene_mask, build_tf_mask, build_token_lookup_ma
 class EvaluationGRNCache:
     pair_keys: torch.LongTensor
     supported_token_ids: torch.LongTensor
+    source_token_ids: torch.LongTensor
+    target_token_ids: torch.LongTensor
     pair_key_base: int
+    raw_edge_count: int = 0
+    mapped_edge_count: int = 0
+    unmapped_edge_count: int = 0
+    self_loop_edge_count: int = 0
+    duplicate_edge_count: int = 0
 
 
 @dataclass
@@ -132,6 +139,11 @@ def build_evaluation_grn_cache(
 
     pair_keys: list[int] = []
     supported_token_ids: set[int] = set()
+    source_token_ids: set[int] = set()
+    target_token_ids: set[int] = set()
+    raw_edge_count = int(len(evaluation_grn_df))
+    unmapped_edge_count = 0
+    self_loop_edge_count = 0
     for src_name, tgt_name in zip(
         evaluation_grn_df["Gene1"].tolist(),
         evaluation_grn_df["Gene2"].tolist(),
@@ -139,12 +151,19 @@ def build_evaluation_grn_cache(
         src_id = _map_gene_to_token(src_name, symbol_to_index, ensembl_to_index)
         tgt_id = _map_gene_to_token(tgt_name, symbol_to_index, ensembl_to_index)
         if src_id is None or tgt_id is None:
+            unmapped_edge_count += 1
             continue
         if src_id == pad_index or tgt_id == pad_index:
+            unmapped_edge_count += 1
+            continue
+        if src_id == tgt_id:
+            self_loop_edge_count += 1
             continue
         pair_keys.append(src_id * pair_key_base + tgt_id)
         supported_token_ids.add(src_id)
         supported_token_ids.add(tgt_id)
+        source_token_ids.add(src_id)
+        target_token_ids.add(tgt_id)
 
     pair_key_tensor = (
         torch.unique(torch.tensor(pair_keys, dtype=torch.long))
@@ -156,17 +175,35 @@ def build_evaluation_grn_cache(
         if supported_token_ids
         else torch.empty(0, dtype=torch.long)
     )
+    source_token_tensor = (
+        torch.unique(torch.tensor(sorted(source_token_ids), dtype=torch.long))
+        if source_token_ids
+        else torch.empty(0, dtype=torch.long)
+    )
+    target_token_tensor = (
+        torch.unique(torch.tensor(sorted(target_token_ids), dtype=torch.long))
+        if target_token_ids
+        else torch.empty(0, dtype=torch.long)
+    )
 
     return EvaluationGRNCache(
         pair_keys=pair_key_tensor,
         supported_token_ids=supported_token_tensor,
+        source_token_ids=source_token_tensor,
+        target_token_ids=target_token_tensor,
         pair_key_base=pair_key_base,
+        raw_edge_count=raw_edge_count,
+        mapped_edge_count=len(pair_keys),
+        unmapped_edge_count=unmapped_edge_count,
+        self_loop_edge_count=self_loop_edge_count,
+        duplicate_edge_count=max(len(pair_keys) - int(pair_key_tensor.numel()), 0),
     )
 
 
 def build_reference_grn(
     tokens: dict[str, torch.Tensor | None],
     cache: EvaluationGRNCache,
+    candidate_source_universe: str = "supported_tfs",
 ) -> tuple[torch.BoolTensor, torch.BoolTensor]:
     input_ids = require_tensor(tokens, "input_ids").to(torch.long)
     padding_mask = tokens.get("padding_mask")
@@ -195,6 +232,10 @@ def build_reference_grn(
 
     supported_token_ids = cache.supported_token_ids.to(device=input_ids.device)
     supported_gene_mask = torch.isin(input_ids, supported_token_ids) & active_gene_mask
+    candidate_source_universe = _normalize_candidate_source_universe(candidate_source_universe)
+    if candidate_source_universe == "supported_tfs":
+        source_token_ids = cache.source_token_ids.to(device=input_ids.device)
+        source_mask = source_mask & torch.isin(input_ids, source_token_ids)
 
     candidate_mask = source_mask.unsqueeze(2) & supported_gene_mask.unsqueeze(1)
     diagonal_mask = torch.eye(
@@ -220,6 +261,7 @@ def build_reference_grn(
 def build_candidate_pair_keys(
     tokens: dict[str, torch.Tensor | None],
     cache: EvaluationGRNCache,
+    candidate_source_universe: str = "supported_tfs",
 ) -> tuple[torch.LongTensor, torch.BoolTensor]:
     input_ids = require_tensor(tokens, "input_ids").to(torch.long)
     padding_mask = tokens.get("padding_mask")
@@ -249,6 +291,10 @@ def build_candidate_pair_keys(
 
     supported_token_ids = cache.supported_token_ids.to(device=input_ids.device)
     supported_gene_mask = torch.isin(input_ids, supported_token_ids) & active_gene_mask
+    candidate_source_universe = _normalize_candidate_source_universe(candidate_source_universe)
+    if candidate_source_universe == "supported_tfs":
+        source_token_ids = cache.source_token_ids.to(device=input_ids.device)
+        source_mask = source_mask & torch.isin(input_ids, source_token_ids)
     candidate_mask = source_mask.unsqueeze(2) & supported_gene_mask.unsqueeze(1)
     diagonal_mask = torch.eye(
         input_ids.shape[1],
@@ -269,6 +315,7 @@ def evaluate_cell_specific_grns(
     tokens: dict[str, torch.Tensor | None],
     token_dict: pd.DataFrame,
     evaluation_grn_df: pd.DataFrame,
+    candidate_source_universe: str = "supported_tfs",
 ) -> pd.DataFrame:
     if pred_grn.ndim != 3:
         raise ValueError(f"`pred_grn` must have shape (C, G, G), got {tuple(pred_grn.shape)}.")
@@ -287,6 +334,7 @@ def evaluate_cell_specific_grns(
         pred_grn=pred_grn,
         tokens=tokens,
         cache=cache,
+        candidate_source_universe=candidate_source_universe,
     )
 
 
@@ -294,6 +342,7 @@ def evaluate_cell_specific_grns_with_cache(
     pred_grn: torch.Tensor,
     tokens: dict[str, torch.Tensor | None],
     cache: EvaluationGRNCache,
+    candidate_source_universe: str = "supported_tfs",
 ) -> pd.DataFrame:
     if pred_grn.ndim != 3:
         raise ValueError(f"`pred_grn` must have shape (C, G, G), got {tuple(pred_grn.shape)}.")
@@ -304,7 +353,11 @@ def evaluate_cell_specific_grns_with_cache(
             f"`pred_grn` shape {tuple(pred_grn.shape)} is incompatible with input_ids {tuple(input_ids.shape)}."
         )
 
-    target, candidate_mask = build_reference_grn(tokens=tokens, cache=cache)
+    target, candidate_mask = build_reference_grn(
+        tokens=tokens,
+        cache=cache,
+        candidate_source_universe=candidate_source_universe,
+    )
 
     pred_cpu = pred_grn.detach().to(dtype=torch.float32, device="cpu")
     target_cpu = target.detach().to(dtype=torch.bool, device="cpu")
@@ -318,8 +371,10 @@ def evaluate_cell_specific_grns_with_cache(
 
         if scores.numel() == 0:
             metrics = {
+                "auprc": float("nan"),
                 "auprc_ratio": float("nan"),
                 "auroc": float("nan"),
+                "ep": float("nan"),
                 "ep_ratio": float("nan"),
             }
         else:
@@ -461,7 +516,7 @@ def _extract_predicted_grn(
 
 def _summarize_metrics(metrics_df: pd.DataFrame) -> pd.DataFrame:
     summary = {}
-    for column in ["auprc_ratio", "auroc", "ep_ratio"]:
+    for column in ["auprc", "auprc_ratio", "auroc", "ep", "ep_ratio"]:
         summary[column] = float(metrics_df[column].mean()) if column in metrics_df.columns else float("nan")
     return pd.DataFrame([summary])
 
@@ -497,6 +552,27 @@ def _resolve_aggregation_modes(raw_mode: object) -> list[str]:
         "`evaluator.aggregation` must be one of 'cell', 'dataset', or 'both', "
         f"got {raw_mode!r}."
     )
+
+
+def _normalize_candidate_source_universe(raw_value: object) -> str:
+    value = str(raw_value or "supported_tfs").strip().lower()
+    aliases = {
+        "all": "all_tfs",
+        "all_tf": "all_tfs",
+        "tf": "all_tfs",
+        "tfs": "all_tfs",
+        "supported": "supported_tfs",
+        "supported_tf": "supported_tfs",
+        "grn_tfs": "supported_tfs",
+        "eval_tfs": "supported_tfs",
+    }
+    value = aliases.get(value, value)
+    if value not in {"all_tfs", "supported_tfs"}:
+        raise ValueError(
+            "`evaluator.candidate_source_universe` must be either 'all_tfs' or "
+            f"'supported_tfs', got {raw_value!r}."
+        )
+    return value
 
 
 def _init_cell_metric_accumulators(
@@ -638,7 +714,7 @@ def _build_cell_summary_rows(
     cell_counts: dict[str, int],
     runtime: RuntimeContext,
 ) -> list[dict[str, object]]:
-    metric_names = ["auprc_ratio", "auroc", "ep_ratio"]
+    metric_names = ["auprc", "auprc_ratio", "auroc", "ep", "ep_ratio"]
     totals_values: list[float] = []
     for spec in eval_specs:
         spec_key = str(spec.path)
@@ -661,6 +737,10 @@ def _build_cell_summary_rows(
             "evaluation_grn_name": spec.name,
             "evaluation_grn_path": str(spec.path),
             "num_eval_edges": int(spec.cache.pair_keys.numel()),
+            "num_raw_eval_edges": int(spec.cache.raw_edge_count),
+            "num_unmapped_eval_edges": int(spec.cache.unmapped_edge_count),
+            "num_self_loop_eval_edges": int(spec.cache.self_loop_edge_count),
+            "num_duplicate_eval_edges": int(spec.cache.duplicate_edge_count),
             "num_cells": int(round(float(totals[offset + values_per_spec - 1].item()))),
             "num_candidate_edges": float("nan"),
         }
@@ -677,6 +757,7 @@ def _build_dense_dataset_summary_rows(
     eval_specs: list[EvaluationGRNSpec],
     finalized_datasets: list[FinalizedDatasetGRN],
     runtime: RuntimeContext,
+    candidate_source_universe: str,
 ) -> list[dict[str, object]]:
     if not runtime.is_main:
         return []
@@ -691,6 +772,7 @@ def _build_dense_dataset_summary_rows(
             pair_keys, candidate_mask = build_candidate_pair_keys(
                 tokens=dataset_grn.token_template,
                 cache=spec.cache,
+                candidate_source_universe=candidate_source_universe,
             )
             if not candidate_mask.any():
                 total_cells += dataset_grn.cell_count
@@ -735,8 +817,10 @@ def _build_dense_dataset_summary_rows(
             metrics = summarize_binary_metrics(scores=score_tensor, labels=label_tensor)
         else:
             metrics = {
+                "auprc": float("nan"),
                 "auprc_ratio": float("nan"),
                 "auroc": float("nan"),
+                "ep": float("nan"),
                 "ep_ratio": float("nan"),
             }
 
@@ -746,6 +830,10 @@ def _build_dense_dataset_summary_rows(
                 "evaluation_grn_name": spec.name,
                 "evaluation_grn_path": str(spec.path),
                 "num_eval_edges": int(spec.cache.pair_keys.numel()),
+                "num_raw_eval_edges": int(spec.cache.raw_edge_count),
+                "num_unmapped_eval_edges": int(spec.cache.unmapped_edge_count),
+                "num_self_loop_eval_edges": int(spec.cache.self_loop_edge_count),
+                "num_duplicate_eval_edges": int(spec.cache.duplicate_edge_count),
                 "num_cells": int(total_cells),
                 "num_candidate_edges": int(len(pair_key_values)),
                 **metrics,
@@ -775,6 +863,7 @@ def _log_run_summary(
     eval_specs: list[EvaluationGRNSpec],
     checkpoint_path: Path,
     aggregation_modes: list[str],
+    candidate_source_universe: str,
 ) -> None:
     logger.info("========== Evaluation Summary ==========")
     logger.info(
@@ -786,12 +875,20 @@ def _log_run_summary(
     logger.info("Data: num_adata=%s", num_paths)
     logger.info("Checkpoint: %s", checkpoint_path)
     logger.info("Aggregation: %s", ",".join(aggregation_modes))
+    logger.info("Candidate source universe: %s", candidate_source_universe)
     logger.info("Evaluation GRNs: %s", len(eval_specs))
     for spec in eval_specs:
         logger.info(
-            "Evaluation GRN: name=%s, edges=%s, path=%s",
+            (
+                "Evaluation GRN: name=%s, evaluable_edges=%s, raw_edges=%s, "
+                "unmapped_edges=%s, self_loop_edges=%s, duplicate_edges=%s, path=%s"
+            ),
             spec.name,
             int(spec.cache.pair_keys.numel()),
+            int(spec.cache.raw_edge_count),
+            int(spec.cache.unmapped_edge_count),
+            int(spec.cache.self_loop_edge_count),
+            int(spec.cache.duplicate_edge_count),
             spec.path,
         )
     logger.info("Output root: %s", Path.cwd().resolve())
@@ -816,6 +913,9 @@ def run_evaluation(
     )
     foundation_name = str(evaluator_cfg.get("foundation_name", "sfm"))
     aggregation_modes = _resolve_aggregation_modes(evaluator_cfg.get("aggregation", "dataset"))
+    candidate_source_universe = _normalize_candidate_source_universe(
+        evaluator_cfg.get("candidate_source_universe", "supported_tfs")
+    )
     model_state = load_model_state_dict(checkpoint_path)
 
     paths = prepare_evaluation_paths(runtime=runtime)
@@ -866,9 +966,10 @@ def run_evaluation(
             eval_specs=eval_specs,
             checkpoint_path=checkpoint_path,
             aggregation_modes=aggregation_modes,
+            candidate_source_universe=candidate_source_universe,
         )
 
-    metric_names = ["auprc_ratio", "auroc", "ep_ratio"]
+    metric_names = ["auprc", "auprc_ratio", "auroc", "ep", "ep_ratio"]
     use_cell_metrics = "cell" in aggregation_modes
     use_dataset_metrics = "dataset" in aggregation_modes
     if use_cell_metrics:
@@ -920,6 +1021,7 @@ def run_evaluation(
                                 pred_grn=pred_grn,
                                 tokens=tokens,
                                 cache=spec.cache,
+                                candidate_source_universe=candidate_source_universe,
                             )
                             for name in metric_names:
                                 series = batch_metrics[name].dropna()
@@ -958,6 +1060,7 @@ def run_evaluation(
                 eval_specs=eval_specs,
                 finalized_datasets=finalized_dataset_grns,
                 runtime=runtime,
+                candidate_source_universe=candidate_source_universe,
             )
         )
 
