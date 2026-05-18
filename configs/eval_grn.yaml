@@ -50,5 +50,4 @@ evaluator:
   evaluation_grn_path:
     - /scratch/kxu248/data/GRN/networks/hESC-ChIP-seq.csv
     - /scratch/kxu248/data/GRN/networks/hChIP-seq.csv
-    - /scratch/kxu248/data/GRN/networks/hSTRING.csv
   foundation_name: sfm

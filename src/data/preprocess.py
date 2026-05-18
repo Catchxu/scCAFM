@@ -232,9 +232,31 @@ class ScPreprocessor:
         sc.pp.normalize_total(adata, target_sum=self.target_sum)
         if self.log1p:
             sc.pp.log1p(adata)
+        self._sanitize_expression_matrix(adata)
+
+    def _copy_hvg_annotations(self, source, target) -> None:
+        for column in source.var.columns:
+            if column in {"highly_variable", "means", "dispersions", "dispersions_norm"}:
+                target.var[column] = source.var[column].reindex(target.var_names).to_numpy()
 
     def _select_hvg(self, adata) -> None:
         if self.n_top_genes is None:
+            return
+
+        if self.hvg_flavor == "seurat" and not self.log1p:
+            hvg_adata = adata.copy()
+            sc.pp.log1p(hvg_adata)
+            self._sanitize_expression_matrix(hvg_adata)
+            sc.pp.highly_variable_genes(
+                hvg_adata,
+                n_top_genes=self.n_top_genes,
+                flavor=self.hvg_flavor,
+                subset=False,
+                inplace=True,
+            )
+            self._copy_hvg_annotations(hvg_adata, adata)
+            if self.subset_hvg and "highly_variable" in adata.var.columns:
+                adata._inplace_subset_var(adata.var["highly_variable"].to_numpy(dtype=bool))
             return
 
         sc.pp.highly_variable_genes(
@@ -244,6 +266,7 @@ class ScPreprocessor:
             subset=self.subset_hvg,
             inplace=True,
         )
+        self._sanitize_expression_matrix(adata)
 
     def __call__(self, adata):
         if not self.inplace:
