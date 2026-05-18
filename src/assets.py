@@ -333,7 +333,8 @@ def apply_model_assets_to_runtime_config(
 
     evaluator_cfg = resolved.get("evaluator")
     if isinstance(evaluator_cfg, dict):
-        evaluator_cfg["checkpoint_path"] = str(assets.sfm_model)
+        if evaluator_cfg.get("checkpoint_path") is None:
+            evaluator_cfg["checkpoint_path"] = str(assets.sfm_model)
 
     if require_model_weights and not assets.sfm_model.exists():
         raise FileNotFoundError(f"Model weights not found: {assets.sfm_model}")

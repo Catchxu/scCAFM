@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=eval-grn
 #SBATCH --account=general
-#SBATCH --partition=h200-8-gm1128-c192-m2048
+#SBATCH --partition=rp6b-8-gm768-c192-m2048
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --gpus=1
-#SBATCH --mem=64G
-#SBATCH --time=48:00:00
+#SBATCH --gpus=4
+#SBATCH --mem=256G
+#SBATCH --time=120:00:00
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=kxu248@emory.edu
 
@@ -47,7 +47,11 @@ if [[ -z "${NPROC_PER_NODE:-}" ]]; then
       NPROC_PER_NODE="${#_GPU_LIST[@]}"
     fi
   elif command -v nvidia-smi >/dev/null 2>&1; then
-    NPROC_PER_NODE="$(nvidia-smi -L | wc -l | tr -d '[:space:]')"
+    if GPU_COUNT="$(nvidia-smi -L 2>/dev/null | wc -l | tr -d '[:space:]')" && [[ -n "${GPU_COUNT}" && "${GPU_COUNT}" -gt 0 ]]; then
+      NPROC_PER_NODE="${GPU_COUNT}"
+    else
+      NPROC_PER_NODE=1
+    fi
   else
     NPROC_PER_NODE=1
   fi

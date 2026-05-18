@@ -2,25 +2,25 @@ model_source: assets
 
 runtime:
   # Keep evaluation on the same safer attention backend used by pretraining.
-  attention_backend: fa4
+  attention_backend: fa2
   precision:
     model_dtype: fp32
     autocast_dtype: bf16
   fsdp:
-    enabled: true
+    enabled: false
     sharding_strategy: FULL_SHARD
     use_orig_params: true
     limit_all_gathers: true
 
 data:
-  train_paths: /data1021/xukaichen/data/GRN/datasets/hESC.h5ad
+  train_paths: /scratch/kxu248/data/GRN/datasets/hESC.h5ad
   shuffle_train_paths: false
   shuffle_train_paths_seed: 0
-  batch_size: 32
+  batch_size: 64
   num_workers: 0
   pin_memory: true
   drop_last: false
-  max_length: 2048
+  max_length: 4096
   gene_key: null
   platform_key: null
   species_key: species
@@ -34,7 +34,7 @@ data:
     max_pct_counts_mt: 20.0
     target_sum: 10000.0
     log1p: true
-    n_top_genes: 2000
+    n_top_genes: 4095
     hvg_flavor: seurat
     subset_hvg: true
     remove_mito_genes: true
@@ -45,5 +45,9 @@ data:
     inplace: false
 
 evaluator:
-  evaluation_grn_path: /data1021/xukaichen/data/GRN/networks/hChIP-seq.csv
+  checkpoint_path: null
+  evaluation_grn_path:
+    - /scratch/kxu248/data/GRN/networks/hESC-ChIP-seq.csv
+    - /scratch/kxu248/data/GRN/networks/hChIP-seq.csv
+    - /scratch/kxu248/data/GRN/networks/hSTRING.csv
   foundation_name: sfm

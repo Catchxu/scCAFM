@@ -14,6 +14,8 @@ import torch
 import torch.distributed as dist
 
 from ..assets import (
+    ModelAssets,
+    SFM_MODEL_NAME,
     apply_model_assets_to_runtime_config,
     load_model_state_dict,
     load_sfm_config,
@@ -47,6 +49,14 @@ class EvaluationGRNCache:
     pair_key_base: int
 
 
+@dataclass
+class EvaluationGRNSpec:
+    name: str
+    path: Path
+    dataframe: pd.DataFrame
+    cache: EvaluationGRNCache
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate predicted cell-specific GRNs.")
     parser.add_argument(
@@ -54,6 +64,16 @@ def parse_args() -> argparse.Namespace:
         "--eval-config",
         dest="eval_grn_config",
         default="configs/eval_grn.yaml",
+    )
+    parser.add_argument(
+        "--checkpoint-path",
+        "--checkpoint_path",
+        dest="checkpoint_path",
+        default=None,
+        help=(
+            "Optional model checkpoint directory or weight file. Directories are "
+            f"resolved as <dir>/{SFM_MODEL_NAME}."
+        ),
     )
     return parser.parse_args()
 
@@ -202,6 +222,27 @@ def evaluate_cell_specific_grns(
         token_dict=token_dict,
         evaluation_grn_df=evaluation_grn_df,
     )
+    return evaluate_cell_specific_grns_with_cache(
+        pred_grn=pred_grn,
+        tokens=tokens,
+        cache=cache,
+    )
+
+
+def evaluate_cell_specific_grns_with_cache(
+    pred_grn: torch.Tensor,
+    tokens: dict[str, torch.Tensor | None],
+    cache: EvaluationGRNCache,
+) -> pd.DataFrame:
+    if pred_grn.ndim != 3:
+        raise ValueError(f"`pred_grn` must have shape (C, G, G), got {tuple(pred_grn.shape)}.")
+
+    input_ids = require_tensor(tokens, "input_ids")
+    if pred_grn.shape[:2] != input_ids.shape or pred_grn.shape[2] != input_ids.shape[1]:
+        raise ValueError(
+            f"`pred_grn` shape {tuple(pred_grn.shape)} is incompatible with input_ids {tuple(input_ids.shape)}."
+        )
+
     target, candidate_mask = build_reference_grn(tokens=tokens, cache=cache)
 
     pred_cpu = pred_grn.detach().to(dtype=torch.float32, device="cpu")
@@ -279,6 +320,69 @@ def _load_evaluation_grn(path: str | Path) -> pd.DataFrame:
     return df
 
 
+def _normalize_evaluation_grn_paths(raw_paths: object) -> list[Path]:
+    if raw_paths is None:
+        raise ValueError("`evaluator.evaluation_grn_path` is required.")
+    if isinstance(raw_paths, (str, Path)):
+        paths = [raw_paths]
+    elif isinstance(raw_paths, list):
+        paths = raw_paths
+    else:
+        raise TypeError(
+            "`evaluator.evaluation_grn_path` must be a path string or a list of path strings."
+        )
+
+    resolved_paths: list[Path] = []
+    for index, raw_path in enumerate(paths):
+        if not isinstance(raw_path, (str, Path)):
+            raise TypeError(
+                f"`evaluator.evaluation_grn_path[{index}]` must be a path string."
+            )
+        resolved_paths.append(Path(raw_path).expanduser().resolve())
+    if not resolved_paths:
+        raise ValueError("`evaluator.evaluation_grn_path` must contain at least one path.")
+    return resolved_paths
+
+
+def _load_evaluation_grn_specs(
+    raw_paths: object,
+    token_dict: pd.DataFrame,
+) -> list[EvaluationGRNSpec]:
+    specs: list[EvaluationGRNSpec] = []
+    for path in _normalize_evaluation_grn_paths(raw_paths):
+        dataframe = _load_evaluation_grn(path)
+        cache = build_evaluation_grn_cache(
+            token_dict=token_dict,
+            evaluation_grn_df=dataframe,
+        )
+        specs.append(
+            EvaluationGRNSpec(
+                name=path.stem,
+                path=path,
+                dataframe=dataframe,
+                cache=cache,
+            )
+        )
+    return specs
+
+
+def _resolve_checkpoint_path(
+    checkpoint_path: object,
+    default_model_path: Path,
+) -> Path:
+    if checkpoint_path is None or str(checkpoint_path).strip() == "":
+        resolved = default_model_path.expanduser().resolve()
+    else:
+        candidate = Path(str(checkpoint_path)).expanduser().resolve()
+        resolved = candidate / SFM_MODEL_NAME if candidate.is_dir() else candidate
+
+    if not resolved.exists():
+        raise FileNotFoundError(f"Model checkpoint not found: {resolved}")
+    if not resolved.is_file():
+        raise FileNotFoundError(f"Model checkpoint path must be a file: {resolved}")
+    return resolved
+
+
 def _extract_predicted_grn(
     model_output: ModelWrapperOutput,
     foundation_name: str,
@@ -323,22 +427,22 @@ def _release_data_bundle(data_bundle: PretrainingDataBundle | None, runtime: Run
 
 
 def _save_summary_metrics(
-    metric_sums: dict[str, float],
-    metric_counts: dict[str, int],
+    eval_specs: list[EvaluationGRNSpec],
+    metric_sums: dict[str, dict[str, float]],
+    metric_counts: dict[str, dict[str, int]],
+    cell_counts: dict[str, int],
     paths: ExperimentPaths,
     runtime: RuntimeContext,
     logger: ExperimentLogger,
 ) -> None:
     metric_names = ["auprc_ratio", "auroc", "ep_ratio"]
-    totals = torch.tensor(
-        [
-            metric_sums.get(name, 0.0) for name in metric_names
-        ] + [
-            float(metric_counts.get(name, 0)) for name in metric_names
-        ],
-        dtype=torch.float64,
-        device=runtime.device,
-    )
+    totals_values: list[float] = []
+    for spec in eval_specs:
+        spec_key = str(spec.path)
+        totals_values.extend(metric_sums[spec_key].get(name, 0.0) for name in metric_names)
+        totals_values.extend(float(metric_counts[spec_key].get(name, 0)) for name in metric_names)
+        totals_values.append(float(cell_counts.get(spec_key, 0)))
+    totals = torch.tensor(totals_values, dtype=torch.float64, device=runtime.device)
     if dist.is_available() and dist.is_initialized():
         dist.all_reduce(totals, op=dist.ReduceOp.SUM)
 
@@ -346,13 +450,24 @@ def _save_summary_metrics(
         return
 
     results_dir = paths.root / "results"
-    summary = {}
-    for idx, name in enumerate(metric_names):
-        total = float(totals[idx].item())
-        count = int(round(float(totals[idx + len(metric_names)].item())))
-        summary[name] = float("nan") if count <= 0 else total / count
+    rows: list[dict[str, object]] = []
+    offset = 0
+    values_per_spec = len(metric_names) * 2 + 1
+    for spec in eval_specs:
+        summary: dict[str, object] = {
+            "evaluation_grn_name": spec.name,
+            "evaluation_grn_path": str(spec.path),
+            "num_eval_edges": int(spec.cache.pair_keys.numel()),
+            "num_cells": int(round(float(totals[offset + values_per_spec - 1].item()))),
+        }
+        for idx, name in enumerate(metric_names):
+            total = float(totals[offset + idx].item())
+            count = int(round(float(totals[offset + idx + len(metric_names)].item())))
+            summary[name] = float("nan") if count <= 0 else total / count
+        rows.append(summary)
+        offset += values_per_spec
 
-    pd.DataFrame([summary]).to_csv(results_dir / "summary_metrics.csv", index=False)
+    pd.DataFrame(rows).to_csv(results_dir / "summary_metrics.csv", index=False)
     logger.info("Saved evaluation summary to %s", results_dir / "summary_metrics.csv")
 
 
@@ -360,7 +475,8 @@ def _log_run_summary(
     logger: ExperimentLogger,
     runtime: RuntimeContext,
     num_paths: int,
-    num_eval_edges: int,
+    eval_specs: list[EvaluationGRNSpec],
+    checkpoint_path: Path,
 ) -> None:
     logger.info("========== Evaluation Summary ==========")
     logger.info(
@@ -370,7 +486,15 @@ def _log_run_summary(
         runtime.device,
     )
     logger.info("Data: num_adata=%s", num_paths)
-    logger.info("Evaluation GRN edges: %s", num_eval_edges)
+    logger.info("Checkpoint: %s", checkpoint_path)
+    logger.info("Evaluation GRNs: %s", len(eval_specs))
+    for spec in eval_specs:
+        logger.info(
+            "Evaluation GRN: name=%s, edges=%s, path=%s",
+            spec.name,
+            int(spec.cache.pair_keys.numel()),
+            spec.path,
+        )
     logger.info("Output root: %s", Path.cwd().resolve())
     logger.info("========================================")
 
@@ -378,6 +502,7 @@ def _log_run_summary(
 def run_evaluation(
     sfm_config: dict[str, object],
     eval_grn_config: dict[str, object],
+    assets: ModelAssets,
     runtime: RuntimeContext,
 ) -> None:
     eval_grn_config = _prepare_evaluation_config(eval_grn_config)
@@ -386,7 +511,10 @@ def run_evaluation(
         "model": sfm_config,
     }
     evaluator_cfg = config["evaluator"]
-    checkpoint_path = Path(str(evaluator_cfg["checkpoint_path"])).expanduser().resolve()
+    checkpoint_path = _resolve_checkpoint_path(
+        checkpoint_path=evaluator_cfg.get("checkpoint_path"),
+        default_model_path=assets.sfm_model,
+    )
     foundation_name = str(evaluator_cfg.get("foundation_name", "sfm"))
     model_state = load_model_state_dict(checkpoint_path)
 
@@ -403,10 +531,9 @@ def run_evaluation(
         )
 
     data_assets = build_evaluation_assets(config=config, runtime=runtime)
-    evaluation_grn_df = _load_evaluation_grn(evaluator_cfg["evaluation_grn_path"])
-    eval_cache = build_evaluation_grn_cache(
+    eval_specs = _load_evaluation_grn_specs(
+        raw_paths=evaluator_cfg.get("evaluation_grn_path"),
         token_dict=data_assets.token_dict,
-        evaluation_grn_df=evaluation_grn_df,
     )
 
     model = build_model(
@@ -419,7 +546,7 @@ def run_evaluation(
             train_size=0,
             path=data_assets.train_paths[0],
         ),
-        assets=resolve_model_assets(config["model_source"], require_model_weights=True),
+        assets=assets,
         runtime_config=config.get("runtime", {}),
     )
     model.load_state_dict(model_state)
@@ -436,12 +563,20 @@ def run_evaluation(
             logger=logger,
             runtime=runtime,
             num_paths=len(data_assets.train_paths),
-            num_eval_edges=int(eval_cache.pair_keys.numel()),
+            eval_specs=eval_specs,
+            checkpoint_path=checkpoint_path,
         )
 
     metric_names = ["auprc_ratio", "auroc", "ep_ratio"]
-    metric_sums = {name: 0.0 for name in metric_names}
-    metric_counts = {name: 0 for name in metric_names}
+    metric_sums = {
+        str(spec.path): {name: 0.0 for name in metric_names}
+        for spec in eval_specs
+    }
+    metric_counts = {
+        str(spec.path): {name: 0 for name in metric_names}
+        for spec in eval_specs
+    }
+    cell_counts = {str(spec.path): 0 for spec in eval_specs}
     with torch.no_grad():
         for file_index, path in enumerate(data_assets.train_paths, start=1):
             data_bundle = None
@@ -464,27 +599,32 @@ def run_evaluation(
                             tokens,
                             compute_grn={foundation_name: True},
                             return_factors=False,
-                        )
-                    pred_grn = _extract_predicted_grn(model_output, foundation_name=foundation_name)
-                    batch_metrics = evaluate_cell_specific_grns(
-                        pred_grn=pred_grn,
-                        tokens=tokens,
-                        token_dict=data_assets.token_dict,
-                        evaluation_grn_df=evaluation_grn_df,
                     )
-                    for name in metric_names:
-                        series = batch_metrics[name].dropna()
-                        metric_sums[name] += float(series.sum())
-                        metric_counts[name] += int(series.shape[0])
-                    batch_offset += len(batch_metrics)
+                    pred_grn = _extract_predicted_grn(model_output, foundation_name=foundation_name)
+                    for spec in eval_specs:
+                        spec_key = str(spec.path)
+                        batch_metrics = evaluate_cell_specific_grns_with_cache(
+                            pred_grn=pred_grn,
+                            tokens=tokens,
+                            cache=spec.cache,
+                        )
+                        for name in metric_names:
+                            series = batch_metrics[name].dropna()
+                            metric_sums[spec_key][name] += float(series.sum())
+                            metric_counts[spec_key][name] += int(series.shape[0])
+                        cell_counts[spec_key] += int(len(batch_metrics))
+                        del batch_metrics
+                    batch_offset += int(require_tensor(tokens, "input_ids").shape[0])
 
-                    del batch_metrics, pred_grn, model_output, tokens
+                    del pred_grn, model_output, tokens
             finally:
                 _release_data_bundle(data_bundle, runtime=runtime)
 
     _save_summary_metrics(
+        eval_specs=eval_specs,
         metric_sums=metric_sums,
         metric_counts=metric_counts,
+        cell_counts=cell_counts,
         paths=paths,
         runtime=runtime,
         logger=logger,
@@ -499,19 +639,27 @@ def main() -> None:
     runtime = initialize_distributed()
     try:
         eval_grn_config = load_yaml_config(args.eval_grn_config)
+        if args.checkpoint_path is not None:
+            eval_grn_config.setdefault("evaluator", {})["checkpoint_path"] = args.checkpoint_path
+        requested_checkpoint_path = eval_grn_config.get("evaluator", {}).get("checkpoint_path")
+        checkpoint_overrides_model_source = (
+            requested_checkpoint_path is not None
+            and str(requested_checkpoint_path).strip() != ""
+        )
         assets = resolve_model_assets(
             model_source=eval_grn_config["model_source"],
-            require_model_weights=True,
+            require_model_weights=not checkpoint_overrides_model_source,
         )
         sfm_config = load_sfm_config(assets.sfm_config)
         eval_runtime_config = apply_model_assets_to_runtime_config(
             eval_grn_config,
             assets,
-            require_model_weights=True,
+            require_model_weights=not checkpoint_overrides_model_source,
         )
         run_evaluation(
             sfm_config=sfm_config,
             eval_grn_config=eval_runtime_config,
+            assets=assets,
             runtime=runtime,
         )
     finally:
