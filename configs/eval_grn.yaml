@@ -13,7 +13,7 @@ runtime:
     limit_all_gathers: true
 
 data:
-  batch_size: 64
+  batch_size: 96
   num_workers: 0
   pin_memory: true
   drop_last: false
@@ -48,36 +48,23 @@ evaluator:
   evaluation_pairs:
     - dataset_path: /scratch/kxu248/data/GRN/datasets/hESC.h5ad
       grn_path: /scratch/kxu248/data/GRN/networks/hESC-ChIP-seq.csv
-    - dataset_path: /scratch/kxu248/data/GRN/datasets/hESC.h5ad
-      grn_path: /scratch/kxu248/data/GRN/networks/hChIP-seq.csv
 
     - dataset_path: /scratch/kxu248/data/GRN/datasets/hHep.h5ad
       grn_path: /scratch/kxu248/data/GRN/networks/hHep-ChIP-seq.csv
-    - dataset_path: /scratch/kxu248/data/GRN/datasets/hHep.h5ad
-      grn_path: /scratch/kxu248/data/GRN/networks/hChIP-seq.csv
 
     - dataset_path: /scratch/kxu248/data/GRN/datasets/mDC.h5ad
       grn_path: /scratch/kxu248/data/GRN/networks/mDC-ChIP-seq.csv
-    - dataset_path: /scratch/kxu248/data/GRN/datasets/mDC.h5ad
-      grn_path: /scratch/kxu248/data/GRN/networks/mChIP-seq.csv
 
     - dataset_path: /scratch/kxu248/data/GRN/datasets/mESC.h5ad
       grn_path: /scratch/kxu248/data/GRN/networks/mESC-ChIP-seq.csv
-    - dataset_path: /scratch/kxu248/data/GRN/datasets/mESC.h5ad
-      grn_path: /scratch/kxu248/data/GRN/networks/mChIP-seq.csv
 
     - dataset_path: /scratch/kxu248/data/GRN/datasets/mHSC-E.h5ad
       grn_path: /scratch/kxu248/data/GRN/networks/mHSC-ChIP-seq.csv
-    - dataset_path: /scratch/kxu248/data/GRN/datasets/mHSC-E.h5ad
-      grn_path: /scratch/kxu248/data/GRN/networks/mChIP-seq.csv
       
     - dataset_path: /scratch/kxu248/data/GRN/datasets/mHSC-GM.h5ad
       grn_path: /scratch/kxu248/data/GRN/networks/mHSC-ChIP-seq.csv
-    - dataset_path: /scratch/kxu248/data/GRN/datasets/mHSC-GM.h5ad
-      grn_path: /scratch/kxu248/data/GRN/networks/mChIP-seq.csv
 
     - dataset_path: /scratch/kxu248/data/GRN/datasets/mHSC-L.h5ad
       grn_path: /scratch/kxu248/data/GRN/networks/mHSC-ChIP-seq.csv
-    - dataset_path: /scratch/kxu248/data/GRN/datasets/mHSC-L.h5ad
-      grn_path: /scratch/kxu248/data/GRN/networks/mChIP-seq.csv
+
   foundation_name: sfm
