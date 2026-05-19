@@ -13,11 +13,16 @@ runtime:
     limit_all_gathers: true
 
 data:
-  batch_size: 96
+  batch_size: 8
   num_workers: 0
   pin_memory: true
   drop_last: false
-  max_length: 1024
+  # Evaluation uses a special GRN universe: all asset-supported TFs for the
+  # h5ad species are retained first, then `n_top_genes` is computed only among
+  # non-preserved target genes. The resulting random GRN universe is
+  # TF x (TF + HVG_TG), so max_length must leave room for all TFs in addition
+  # to the HVG target-gene budget.
+  max_length: 4096
   gene_key: null
   platform_key: null
   species_key: species
@@ -31,9 +36,13 @@ data:
     max_pct_counts_mt: 20.0
     target_sum: 10000.0
     log1p: false
-    n_top_genes: 1023
+    # In evaluation only, this is the number of HVG target genes. The evaluator
+    # fills `preserve_gene_names` per h5ad with all asset-supported TFs for the species.
+    n_top_genes: 1000
     hvg_flavor: seurat
     subset_hvg: true
+    preserve_gene_names: []
+    hvg_exclude_preserved_genes: true
     remove_mito_genes: true
     remove_ribo_genes: true
     remove_hb_genes: true
@@ -44,7 +53,8 @@ data:
 evaluator:
   checkpoint_path: null
   aggregation: dataset
-  candidate_source_universe: supported_tfs
+  # Use all asset-supported TFs as candidate GRN sources.
+  candidate_source_universe: all_tfs
   evaluation_pairs:
     - dataset_path: /scratch/kxu248/data/GRN/datasets/hESC.h5ad
       grn_path: /scratch/kxu248/data/GRN/networks/hESC-ChIP-seq.csv

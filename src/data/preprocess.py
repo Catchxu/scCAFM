@@ -34,6 +34,8 @@ class ScPreprocessor:
         remove_hb_genes: bool = False,
         token_dict: Optional[pd.DataFrame] = None,
         gene_key: Optional[str] = None,
+        preserve_gene_names: Optional[list[str]] = None,
+        hvg_exclude_preserved_genes: bool = False,
         sanitize_X: bool = True,
         X_fill_value: float = 0.0,
         inplace: bool = False,
@@ -51,9 +53,48 @@ class ScPreprocessor:
         self.remove_hb_genes = remove_hb_genes
         self.token_dict = token_dict
         self.gene_key = gene_key
+        self.preserve_gene_names = list(preserve_gene_names or [])
+        self.hvg_exclude_preserved_genes = bool(hvg_exclude_preserved_genes)
         self.sanitize_X = sanitize_X
         self.X_fill_value = float(X_fill_value)
         self.inplace = inplace
+        self._refresh_preserve_gene_lookup()
+
+    def set_preserve_gene_names(self, gene_names: list[str]) -> None:
+        self.preserve_gene_names = list(gene_names or [])
+        self._refresh_preserve_gene_lookup()
+
+    def _refresh_preserve_gene_lookup(self) -> None:
+        self._preserve_symbols = {
+            self._normalize_symbol(gene_name)
+            for gene_name in self.preserve_gene_names
+            if str(gene_name).strip()
+        }
+        self._preserve_ensembl = {
+            self._normalize_ensembl(gene_name)
+            for gene_name in self.preserve_gene_names
+            if str(gene_name).strip()
+        }
+        self._preserve_token_ids: set[int] = set()
+        if self.token_dict is None or not isinstance(self.token_dict, pd.DataFrame):
+            return
+
+        for _, row in self.token_dict.iterrows():
+            token_index = int(row["token_index"]) if pd.notna(row.get("token_index")) else None
+            if token_index is None:
+                continue
+            gene_symbol = row.get("gene_symbol")
+            gene_id = row.get("gene_id")
+            symbol_match = (
+                pd.notna(gene_symbol)
+                and self._normalize_symbol(gene_symbol) in self._preserve_symbols
+            )
+            ensembl_match = (
+                pd.notna(gene_id)
+                and self._normalize_ensembl(gene_id) in self._preserve_ensembl
+            )
+            if symbol_match or ensembl_match:
+                self._preserve_token_ids.add(token_index)
 
     def _coerce_expression_value(self, value) -> float:
         if value is None:
@@ -138,6 +179,51 @@ class ScPreprocessor:
         if all(str(g).strip().upper().startswith("ENSG") for g in gene_names):
             return "ensembl"
         return "symbol"
+
+    def _map_gene_names_to_token_ids(self, gene_names: list[str]) -> np.ndarray:
+        if self.token_dict is None or not isinstance(self.token_dict, pd.DataFrame):
+            return np.full(len(gene_names), fill_value=-1, dtype=np.int64)
+
+        symbol_to_index = {
+            self._normalize_symbol(row["gene_symbol"]): int(row["token_index"])
+            for _, row in self.token_dict.iterrows()
+            if pd.notna(row.get("gene_symbol")) and str(row.get("gene_symbol")).strip()
+        }
+        ensembl_to_index = {
+            self._normalize_ensembl(row["gene_id"]): int(row["token_index"])
+            for _, row in self.token_dict.iterrows()
+            if pd.notna(row.get("gene_id")) and str(row.get("gene_id")).strip()
+        }
+
+        token_ids: list[int] = []
+        for gene_name in gene_names:
+            symbol_key = self._normalize_symbol(gene_name)
+            ensembl_key = self._normalize_ensembl(gene_name)
+            token_ids.append(symbol_to_index.get(symbol_key, ensembl_to_index.get(ensembl_key, -1)))
+        return np.asarray(token_ids, dtype=np.int64)
+
+    def _preserved_gene_mask(self, adata) -> np.ndarray:
+        gene_names = self._get_gene_names(adata)
+        if not self.preserve_gene_names:
+            return np.zeros(len(gene_names), dtype=bool)
+
+        gene_name_type = self._detect_gene_name_type(gene_names)
+        if gene_name_type == "ensembl":
+            name_mask = np.array(
+                [self._normalize_ensembl(gene_name) in self._preserve_ensembl for gene_name in gene_names],
+                dtype=bool,
+            )
+        else:
+            name_mask = np.array(
+                [self._normalize_symbol(gene_name) in self._preserve_symbols for gene_name in gene_names],
+                dtype=bool,
+            )
+
+        if self._preserve_token_ids:
+            token_ids = self._map_gene_names_to_token_ids(gene_names)
+            token_mask = np.isin(token_ids, np.fromiter(self._preserve_token_ids, dtype=np.int64))
+            return name_mask | token_mask
+        return name_mask
 
     @staticmethod
     def _normalize_symbol(x) -> str:
@@ -239,8 +325,63 @@ class ScPreprocessor:
             if column in {"highly_variable", "means", "dispersions", "dispersions_norm"}:
                 target.var[column] = source.var[column].reindex(target.var_names).to_numpy()
 
+    def _compute_hvg_annotations(self, adata) -> None:
+        if self.hvg_flavor == "seurat" and not self.log1p:
+            hvg_adata = adata.copy()
+            sc.pp.log1p(hvg_adata)
+            self._sanitize_expression_matrix(hvg_adata)
+            sc.pp.highly_variable_genes(
+                hvg_adata,
+                n_top_genes=min(int(self.n_top_genes), int(hvg_adata.n_vars)),
+                flavor=self.hvg_flavor,
+                subset=False,
+                inplace=True,
+            )
+            self._copy_hvg_annotations(hvg_adata, adata)
+            return
+
+        sc.pp.highly_variable_genes(
+            adata,
+            n_top_genes=min(int(self.n_top_genes), int(adata.n_vars)),
+            flavor=self.hvg_flavor,
+            subset=False,
+            inplace=True,
+        )
+        self._sanitize_expression_matrix(adata)
+
+    def _select_hvg_preserving_genes(self, adata, preserve_mask: np.ndarray) -> None:
+        target_mask = ~preserve_mask
+        adata.var["preserved_gene"] = preserve_mask
+        adata.var["hvg_target_candidate"] = target_mask
+
+        if not target_mask.any():
+            adata.var["highly_variable"] = False
+            if self.subset_hvg:
+                adata._inplace_subset_var(preserve_mask)
+            return
+
+        hvg_adata = adata[:, target_mask].copy()
+        self._compute_hvg_annotations(hvg_adata)
+        self._copy_hvg_annotations(hvg_adata, adata)
+
+        hvg_mask = np.asarray(
+            [bool(value) if pd.notna(value) else False for value in adata.var["highly_variable"].tolist()],
+            dtype=bool,
+        )
+        keep_mask = preserve_mask | hvg_mask
+        adata.var["highly_variable"] = hvg_mask
+        adata.var["hvg_target_gene"] = hvg_mask & target_mask
+        if self.subset_hvg:
+            adata._inplace_subset_var(keep_mask)
+
     def _select_hvg(self, adata) -> None:
         if self.n_top_genes is None:
+            return
+
+        preserve_mask = self._preserved_gene_mask(adata)
+        if self.hvg_exclude_preserved_genes and preserve_mask.any():
+            self._select_hvg_preserving_genes(adata, preserve_mask=preserve_mask)
+            self._sanitize_expression_matrix(adata)
             return
 
         if self.hvg_flavor == "seurat" and not self.log1p:
@@ -304,6 +445,8 @@ def preprocess_adata(
     remove_hb_genes: bool = True,
     token_dict: Optional[pd.DataFrame] = None,
     gene_key: Optional[str] = None,
+    preserve_gene_names: Optional[list[str]] = None,
+    hvg_exclude_preserved_genes: bool = False,
     sanitize_X: bool = True,
     X_fill_value: float = 0.0,
     inplace: bool = False,
@@ -326,6 +469,8 @@ def preprocess_adata(
         remove_hb_genes=remove_hb_genes,
         token_dict=token_dict,
         gene_key=gene_key,
+        preserve_gene_names=preserve_gene_names,
+        hvg_exclude_preserved_genes=hvg_exclude_preserved_genes,
         sanitize_X=sanitize_X,
         X_fill_value=X_fill_value,
         inplace=inplace,

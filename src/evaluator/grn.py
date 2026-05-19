@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+import anndata as ad
 import pandas as pd
 import torch
 import torch.distributed as dist
@@ -545,6 +546,78 @@ def _load_evaluation_pair_specs(
     return specs
 
 
+def _normalize_species_name(value: object) -> str:
+    species = str(value).strip().lower()
+    if species in {"human", "homo sapiens", "hs"}:
+        return "human"
+    if species in {"mouse", "mus musculus", "mm"}:
+        return "mouse"
+    return species
+
+
+def _load_dataset_species(dataset_path: Path, species_key: object) -> str | None:
+    if species_key is None:
+        return None
+
+    adata = ad.read_h5ad(dataset_path, backed="r")
+    try:
+        if str(species_key) not in adata.obs.columns:
+            return None
+        values = [
+            _normalize_species_name(value)
+            for value in adata.obs[str(species_key)].dropna().astype(str).unique().tolist()
+        ]
+    finally:
+        if getattr(adata, "file", None) is not None:
+            adata.file.close()
+
+    values = sorted(set(values))
+    if len(values) == 1:
+        return values[0]
+    return None
+
+
+def _supported_tf_names_for_dataset(
+    dataset_path: Path,
+    data_assets: object,
+    data_cfg: dict[str, object],
+) -> list[str]:
+    gene_tokenizer = data_assets.tokenizer.gene_tokenizer
+    species = _load_dataset_species(dataset_path, data_cfg.get("species_key"))
+    if species == "human":
+        return sorted(gene_tokenizer.human_tf_symbols)
+    if species == "mouse":
+        return sorted(gene_tokenizer.mouse_tf_symbols)
+    return sorted(set(gene_tokenizer.human_tf_symbols) | set(gene_tokenizer.mouse_tf_symbols))
+
+
+def _set_evaluation_preserved_tfs(
+    preprocessor: object | None,
+    dataset_path: Path,
+    data_assets: object,
+    data_cfg: dict[str, object],
+    logger: ExperimentLogger,
+) -> None:
+    if preprocessor is None:
+        return
+    if not hasattr(preprocessor, "set_preserve_gene_names"):
+        return
+    preprocess_enabled = bool(getattr(preprocessor, "hvg_exclude_preserved_genes", False))
+    if not preprocess_enabled:
+        return
+
+    supported_tf_names = _supported_tf_names_for_dataset(
+        dataset_path=dataset_path,
+        data_assets=data_assets,
+        data_cfg=data_cfg,
+    )
+    preprocessor.set_preserve_gene_names(supported_tf_names)
+    logger.info(
+        "Evaluation preprocessing: preserving %s asset-supported TF genes before target-only HVG selection",
+        len(supported_tf_names),
+    )
+
+
 def _resolve_checkpoint_path(
     checkpoint_path: object,
     default_model_path: Path,
@@ -1071,6 +1144,13 @@ def run_evaluation(
             dataset_pair_specs = pair_specs_by_dataset.get(path, [])
             if not dataset_pair_specs:
                 continue
+            _set_evaluation_preserved_tfs(
+                preprocessor=data_assets.preprocessor,
+                dataset_path=path,
+                data_assets=data_assets,
+                data_cfg=config["data"],
+                logger=logger,
+            )
             data_bundle = None
             dataset_accumulator = (
                 _init_dense_dataset_accumulator() if use_dataset_metrics else None
