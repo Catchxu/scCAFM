@@ -7,6 +7,7 @@ from .metrics import (
 
 __all__ = [
     "EvaluationGRNCache",
+    "EvaluationPairSpec",
     "build_evaluation_grn_cache",
     "build_reference_grn",
     "evaluate_cell_specific_grns",
@@ -22,6 +23,7 @@ __all__ = [
 def __getattr__(name: str):
     if name in {
         "EvaluationGRNCache",
+        "EvaluationPairSpec",
         "build_evaluation_grn_cache",
         "build_reference_grn",
         "evaluate_cell_specific_grns",

@@ -57,9 +57,12 @@ class EvaluationGRNCache:
 
 
 @dataclass
-class EvaluationGRNSpec:
-    name: str
-    path: Path
+class EvaluationPairSpec:
+    pair_key: str
+    dataset_name: str
+    dataset_path: Path
+    evaluation_grn_name: str
+    evaluation_grn_path: Path
     dataframe: pd.DataFrame
     cache: EvaluationGRNCache
 
@@ -73,6 +76,7 @@ class DenseDatasetGRNAccumulator:
 
 @dataclass
 class FinalizedDatasetGRN:
+    dataset_path: Path
     score_mean: torch.Tensor
     cell_count: int
     token_template: dict[str, torch.Tensor | None]
@@ -230,14 +234,12 @@ def build_reference_grn(
         )
         return empty_mask, empty_mask
 
-    supported_token_ids = cache.supported_token_ids.to(device=input_ids.device)
-    supported_gene_mask = torch.isin(input_ids, supported_token_ids) & active_gene_mask
     candidate_source_universe = _normalize_candidate_source_universe(candidate_source_universe)
     if candidate_source_universe == "supported_tfs":
         source_token_ids = cache.source_token_ids.to(device=input_ids.device)
         source_mask = source_mask & torch.isin(input_ids, source_token_ids)
 
-    candidate_mask = source_mask.unsqueeze(2) & supported_gene_mask.unsqueeze(1)
+    candidate_mask = source_mask.unsqueeze(2) & active_gene_mask.unsqueeze(1)
     diagonal_mask = torch.eye(
         input_ids.shape[1],
         dtype=torch.bool,
@@ -289,13 +291,11 @@ def build_candidate_pair_keys(
         empty_keys = torch.zeros_like(empty_mask, dtype=torch.long)
         return empty_keys, empty_mask
 
-    supported_token_ids = cache.supported_token_ids.to(device=input_ids.device)
-    supported_gene_mask = torch.isin(input_ids, supported_token_ids) & active_gene_mask
     candidate_source_universe = _normalize_candidate_source_universe(candidate_source_universe)
     if candidate_source_universe == "supported_tfs":
         source_token_ids = cache.source_token_ids.to(device=input_ids.device)
         source_mask = source_mask & torch.isin(input_ids, source_token_ids)
-    candidate_mask = source_mask.unsqueeze(2) & supported_gene_mask.unsqueeze(1)
+    candidate_mask = source_mask.unsqueeze(2) & active_gene_mask.unsqueeze(1)
     diagonal_mask = torch.eye(
         input_ids.shape[1],
         dtype=torch.bool,
@@ -436,45 +436,108 @@ def _load_evaluation_grn(path: str | Path) -> pd.DataFrame:
     return df
 
 
-def _normalize_evaluation_grn_paths(raw_paths: object) -> list[Path]:
-    if raw_paths is None:
-        raise ValueError("`evaluator.evaluation_grn_path` is required.")
-    if isinstance(raw_paths, (str, Path)):
-        paths = [raw_paths]
-    elif isinstance(raw_paths, list):
-        paths = raw_paths
-    else:
-        raise TypeError(
-            "`evaluator.evaluation_grn_path` must be a path string or a list of path strings."
+def _normalize_evaluation_pairs(
+    config: dict[str, object],
+) -> list[dict[str, str | Path]]:
+    data_cfg = dict(config.get("data", {}))
+    evaluator_cfg = dict(config.get("evaluator", {}))
+    if data_cfg.get("train_paths") is not None:
+        raise ValueError(
+            "`data.train_paths` is no longer supported for GRN evaluation. "
+            "Define datasets with `evaluator.evaluation_pairs[*].dataset_path`."
+        )
+    if evaluator_cfg.get("evaluation_grn_path") is not None:
+        raise ValueError(
+            "`evaluator.evaluation_grn_path` is no longer supported. "
+            "Use `evaluator.evaluation_pairs` with `dataset_path` and `grn_path`."
         )
 
-    resolved_paths: list[Path] = []
-    for index, raw_path in enumerate(paths):
-        if not isinstance(raw_path, (str, Path)):
-            raise TypeError(
-                f"`evaluator.evaluation_grn_path[{index}]` must be a path string."
+    raw_pairs = evaluator_cfg.get("evaluation_pairs")
+    if not isinstance(raw_pairs, list):
+        raise TypeError("`evaluator.evaluation_pairs` must be a non-empty list.")
+    if not raw_pairs:
+        raise ValueError("`evaluator.evaluation_pairs` must contain at least one pair.")
+
+    pairs: list[dict[str, str | Path]] = []
+    seen_pair_keys: set[str] = set()
+    for index, raw_pair in enumerate(raw_pairs):
+        if not isinstance(raw_pair, dict):
+            raise TypeError(f"`evaluator.evaluation_pairs[{index}]` must be a mapping.")
+        if "dataset_path" not in raw_pair or "grn_path" not in raw_pair:
+            raise ValueError(
+                f"`evaluator.evaluation_pairs[{index}]` must contain `dataset_path` and `grn_path`."
             )
-        resolved_paths.append(Path(raw_path).expanduser().resolve())
-    if not resolved_paths:
-        raise ValueError("`evaluator.evaluation_grn_path` must contain at least one path.")
-    return resolved_paths
+
+        raw_dataset_path = raw_pair["dataset_path"]
+        raw_grn_path = raw_pair["grn_path"]
+        if not isinstance(raw_dataset_path, (str, Path)):
+            raise TypeError(f"`evaluator.evaluation_pairs[{index}].dataset_path` must be a path string.")
+        if not isinstance(raw_grn_path, (str, Path)):
+            raise TypeError(f"`evaluator.evaluation_pairs[{index}].grn_path` must be a path string.")
+
+        dataset_path = Path(raw_dataset_path).expanduser().resolve()
+        grn_path = Path(raw_grn_path).expanduser().resolve()
+        dataset_name = str(raw_pair.get("dataset_name") or dataset_path.stem)
+        grn_name = str(raw_pair.get("grn_name") or grn_path.stem)
+        pair_key = str(raw_pair.get("pair_key") or f"{dataset_path.stem}__{grn_path.stem}")
+        if pair_key in seen_pair_keys:
+            raise ValueError(f"`evaluator.evaluation_pairs[{index}]` produced duplicate pair_key: {pair_key}")
+        seen_pair_keys.add(pair_key)
+        pairs.append(
+            {
+                "pair_key": pair_key,
+                "dataset_name": dataset_name,
+                "dataset_path": dataset_path,
+                "evaluation_grn_name": grn_name,
+                "evaluation_grn_path": grn_path,
+            }
+        )
+    return pairs
 
 
-def _load_evaluation_grn_specs(
-    raw_paths: object,
+def _unique_dataset_paths(pair_entries: list[dict[str, str | Path]]) -> list[Path]:
+    paths: list[Path] = []
+    seen: set[Path] = set()
+    for pair in pair_entries:
+        dataset_path = Path(pair["dataset_path"])
+        if dataset_path in seen:
+            continue
+        seen.add(dataset_path)
+        paths.append(dataset_path)
+    return paths
+
+
+def _inject_evaluation_train_paths(
+    config: dict[str, object],
+    dataset_paths: list[Path],
+) -> dict[str, object]:
+    prepared = deepcopy(config)
+    data_cfg = dict(prepared.get("data", {}))
+    data_cfg["train_paths"] = [str(path) for path in dataset_paths]
+    data_cfg["shuffle_train_paths"] = False
+    prepared["data"] = data_cfg
+    return prepared
+
+
+def _load_evaluation_pair_specs(
+    pair_entries: list[dict[str, str | Path]],
     token_dict: pd.DataFrame,
-) -> list[EvaluationGRNSpec]:
-    specs: list[EvaluationGRNSpec] = []
-    for path in _normalize_evaluation_grn_paths(raw_paths):
-        dataframe = _load_evaluation_grn(path)
+) -> list[EvaluationPairSpec]:
+    specs: list[EvaluationPairSpec] = []
+    for pair in pair_entries:
+        grn_path = Path(pair["evaluation_grn_path"])
+        dataframe = _load_evaluation_grn(grn_path)
         cache = build_evaluation_grn_cache(
             token_dict=token_dict,
             evaluation_grn_df=dataframe,
         )
         specs.append(
-            EvaluationGRNSpec(
-                name=path.stem,
-                path=path,
+            EvaluationPairSpec(
+                pair_key=str(pair["pair_key"]),
+                dataset_name=str(pair["dataset_name"]),
+                dataset_path=Path(pair["dataset_path"]),
+                evaluation_grn_name=str(pair["evaluation_grn_name"]),
+                evaluation_grn_path=grn_path,
                 dataframe=dataframe,
                 cache=cache,
             )
@@ -576,19 +639,28 @@ def _normalize_candidate_source_universe(raw_value: object) -> str:
 
 
 def _init_cell_metric_accumulators(
-    eval_specs: list[EvaluationGRNSpec],
+    pair_specs: list[EvaluationPairSpec],
     metric_names: list[str],
 ) -> tuple[dict[str, dict[str, float]], dict[str, dict[str, int]], dict[str, int]]:
     metric_sums = {
-        str(spec.path): {name: 0.0 for name in metric_names}
-        for spec in eval_specs
+        spec.pair_key: {name: 0.0 for name in metric_names}
+        for spec in pair_specs
     }
     metric_counts = {
-        str(spec.path): {name: 0 for name in metric_names}
-        for spec in eval_specs
+        spec.pair_key: {name: 0 for name in metric_names}
+        for spec in pair_specs
     }
-    cell_counts = {str(spec.path): 0 for spec in eval_specs}
+    cell_counts = {spec.pair_key: 0 for spec in pair_specs}
     return metric_sums, metric_counts, cell_counts
+
+
+def _group_pair_specs_by_dataset(
+    pair_specs: list[EvaluationPairSpec],
+) -> dict[Path, list[EvaluationPairSpec]]:
+    grouped: dict[Path, list[EvaluationPairSpec]] = {}
+    for spec in pair_specs:
+        grouped.setdefault(spec.dataset_path, []).append(spec)
+    return grouped
 
 
 def _clone_token_template(
@@ -655,6 +727,7 @@ def _accumulate_dense_dataset_grn_batch(
 
 def _finalize_dense_dataset_grn_accumulator(
     accumulator: DenseDatasetGRNAccumulator,
+    dataset_path: Path,
     runtime: RuntimeContext,
 ) -> FinalizedDatasetGRN | None:
     local_shape = tuple(accumulator.score_sum.shape) if accumulator.score_sum is not None else None
@@ -701,6 +774,7 @@ def _finalize_dense_dataset_grn_accumulator(
         return None
 
     return FinalizedDatasetGRN(
+        dataset_path=dataset_path,
         score_mean=score_sum.div(float(cell_count)),
         cell_count=cell_count,
         token_template=token_template,
@@ -708,7 +782,7 @@ def _finalize_dense_dataset_grn_accumulator(
 
 
 def _build_cell_summary_rows(
-    eval_specs: list[EvaluationGRNSpec],
+    pair_specs: list[EvaluationPairSpec],
     metric_sums: dict[str, dict[str, float]],
     metric_counts: dict[str, dict[str, int]],
     cell_counts: dict[str, int],
@@ -716,8 +790,8 @@ def _build_cell_summary_rows(
 ) -> list[dict[str, object]]:
     metric_names = ["auprc", "auprc_ratio", "auroc", "ep", "ep_ratio"]
     totals_values: list[float] = []
-    for spec in eval_specs:
-        spec_key = str(spec.path)
+    for spec in pair_specs:
+        spec_key = spec.pair_key
         totals_values.extend(metric_sums[spec_key].get(name, 0.0) for name in metric_names)
         totals_values.extend(float(metric_counts[spec_key].get(name, 0)) for name in metric_names)
         totals_values.append(float(cell_counts.get(spec_key, 0)))
@@ -731,11 +805,13 @@ def _build_cell_summary_rows(
     rows: list[dict[str, object]] = []
     offset = 0
     values_per_spec = len(metric_names) * 2 + 1
-    for spec in eval_specs:
+    for spec in pair_specs:
         summary: dict[str, object] = {
             "aggregation": "cell",
-            "evaluation_grn_name": spec.name,
-            "evaluation_grn_path": str(spec.path),
+            "dataset_name": spec.dataset_name,
+            "dataset_path": str(spec.dataset_path),
+            "evaluation_grn_name": spec.evaluation_grn_name,
+            "evaluation_grn_path": str(spec.evaluation_grn_path),
             "num_cells": int(round(float(totals[offset + values_per_spec - 1].item()))),
             "num_candidate_edges": float("nan"),
         }
@@ -749,8 +825,8 @@ def _build_cell_summary_rows(
 
 
 def _build_dense_dataset_summary_rows(
-    eval_specs: list[EvaluationGRNSpec],
-    finalized_datasets: list[FinalizedDatasetGRN],
+    pair_specs: list[EvaluationPairSpec],
+    finalized_datasets_by_path: dict[Path, FinalizedDatasetGRN],
     runtime: RuntimeContext,
     candidate_source_universe: str,
 ) -> list[dict[str, object]]:
@@ -758,43 +834,41 @@ def _build_dense_dataset_summary_rows(
         return []
 
     rows: list[dict[str, object]] = []
-    for spec in eval_specs:
+    for spec in pair_specs:
         score_sums: dict[int, float] = {}
         score_counts: dict[int, int] = {}
         total_cells = 0
+        dataset_grn = finalized_datasets_by_path.get(spec.dataset_path)
 
-        for dataset_grn in finalized_datasets:
+        if dataset_grn is not None:
             pair_keys, candidate_mask = build_candidate_pair_keys(
                 tokens=dataset_grn.token_template,
                 cache=spec.cache,
                 candidate_source_universe=candidate_source_universe,
             )
-            if not candidate_mask.any():
-                total_cells += dataset_grn.cell_count
-                continue
-
-            selected_keys = pair_keys[candidate_mask].to(dtype=torch.long)
-            selected_scores = dataset_grn.score_mean.unsqueeze(0)[candidate_mask].to(
-                dtype=torch.float64
-            )
-            unique_keys, inverse = torch.unique(selected_keys, sorted=False, return_inverse=True)
-            weighted_scores = selected_scores * float(dataset_grn.cell_count)
-            local_score_sums = torch.zeros(unique_keys.numel(), dtype=torch.float64)
-            local_score_sums.scatter_add_(0, inverse, weighted_scores)
-            local_score_counts = (
-                torch.bincount(inverse, minlength=unique_keys.numel()).to(dtype=torch.long)
-                * int(dataset_grn.cell_count)
-            )
-
-            for key, score_sum, score_count in zip(
-                unique_keys.tolist(),
-                local_score_sums.tolist(),
-                local_score_counts.tolist(),
-            ):
-                key_int = int(key)
-                score_sums[key_int] = score_sums.get(key_int, 0.0) + float(score_sum)
-                score_counts[key_int] = score_counts.get(key_int, 0) + int(score_count)
             total_cells += dataset_grn.cell_count
+            if candidate_mask.any():
+                selected_keys = pair_keys[candidate_mask].to(dtype=torch.long)
+                selected_scores = dataset_grn.score_mean.unsqueeze(0)[candidate_mask].to(
+                    dtype=torch.float64
+                )
+                unique_keys, inverse = torch.unique(selected_keys, sorted=False, return_inverse=True)
+                weighted_scores = selected_scores * float(dataset_grn.cell_count)
+                local_score_sums = torch.zeros(unique_keys.numel(), dtype=torch.float64)
+                local_score_sums.scatter_add_(0, inverse, weighted_scores)
+                local_score_counts = (
+                    torch.bincount(inverse, minlength=unique_keys.numel()).to(dtype=torch.long)
+                    * int(dataset_grn.cell_count)
+                )
+
+                for key, score_sum, score_count in zip(
+                    unique_keys.tolist(),
+                    local_score_sums.tolist(),
+                    local_score_counts.tolist(),
+                ):
+                    key_int = int(key)
+                    score_sums[key_int] = score_sums.get(key_int, 0.0) + float(score_sum)
+                    score_counts[key_int] = score_counts.get(key_int, 0) + int(score_count)
 
         pair_key_values = sorted(score_sums)
         if pair_key_values:
@@ -822,8 +896,10 @@ def _build_dense_dataset_summary_rows(
         rows.append(
             {
                 "aggregation": "dataset",
-                "evaluation_grn_name": spec.name,
-                "evaluation_grn_path": str(spec.path),
+                "dataset_name": spec.dataset_name,
+                "dataset_path": str(spec.dataset_path),
+                "evaluation_grn_name": spec.evaluation_grn_name,
+                "evaluation_grn_path": str(spec.evaluation_grn_path),
                 "num_cells": int(total_cells),
                 "num_candidate_edges": int(len(pair_key_values)),
                 **metrics,
@@ -842,15 +918,29 @@ def _save_summary_metrics(
         return
 
     results_dir = paths.root / "results"
-    pd.DataFrame(rows).to_csv(results_dir / "summary_metrics.csv", index=False)
+    columns = [
+        "aggregation",
+        "dataset_name",
+        "dataset_path",
+        "evaluation_grn_name",
+        "evaluation_grn_path",
+        "num_cells",
+        "num_candidate_edges",
+        "auprc",
+        "auprc_ratio",
+        "auroc",
+        "ep",
+        "ep_ratio",
+    ]
+    pd.DataFrame(rows, columns=columns).to_csv(results_dir / "summary_metrics.csv", index=False)
     logger.info("Saved evaluation summary to %s", results_dir / "summary_metrics.csv")
 
 
 def _log_run_summary(
     logger: ExperimentLogger,
     runtime: RuntimeContext,
-    num_paths: int,
-    eval_specs: list[EvaluationGRNSpec],
+    num_dataset_paths: int,
+    pair_specs: list[EvaluationPairSpec],
     checkpoint_path: Path,
     aggregation_modes: list[str],
     candidate_source_universe: str,
@@ -862,24 +952,25 @@ def _log_run_summary(
         runtime.world_size,
         runtime.device,
     )
-    logger.info("Data: num_adata=%s", num_paths)
+    logger.info("Data: num_adata=%s", num_dataset_paths)
     logger.info("Checkpoint: %s", checkpoint_path)
     logger.info("Aggregation: %s", ",".join(aggregation_modes))
     logger.info("Candidate source universe: %s", candidate_source_universe)
-    logger.info("Evaluation GRNs: %s", len(eval_specs))
-    for spec in eval_specs:
+    logger.info("Evaluation pairs: %s", len(pair_specs))
+    for spec in pair_specs:
         logger.info(
             (
-                "Evaluation GRN: name=%s, evaluable_edges=%s, raw_edges=%s, "
-                "unmapped_edges=%s, self_loop_edges=%s, duplicate_edges=%s, path=%s"
+                "Evaluation pair: key=%s, dataset=%s, grn=%s, evaluable_edges=%s, "
+                "raw_edges=%s, unmapped_edges=%s, self_loop_edges=%s, duplicate_edges=%s"
             ),
-            spec.name,
+            spec.pair_key,
+            spec.dataset_path,
+            spec.evaluation_grn_path,
             int(spec.cache.pair_keys.numel()),
             int(spec.cache.raw_edge_count),
             int(spec.cache.unmapped_edge_count),
             int(spec.cache.self_loop_edge_count),
             int(spec.cache.duplicate_edge_count),
-            spec.path,
         )
     logger.info("Output root: %s", Path.cwd().resolve())
     logger.info("========================================")
@@ -891,6 +982,9 @@ def run_evaluation(
     assets: ModelAssets,
     runtime: RuntimeContext,
 ) -> None:
+    pair_entries = _normalize_evaluation_pairs(eval_grn_config)
+    dataset_paths = _unique_dataset_paths(pair_entries)
+    eval_grn_config = _inject_evaluation_train_paths(eval_grn_config, dataset_paths)
     eval_grn_config = _prepare_evaluation_config(eval_grn_config)
     config = {
         **eval_grn_config,
@@ -921,10 +1015,11 @@ def run_evaluation(
         )
 
     data_assets = build_evaluation_assets(config=config, runtime=runtime)
-    eval_specs = _load_evaluation_grn_specs(
-        raw_paths=evaluator_cfg.get("evaluation_grn_path"),
+    pair_specs = _load_evaluation_pair_specs(
+        pair_entries=pair_entries,
         token_dict=data_assets.token_dict,
     )
+    pair_specs_by_dataset = _group_pair_specs_by_dataset(pair_specs)
 
     model = build_model(
         sfm_config=config["model"],
@@ -952,8 +1047,8 @@ def run_evaluation(
         _log_run_summary(
             logger=logger,
             runtime=runtime,
-            num_paths=len(data_assets.train_paths),
-            eval_specs=eval_specs,
+            num_dataset_paths=len(data_assets.train_paths),
+            pair_specs=pair_specs,
             checkpoint_path=checkpoint_path,
             aggregation_modes=aggregation_modes,
             candidate_source_universe=candidate_source_universe,
@@ -964,15 +1059,18 @@ def run_evaluation(
     use_dataset_metrics = "dataset" in aggregation_modes
     if use_cell_metrics:
         cell_metric_sums, cell_metric_counts, cell_counts = _init_cell_metric_accumulators(
-            eval_specs=eval_specs,
+            pair_specs=pair_specs,
             metric_names=metric_names,
         )
     else:
         cell_metric_sums, cell_metric_counts, cell_counts = {}, {}, {}
-    finalized_dataset_grns: list[FinalizedDatasetGRN] = []
+    finalized_dataset_grns_by_path: dict[Path, FinalizedDatasetGRN] = {}
 
     with torch.no_grad():
         for file_index, path in enumerate(data_assets.train_paths, start=1):
+            dataset_pair_specs = pair_specs_by_dataset.get(path, [])
+            if not dataset_pair_specs:
+                continue
             data_bundle = None
             dataset_accumulator = (
                 _init_dense_dataset_accumulator() if use_dataset_metrics else None
@@ -1004,8 +1102,8 @@ def run_evaluation(
                             pred_grn=pred_grn,
                             tokens=tokens,
                         )
-                    for spec in eval_specs:
-                        spec_key = str(spec.path)
+                    for spec in dataset_pair_specs:
+                        spec_key = spec.pair_key
                         if use_cell_metrics:
                             batch_metrics = evaluate_cell_specific_grns_with_cache(
                                 pred_grn=pred_grn,
@@ -1028,16 +1126,17 @@ def run_evaluation(
             if dataset_accumulator is not None:
                 finalized_dataset_grn = _finalize_dense_dataset_grn_accumulator(
                     accumulator=dataset_accumulator,
+                    dataset_path=path,
                     runtime=runtime,
                 )
                 if finalized_dataset_grn is not None and runtime.is_main:
-                    finalized_dataset_grns.append(finalized_dataset_grn)
+                    finalized_dataset_grns_by_path[path] = finalized_dataset_grn
 
     summary_rows: list[dict[str, object]] = []
     if use_cell_metrics:
         summary_rows.extend(
             _build_cell_summary_rows(
-                eval_specs=eval_specs,
+                pair_specs=pair_specs,
                 metric_sums=cell_metric_sums,
                 metric_counts=cell_metric_counts,
                 cell_counts=cell_counts,
@@ -1047,8 +1146,8 @@ def run_evaluation(
     if use_dataset_metrics:
         summary_rows.extend(
             _build_dense_dataset_summary_rows(
-                eval_specs=eval_specs,
-                finalized_datasets=finalized_dataset_grns,
+                pair_specs=pair_specs,
+                finalized_datasets_by_path=finalized_dataset_grns_by_path,
                 runtime=runtime,
                 candidate_source_universe=candidate_source_universe,
             )

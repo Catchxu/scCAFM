@@ -13,9 +13,6 @@ runtime:
     limit_all_gathers: true
 
 data:
-  train_paths: /scratch/kxu248/data/GRN/datasets/hESC.h5ad
-  shuffle_train_paths: false
-  shuffle_train_paths_seed: 0
   batch_size: 64
   num_workers: 0
   pin_memory: true
@@ -33,7 +30,7 @@ data:
     min_cells: 3
     max_pct_counts_mt: 20.0
     target_sum: 10000.0
-    log1p: true
+    log1p: false
     n_top_genes: 1023
     hvg_flavor: seurat
     subset_hvg: true
@@ -48,7 +45,39 @@ evaluator:
   checkpoint_path: null
   aggregation: dataset
   candidate_source_universe: supported_tfs
-  evaluation_grn_path:
-    - /scratch/kxu248/data/GRN/networks/hESC-ChIP-seq.csv
-    - /scratch/kxu248/data/GRN/networks/hChIP-seq.csv
+  evaluation_pairs:
+    - dataset_path: /scratch/kxu248/data/GRN/datasets/hESC.h5ad
+      grn_path: /scratch/kxu248/data/GRN/networks/hESC-ChIP-seq.csv
+    - dataset_path: /scratch/kxu248/data/GRN/datasets/hESC.h5ad
+      grn_path: /scratch/kxu248/data/GRN/networks/hChIP-seq.csv
+
+    - dataset_path: /scratch/kxu248/data/GRN/datasets/hHep.h5ad
+      grn_path: /scratch/kxu248/data/GRN/networks/hHep-ChIP-seq.csv
+    - dataset_path: /scratch/kxu248/data/GRN/datasets/hHep.h5ad
+      grn_path: /scratch/kxu248/data/GRN/networks/hChIP-seq.csv
+
+    - dataset_path: /scratch/kxu248/data/GRN/datasets/mDC.h5ad
+      grn_path: /scratch/kxu248/data/GRN/networks/mDC-ChIP-seq.csv
+    - dataset_path: /scratch/kxu248/data/GRN/datasets/mDC.h5ad
+      grn_path: /scratch/kxu248/data/GRN/networks/mChIP-seq.csv
+
+    - dataset_path: /scratch/kxu248/data/GRN/datasets/mESC.h5ad
+      grn_path: /scratch/kxu248/data/GRN/networks/mESC-ChIP-seq.csv
+    - dataset_path: /scratch/kxu248/data/GRN/datasets/mESC.h5ad
+      grn_path: /scratch/kxu248/data/GRN/networks/mChIP-seq.csv
+
+    - dataset_path: /scratch/kxu248/data/GRN/datasets/mHSC-E.h5ad
+      grn_path: /scratch/kxu248/data/GRN/networks/mHSC-ChIP-seq.csv
+    - dataset_path: /scratch/kxu248/data/GRN/datasets/mHSC-E.h5ad
+      grn_path: /scratch/kxu248/data/GRN/networks/mChIP-seq.csv
+      
+    - dataset_path: /scratch/kxu248/data/GRN/datasets/mHSC-GM.h5ad
+      grn_path: /scratch/kxu248/data/GRN/networks/mHSC-ChIP-seq.csv
+    - dataset_path: /scratch/kxu248/data/GRN/datasets/mHSC-GM.h5ad
+      grn_path: /scratch/kxu248/data/GRN/networks/mChIP-seq.csv
+
+    - dataset_path: /scratch/kxu248/data/GRN/datasets/mHSC-L.h5ad
+      grn_path: /scratch/kxu248/data/GRN/networks/mHSC-ChIP-seq.csv
+    - dataset_path: /scratch/kxu248/data/GRN/datasets/mHSC-L.h5ad
+      grn_path: /scratch/kxu248/data/GRN/networks/mChIP-seq.csv
   foundation_name: sfm

@@ -66,7 +66,6 @@ documentation = "https://github.com/Catchxu/scCAFM#readme"
 
 [project.scripts]
 sccafm-sfm-pretrain = "src.trainer.sfm_pretrain:main"
-sccafm-pretrain = "src.trainer.sfm_pretrain:main"
 
 
 [tool.hatch.build.targets.wheel]
