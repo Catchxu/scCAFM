@@ -596,7 +596,6 @@ def _set_evaluation_preserved_tfs(
     dataset_path: Path,
     data_assets: object,
     data_cfg: dict[str, object],
-    logger: ExperimentLogger,
 ) -> None:
     if preprocessor is None:
         return
@@ -612,10 +611,6 @@ def _set_evaluation_preserved_tfs(
         data_cfg=data_cfg,
     )
     preprocessor.set_preserve_gene_names(supported_tf_names)
-    logger.info(
-        "Evaluation preprocessing: preserving %s asset-supported TF genes before target-only HVG selection",
-        len(supported_tf_names),
-    )
 
 
 def _resolve_checkpoint_path(
@@ -1149,7 +1144,6 @@ def run_evaluation(
                 dataset_path=path,
                 data_assets=data_assets,
                 data_cfg=config["data"],
-                logger=logger,
             )
             data_bundle = None
             dataset_accumulator = (
