@@ -53,8 +53,8 @@ data:
 evaluator:
   checkpoint_path: null
   aggregation: dataset
-  # Use all asset-supported TFs as candidate GRN sources.
-  candidate_source_universe: all_tfs
+  # Use label-supported TFs as candidate GRN sources.
+  candidate_source_universe: supported_tfs
   evaluation_pairs:
     - dataset_path: /scratch/kxu248/data/GRN/datasets/hESC.h5ad
       grn_path: /scratch/kxu248/data/GRN/networks/hESC-ChIP-seq.csv
