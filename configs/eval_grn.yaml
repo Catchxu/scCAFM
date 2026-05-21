@@ -19,9 +19,10 @@ data:
   drop_last: false
   # Evaluation uses a special GRN universe: all asset-supported TFs for the
   # h5ad species are retained first, then `n_top_genes` is computed only among
-  # non-preserved target genes. The resulting random GRN universe is
-  # TF x (TF + HVG_TG), so max_length must leave room for all TFs in addition
-  # to the HVG target-gene budget.
+  # non-preserved target genes. Candidate sources are controlled separately by
+  # `evaluator.candidate_source_universe`, while targets are active processed
+  # genes. `max_length` must leave room for all TFs in addition to the HVG
+  # target-gene budget.
   max_length: 4096
   gene_key: null
   platform_key: null
