@@ -22,7 +22,7 @@ from ..assets import (
     load_sfm_config,
     resolve_model_assets,
 )
-from .metrics import summarize_binary_metrics
+from .metrics import DEFAULT_BINARY_METRICS, summarize_binary_metrics
 from ..config import load_yaml_config
 from ..data import (
     PretrainingDataBundle,
@@ -317,6 +317,7 @@ def evaluate_cell_specific_grns(
     token_dict: pd.DataFrame,
     evaluation_grn_df: pd.DataFrame,
     candidate_source_universe: str = "supported_tfs",
+    metric_names: list[str] | tuple[str, ...] | None = None,
 ) -> pd.DataFrame:
     if pred_grn.ndim != 3:
         raise ValueError(f"`pred_grn` must have shape (C, G, G), got {tuple(pred_grn.shape)}.")
@@ -336,6 +337,7 @@ def evaluate_cell_specific_grns(
         tokens=tokens,
         cache=cache,
         candidate_source_universe=candidate_source_universe,
+        metric_names=metric_names,
     )
 
 
@@ -344,6 +346,7 @@ def evaluate_cell_specific_grns_with_cache(
     tokens: dict[str, torch.Tensor | None],
     cache: EvaluationGRNCache,
     candidate_source_universe: str = "supported_tfs",
+    metric_names: list[str] | tuple[str, ...] | None = None,
 ) -> pd.DataFrame:
     if pred_grn.ndim != 3:
         raise ValueError(f"`pred_grn` must have shape (C, G, G), got {tuple(pred_grn.shape)}.")
@@ -363,6 +366,7 @@ def evaluate_cell_specific_grns_with_cache(
     pred_cpu = pred_grn.detach().to(dtype=torch.float32, device="cpu")
     target_cpu = target.detach().to(dtype=torch.bool, device="cpu")
     candidate_mask_cpu = candidate_mask.detach().to(dtype=torch.bool, device="cpu")
+    selected_metrics = list(DEFAULT_BINARY_METRICS if metric_names is None else metric_names)
 
     rows: list[dict[str, float | int]] = []
     for cell_idx in range(pred_cpu.shape[0]):
@@ -371,15 +375,13 @@ def evaluate_cell_specific_grns_with_cache(
         labels = target_cpu[cell_idx][cell_mask].to(dtype=torch.float32)
 
         if scores.numel() == 0:
-            metrics = {
-                "auprc": float("nan"),
-                "auprc_ratio": float("nan"),
-                "auroc": float("nan"),
-                "ep": float("nan"),
-                "ep_ratio": float("nan"),
-            }
+            metrics = _nan_metric_dict(selected_metrics)
         else:
-            metrics = summarize_binary_metrics(scores=scores, labels=labels)
+            metrics = summarize_binary_metrics(
+                scores=scores,
+                labels=labels,
+                metric_names=selected_metrics,
+            )
 
         rows.append(
             {
@@ -645,9 +647,12 @@ def _extract_predicted_grn(
     return grn
 
 
-def _summarize_metrics(metrics_df: pd.DataFrame) -> pd.DataFrame:
+def _summarize_metrics(
+    metrics_df: pd.DataFrame,
+    metric_names: list[str] | tuple[str, ...] = DEFAULT_BINARY_METRICS,
+) -> pd.DataFrame:
     summary = {}
-    for column in ["auprc", "auprc_ratio", "auroc", "ep", "ep_ratio"]:
+    for column in metric_names:
         summary[column] = float(metrics_df[column].mean()) if column in metrics_df.columns else float("nan")
     return pd.DataFrame([summary])
 
@@ -704,6 +709,67 @@ def _normalize_candidate_source_universe(raw_value: object) -> str:
             f"'supported_tfs', got {raw_value!r}."
         )
     return value
+
+
+def _normalize_metric_names(raw_value: object) -> list[str]:
+    if raw_value is None:
+        return list(DEFAULT_BINARY_METRICS)
+
+    if isinstance(raw_value, str):
+        value = raw_value.strip().lower()
+        if value in {"", "all", "default", "full"}:
+            return list(DEFAULT_BINARY_METRICS)
+        raw_names = [part.strip() for part in value.split(",")]
+    elif isinstance(raw_value, (list, tuple, set)):
+        raw_names = list(raw_value)
+    else:
+        raise ValueError(
+            "`evaluator.metrics` must be 'all', a comma-separated string, or a list "
+            f"of metric names, got {raw_value!r}."
+        )
+
+    aliases = {
+        "ap": "auprc",
+        "average_precision": "auprc",
+        "aupr": "auprc",
+        "ap_ratio": "auprc_ratio",
+        "aupr_ratio": "auprc_ratio",
+        "auc": "auroc",
+        "roc_auc": "auroc",
+        "early_precision": "ep",
+        "early_precision_ratio": "ep_ratio",
+    }
+    metric_names: list[str] = []
+    for raw_name in raw_names:
+        name = str(raw_name).strip().lower()
+        if not name:
+            continue
+        if name in {"all", "default", "full"}:
+            for default_name in DEFAULT_BINARY_METRICS:
+                if default_name not in metric_names:
+                    metric_names.append(default_name)
+            continue
+        name = aliases.get(name, name)
+        if name not in metric_names:
+            metric_names.append(name)
+
+    if not metric_names:
+        raise ValueError("`evaluator.metrics` must include at least one metric name.")
+
+    unknown_metrics = sorted(set(metric_names) - set(DEFAULT_BINARY_METRICS))
+    if unknown_metrics:
+        raise ValueError(
+            "`evaluator.metrics` contains unsupported metrics: "
+            + ", ".join(unknown_metrics)
+            + ". Supported metrics are: "
+            + ", ".join(DEFAULT_BINARY_METRICS)
+            + "."
+        )
+    return metric_names
+
+
+def _nan_metric_dict(metric_names: list[str] | tuple[str, ...]) -> dict[str, float]:
+    return {name: float("nan") for name in metric_names}
 
 
 def _init_cell_metric_accumulators(
@@ -855,8 +921,8 @@ def _build_cell_summary_rows(
     metric_counts: dict[str, dict[str, int]],
     cell_counts: dict[str, int],
     runtime: RuntimeContext,
+    metric_names: list[str],
 ) -> list[dict[str, object]]:
-    metric_names = ["auprc", "auprc_ratio", "auroc", "ep", "ep_ratio"]
     totals_values: list[float] = []
     for spec in pair_specs:
         spec_key = spec.pair_key
@@ -897,6 +963,7 @@ def _build_dense_dataset_summary_rows(
     finalized_datasets_by_path: dict[Path, FinalizedDatasetGRN],
     runtime: RuntimeContext,
     candidate_source_universe: str,
+    metric_names: list[str],
 ) -> list[dict[str, object]]:
     if not runtime.is_main:
         return []
@@ -951,15 +1018,13 @@ def _build_dense_dataset_summary_rows(
             label_tensor = torch.isin(key_tensor, spec.cache.pair_keys.to(dtype=torch.long)).to(
                 dtype=torch.float64
             )
-            metrics = summarize_binary_metrics(scores=score_tensor, labels=label_tensor)
+            metrics = summarize_binary_metrics(
+                scores=score_tensor,
+                labels=label_tensor,
+                metric_names=metric_names,
+            )
         else:
-            metrics = {
-                "auprc": float("nan"),
-                "auprc_ratio": float("nan"),
-                "auroc": float("nan"),
-                "ep": float("nan"),
-                "ep_ratio": float("nan"),
-            }
+            metrics = _nan_metric_dict(metric_names)
 
         rows.append(
             {
@@ -981,6 +1046,7 @@ def _save_summary_metrics(
     paths: ExperimentPaths,
     runtime: RuntimeContext,
     logger: ExperimentLogger,
+    metric_names: list[str],
 ) -> None:
     if not runtime.is_main:
         return
@@ -994,12 +1060,8 @@ def _save_summary_metrics(
         "evaluation_grn_path",
         "num_cells",
         "num_candidate_edges",
-        "auprc",
-        "auprc_ratio",
-        "auroc",
-        "ep",
-        "ep_ratio",
     ]
+    columns.extend(metric_names)
     pd.DataFrame(rows, columns=columns).to_csv(results_dir / "summary_metrics.csv", index=False)
     logger.info("Saved evaluation summary to %s", results_dir / "summary_metrics.csv")
 
@@ -1012,6 +1074,7 @@ def _log_run_summary(
     checkpoint_path: Path,
     aggregation_modes: list[str],
     candidate_source_universe: str,
+    metric_names: list[str],
 ) -> None:
     logger.info("========== Evaluation Summary ==========")
     logger.info(
@@ -1024,6 +1087,7 @@ def _log_run_summary(
     logger.info("Checkpoint: %s", checkpoint_path)
     logger.info("Aggregation: %s", ",".join(aggregation_modes))
     logger.info("Candidate source universe: %s", candidate_source_universe)
+    logger.info("Metrics: %s", ",".join(metric_names))
     logger.info("Evaluation pairs: %s", len(pair_specs))
     for spec in pair_specs:
         logger.info(
@@ -1068,6 +1132,7 @@ def run_evaluation(
     candidate_source_universe = _normalize_candidate_source_universe(
         evaluator_cfg.get("candidate_source_universe", "supported_tfs")
     )
+    metric_names = _normalize_metric_names(evaluator_cfg.get("metrics"))
     model_state = load_model_state_dict(checkpoint_path)
 
     paths = prepare_evaluation_paths(runtime=runtime)
@@ -1120,9 +1185,9 @@ def run_evaluation(
             checkpoint_path=checkpoint_path,
             aggregation_modes=aggregation_modes,
             candidate_source_universe=candidate_source_universe,
+            metric_names=metric_names,
         )
 
-    metric_names = ["auprc", "auprc_ratio", "auroc", "ep", "ep_ratio"]
     use_cell_metrics = "cell" in aggregation_modes
     use_dataset_metrics = "dataset" in aggregation_modes
     if use_cell_metrics:
@@ -1184,6 +1249,7 @@ def run_evaluation(
                                 tokens=tokens,
                                 cache=spec.cache,
                                 candidate_source_universe=candidate_source_universe,
+                                metric_names=metric_names,
                             )
                             for name in metric_names:
                                 series = batch_metrics[name].dropna()
@@ -1215,6 +1281,7 @@ def run_evaluation(
                 metric_counts=cell_metric_counts,
                 cell_counts=cell_counts,
                 runtime=runtime,
+                metric_names=metric_names,
             )
         )
     if use_dataset_metrics:
@@ -1224,6 +1291,7 @@ def run_evaluation(
                 finalized_datasets_by_path=finalized_dataset_grns_by_path,
                 runtime=runtime,
                 candidate_source_universe=candidate_source_universe,
+                metric_names=metric_names,
             )
         )
 
@@ -1232,6 +1300,7 @@ def run_evaluation(
         paths=paths,
         runtime=runtime,
         logger=logger,
+        metric_names=metric_names,
     )
 
     if runtime.is_main:

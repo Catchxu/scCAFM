@@ -5,6 +5,9 @@ import math
 import torch
 
 
+DEFAULT_BINARY_METRICS = ("auprc", "auprc_ratio", "auroc", "ep", "ep_ratio")
+
+
 def _validate_binary_inputs(
     scores: torch.Tensor,
     labels: torch.Tensor,
@@ -148,8 +151,17 @@ def summarize_binary_metrics(
     scores: torch.Tensor,
     labels: torch.Tensor,
     topk: int | None = None,
+    metric_names: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, float]:
     scores, labels = _validate_binary_inputs(scores, labels)
+    requested_metrics = list(DEFAULT_BINARY_METRICS if metric_names is None else metric_names)
+    unknown_metrics = sorted(set(requested_metrics) - set(DEFAULT_BINARY_METRICS))
+    if unknown_metrics:
+        raise ValueError(
+            "`metric_names` contains unsupported binary metrics: "
+            + ", ".join(unknown_metrics)
+        )
+
     positive_count = int(labels.sum().item())
     total_count = int(labels.numel())
     random_auprc = (
@@ -158,20 +170,22 @@ def summarize_binary_metrics(
         else float("nan")
     )
 
-    auprc = binary_auprc(scores, labels)
-    auroc = binary_auroc(scores, labels)
-    ep = early_precision(scores, labels, topk=topk)
-    ep_ratio = early_precision_ratio(scores, labels, topk=topk)
+    result: dict[str, float] = {}
+    if "auprc" in requested_metrics or "auprc_ratio" in requested_metrics:
+        auprc = binary_auprc(scores, labels)
+        if "auprc" in requested_metrics:
+            result["auprc"] = auprc
+        if "auprc_ratio" in requested_metrics:
+            if math.isnan(auprc) or math.isnan(random_auprc) or random_auprc <= 0.0:
+                result["auprc_ratio"] = float("nan")
+            else:
+                result["auprc_ratio"] = auprc / random_auprc
 
-    if math.isnan(auprc) or math.isnan(random_auprc) or random_auprc <= 0.0:
-        auprc_ratio = float("nan")
-    else:
-        auprc_ratio = auprc / random_auprc
+    if "auroc" in requested_metrics:
+        result["auroc"] = binary_auroc(scores, labels)
+    if "ep" in requested_metrics:
+        result["ep"] = early_precision(scores, labels, topk=topk)
+    if "ep_ratio" in requested_metrics:
+        result["ep_ratio"] = early_precision_ratio(scores, labels, topk=topk)
 
-    return {
-        "auprc": auprc,
-        "auprc_ratio": auprc_ratio,
-        "auroc": auroc,
-        "ep": ep,
-        "ep_ratio": ep_ratio,
-    }
+    return {name: result[name] for name in requested_metrics}

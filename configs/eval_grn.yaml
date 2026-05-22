@@ -2,7 +2,7 @@ model_source: assets
 
 runtime:
   # Keep evaluation on the same safer attention backend used by pretraining.
-  attention_backend: fa2
+  attention_backend: fa4
   precision:
     model_dtype: fp32
     autocast_dtype: bf16
@@ -54,6 +54,12 @@ data:
 evaluator:
   checkpoint_path: null
   aggregation: dataset
+  # Metrics to compute and write to results/summary_metrics.csv.
+  # Supported: auprc, auprc_ratio, auroc, ep, ep_ratio. Use `all` for all metrics.
+  metrics:
+    - auprc
+    - auroc
+    - ep
   # Use label-supported TFs as candidate GRN sources.
   candidate_source_universe: supported_tfs
   evaluation_pairs:
@@ -62,9 +68,6 @@ evaluator:
 
     - dataset_path: /scratch/kxu248/data/GRN/datasets/hHep.h5ad
       grn_path: /scratch/kxu248/data/GRN/networks/hHep-ChIP-seq.csv
-
-    - dataset_path: /scratch/kxu248/data/GRN/datasets/mDC.h5ad
-      grn_path: /scratch/kxu248/data/GRN/networks/mDC-ChIP-seq.csv
 
     - dataset_path: /scratch/kxu248/data/GRN/datasets/mESC.h5ad
       grn_path: /scratch/kxu248/data/GRN/networks/mESC-ChIP-seq.csv
