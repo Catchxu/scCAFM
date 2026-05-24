@@ -311,6 +311,33 @@ def build_candidate_pair_keys(
     return pair_keys, candidate_mask
 
 
+def all_gene_random_positive_rate(
+    tokens: dict[str, torch.Tensor | None],
+    cache: EvaluationGRNCache,
+) -> float:
+    input_ids = require_tensor(tokens, "input_ids").to(torch.long)
+    padding_mask = tokens.get("padding_mask")
+
+    if input_ids.ndim != 2:
+        raise ValueError(f"`tokens['input_ids']` must have shape (C, G), got {tuple(input_ids.shape)}.")
+    if cache.pair_keys.numel() == 0:
+        return float("nan")
+
+    active_gene_mask = build_active_gene_mask(input_ids=input_ids, padding_mask=padding_mask)
+    pair_keys = (
+        input_ids.unsqueeze(2).to(torch.long) * cache.pair_key_base
+        + input_ids.unsqueeze(1).to(torch.long)
+    )
+    all_gene_mask = active_gene_mask.unsqueeze(2) & active_gene_mask.unsqueeze(1)
+    total_count = int(all_gene_mask.sum().item())
+    if total_count <= 0:
+        return float("nan")
+
+    positives = torch.isin(pair_keys, cache.pair_keys.to(device=input_ids.device)) & all_gene_mask
+    positive_count = int(positives.sum().item())
+    return float(positive_count) / float(total_count) if positive_count > 0 else float("nan")
+
+
 def evaluate_cell_specific_grns(
     pred_grn: torch.Tensor,
     tokens: dict[str, torch.Tensor | None],
@@ -377,10 +404,15 @@ def evaluate_cell_specific_grns_with_cache(
         if scores.numel() == 0:
             metrics = _nan_metric_dict(selected_metrics)
         else:
+            random_positive_rate = all_gene_random_positive_rate(
+                tokens={key: value[cell_idx : cell_idx + 1] if torch.is_tensor(value) else value for key, value in tokens.items()},
+                cache=cache,
+            )
             metrics = summarize_binary_metrics(
                 scores=scores,
                 labels=labels,
                 metric_names=selected_metrics,
+                random_positive_rate=random_positive_rate,
             )
 
         rows.append(
@@ -1022,6 +1054,10 @@ def _build_dense_dataset_summary_rows(
                 scores=score_tensor,
                 labels=label_tensor,
                 metric_names=metric_names,
+                random_positive_rate=all_gene_random_positive_rate(
+                    tokens=dataset_grn.token_template,
+                    cache=spec.cache,
+                ) if dataset_grn is not None else None,
             )
         else:
             metrics = _nan_metric_dict(metric_names)

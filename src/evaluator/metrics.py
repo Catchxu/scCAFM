@@ -135,6 +135,7 @@ def early_precision_ratio(
     scores: torch.Tensor,
     labels: torch.Tensor,
     topk: int | None = None,
+    random_precision: float | None = None,
 ) -> float:
     scores, labels = _validate_binary_inputs(scores, labels)
     pos_total = int(labels.sum().item())
@@ -143,8 +144,8 @@ def early_precision_ratio(
         return float("nan")
 
     ep = early_precision(scores, labels, topk=topk)
-    random_precision = float(pos_total) / float(total)
-    return float("nan") if random_precision <= 0.0 else ep / random_precision
+    baseline = float(pos_total) / float(total) if random_precision is None else float(random_precision)
+    return float("nan") if baseline <= 0.0 else ep / baseline
 
 
 def summarize_binary_metrics(
@@ -152,6 +153,7 @@ def summarize_binary_metrics(
     labels: torch.Tensor,
     topk: int | None = None,
     metric_names: list[str] | tuple[str, ...] | None = None,
+    random_positive_rate: float | None = None,
 ) -> dict[str, float]:
     scores, labels = _validate_binary_inputs(scores, labels)
     requested_metrics = list(DEFAULT_BINARY_METRICS if metric_names is None else metric_names)
@@ -164,7 +166,7 @@ def summarize_binary_metrics(
 
     positive_count = int(labels.sum().item())
     total_count = int(labels.numel())
-    random_auprc = (
+    random_auprc = float(random_positive_rate) if random_positive_rate is not None else (
         float(positive_count) / float(total_count)
         if total_count > 0 and positive_count > 0
         else float("nan")
@@ -186,6 +188,11 @@ def summarize_binary_metrics(
     if "ep" in requested_metrics:
         result["ep"] = early_precision(scores, labels, topk=topk)
     if "ep_ratio" in requested_metrics:
-        result["ep_ratio"] = early_precision_ratio(scores, labels, topk=topk)
+        result["ep_ratio"] = early_precision_ratio(
+            scores,
+            labels,
+            topk=topk,
+            random_precision=random_positive_rate,
+        )
 
     return {name: result[name] for name in requested_metrics}
