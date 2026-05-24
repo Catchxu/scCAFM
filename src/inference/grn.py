@@ -4,6 +4,7 @@ import contextlib
 
 from copy import deepcopy
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Iterable
 
@@ -31,25 +32,33 @@ from ..data import (
     build_evaluation_assets,
 )
 from ..distributed import RuntimeContext, move_batch_to_device
+from ..evaluator.grn import (
+    all_gene_random_positive_rate,
+    build_candidate_pair_keys,
+    build_evaluation_grn_cache,
+)
+from ..evaluator.metrics import summarize_binary_metrics
 from ..trainer.builders import build_model
-from .grn import all_gene_random_positive_rate, build_candidate_pair_keys, build_evaluation_grn_cache
-from .metrics import summarize_binary_metrics
 
 
 __all__ = [
-    "SFMGRNContext",
-    "build_cell_specific_edges",
-    "collect_sfm_forward_results",
-    "evaluate_dataset_level_forward_results",
-    "evaluate_dataset_level_grn",
-    "export_cell_specific_grn_edges",
-    "prepare_cell_specific_grn_context",
-    "prepare_dataset_grn_evaluation_context",
+    "GRNRun",
+    "PreprocessMode",
+    "edges",
+    "evaluate",
+    "predict",
+    "prepare",
+    "to_obsm",
 ]
 
 
+class PreprocessMode(str, Enum):
+    NORMAL_HVG = "normal_hvg"
+    TF_PRESERVED_HVG = "tf_preserved_hvg"
+
+
 @dataclass(slots=True)
-class SFMGRNContext:
+class GRNRun:
     config: dict
     assets: ModelAssets
     sfm_config: dict
@@ -58,7 +67,7 @@ class SFMGRNContext:
     runtime: RuntimeContext
     data_assets: PretrainingAssets
     raw_adata: ad.AnnData
-    processed_adata: ad.AnnData
+    adata: ad.AnnData
     dataset: PreprocessedScDataset
     loader: DataLoader
     model: torch.nn.Module
@@ -66,22 +75,33 @@ class SFMGRNContext:
     forward_token_template: dict[str, torch.Tensor | None] | None = None
 
 
-def prepare_cell_specific_grn_context(
+def prepare(
     *,
     input_h5ad: str | Path,
+    mode: PreprocessMode | str,
     model_source: str | Path = "assets",
     checkpoint_path: str | Path | None = None,
     config_path: str | Path = "configs/eval_grn.yaml",
     batch_size: int = 8,
     max_length: int = 4096,
     n_top_genes: int | None = None,
+    preserve_tf_species: str | None = None,
     gene_key: str | None = None,
     species_key: str | None = "species",
     platform_key: str | None = None,
     tissue_key: str | None = None,
     disease_key: str | None = "disease",
-) -> SFMGRNContext:
-    """Prepare model, data, and normal HVG preprocessing for cell-specific GRN export."""
+) -> GRNRun:
+    """Prepare model, data, and tokenizer state for dense GRN inference."""
+
+    preprocess_mode = PreprocessMode(mode)
+    if preprocess_mode is PreprocessMode.NORMAL_HVG:
+        internal_mode = "normal_hvg"
+    elif preprocess_mode is PreprocessMode.TF_PRESERVED_HVG:
+        internal_mode = "grn_inference_hvg"
+        preserve_tf_species = preserve_tf_species or "mouse"
+    else:
+        raise ValueError(f"Unsupported GRN preprocessing mode: {mode}")
 
     return _build_context(
         input_h5ad=input_h5ad,
@@ -96,42 +116,7 @@ def prepare_cell_specific_grn_context(
         platform_key=platform_key,
         tissue_key=tissue_key,
         disease_key=disease_key,
-        preprocess_mode="normal_hvg",
-    )
-
-
-def prepare_dataset_grn_evaluation_context(
-    *,
-    input_h5ad: str | Path,
-    model_source: str | Path = "assets",
-    checkpoint_path: str | Path | None = None,
-    config_path: str | Path = "configs/eval_grn.yaml",
-    batch_size: int = 8,
-    max_length: int = 4096,
-    n_top_genes: int | None = None,
-    preserve_tf_species: str = "mouse",
-    gene_key: str | None = None,
-    species_key: str | None = "species",
-    platform_key: str | None = None,
-    tissue_key: str | None = None,
-    disease_key: str | None = "disease",
-) -> SFMGRNContext:
-    """Prepare model, data, and TF-preserving HVG preprocessing for GRN evaluation."""
-
-    return _build_context(
-        input_h5ad=input_h5ad,
-        model_source=model_source,
-        checkpoint_path=checkpoint_path,
-        config_path=config_path,
-        batch_size=batch_size,
-        max_length=max_length,
-        n_top_genes=n_top_genes,
-        gene_key=gene_key,
-        species_key=species_key,
-        platform_key=platform_key,
-        tissue_key=tissue_key,
-        disease_key=disease_key,
-        preprocess_mode="grn_inference_hvg",
+        preprocess_mode=internal_mode,
         preserve_tf_species=preserve_tf_species,
     )
 
@@ -268,7 +253,7 @@ def _build_context(
     disease_key: str | None,
     preprocess_mode: str,
     preserve_tf_species: str | None = None,
-) -> SFMGRNContext:
+) -> GRNRun:
     input_path = Path(input_h5ad).expanduser().resolve()
     if not input_path.exists():
         raise FileNotFoundError(f"Input AnnData file does not exist: {input_path}")
@@ -376,7 +361,7 @@ def _build_context(
     model.to(device=device, dtype=inference_dtype)
     model.eval()
 
-    return SFMGRNContext(
+    return GRNRun(
         config=config,
         assets=assets,
         sfm_config=sfm_config,
@@ -385,7 +370,7 @@ def _build_context(
         runtime=runtime,
         data_assets=data_assets,
         raw_adata=raw_adata,
-        processed_adata=processed_adata,
+        adata=processed_adata,
         dataset=dataset,
         loader=loader,
         model=model,
@@ -478,14 +463,14 @@ def _edges_from_batch(
 
 
 def _validate_forward_token_template(
-    context: SFMGRNContext,
+    run: GRNRun,
     batch_tokens: dict[str, torch.Tensor | None],
 ) -> None:
     batch_template = _clone_token_template(batch_tokens)
-    if context.forward_token_template is None:
-        context.forward_token_template = batch_template
+    if run.forward_token_template is None:
+        run.forward_token_template = batch_template
         return
-    if not _same_token_template(context.forward_token_template, batch_template):
+    if not _same_token_template(run.forward_token_template, batch_template):
         raise ValueError(
             "Collecting forward results as a single array requires a fixed gene/token "
             "order within the dataset."
@@ -532,18 +517,18 @@ def _trim_tokens_to_gene_positions(
     return trimmed
 
 
-def collect_sfm_forward_results(context: SFMGRNContext) -> np.ndarray:
-    """Collect dense SFM GRN outputs as an array with shape (cells, genes, genes)."""
+def predict(run: GRNRun) -> np.ndarray:
+    """Collect dense GRN outputs as an array with shape (cells, genes, genes)."""
 
     grn_batches: list[np.ndarray] = []
-    context.forward_token_template = None
+    run.forward_token_template = None
     with torch.no_grad(), _inference_autocast_context(
-        context.device,
-        context.inference_dtype,
+        run.device,
+        run.inference_dtype,
     ):
-        for batch in context.loader:
-            tokens = move_batch_to_device(batch, context.device)
-            model_output = context.model(
+        for batch in run.loader:
+            tokens = move_batch_to_device(batch, run.device)
+            model_output = run.model(
                 tokens,
                 compute_grn={"sfm": True},
                 return_factors=False,
@@ -558,7 +543,7 @@ def collect_sfm_forward_results(context: SFMGRNContext) -> np.ndarray:
             }
             gene_positions = _active_gene_positions(cpu_tokens)
             trimmed_tokens = _trim_tokens_to_gene_positions(cpu_tokens, gene_positions)
-            _validate_forward_token_template(context, trimmed_tokens)
+            _validate_forward_token_template(run, trimmed_tokens)
             trimmed_grn = grn.detach().to(dtype=torch.float32, device="cpu")
             trimmed_grn = trimmed_grn.index_select(dim=1, index=gene_positions)
             trimmed_grn = trimmed_grn.index_select(dim=2, index=gene_positions)
@@ -569,18 +554,34 @@ def collect_sfm_forward_results(context: SFMGRNContext) -> np.ndarray:
     return np.concatenate(grn_batches, axis=0)
 
 
-def _require_forward_token_template(context: SFMGRNContext) -> dict[str, torch.Tensor | None]:
-    if context.forward_token_template is None:
-        raise RuntimeError(
-            "No forward token template is available. Run collect_sfm_forward_results(context) "
-            "before building edges or evaluating collected forward results."
+def to_obsm(run: GRNRun, forward_results: np.ndarray, key: str = "GRN") -> ad.AnnData:
+    """Store flattened per-cell GRNs in AnnData.obsm."""
+
+    if forward_results.ndim != 3:
+        raise ValueError(
+            f"`forward_results` must have shape (cells, genes, genes), got {forward_results.shape}."
         )
-    return context.forward_token_template
+    if int(forward_results.shape[0]) != int(run.adata.n_obs):
+        raise ValueError(
+            "`forward_results` cell count must match `run.adata.n_obs`, got "
+            f"{forward_results.shape[0]} and {run.adata.n_obs}."
+        )
+    run.adata.obsm[key] = forward_results.reshape(forward_results.shape[0], -1)
+    return run.adata
 
 
-def build_cell_specific_edges(
+def _require_forward_token_template(run: GRNRun) -> dict[str, torch.Tensor | None]:
+    if run.forward_token_template is None:
+        raise RuntimeError(
+            "No forward token template is available. Run predict(run) before building "
+            "edges or evaluating collected forward results."
+        )
+    return run.forward_token_template
+
+
+def edges(
+    run: GRNRun,
     forward_results: np.ndarray,
-    context: SFMGRNContext,
     *,
     output_csv: str | Path | None = None,
     top_k_per_cell: int | None = 1000,
@@ -593,10 +594,10 @@ def build_cell_specific_edges(
             f"`forward_results` must have shape (cells, genes, genes), got {forward_results.shape}."
         )
 
-    token_id_to_gene = _token_id_to_gene(context.data_assets.token_dict)
-    token_template = _require_forward_token_template(context)
+    token_id_to_gene = _token_id_to_gene(run.data_assets.token_dict)
+    token_template = _require_forward_token_template(run)
     all_rows: list[dict[str, object]] = []
-    batch_size = int(context.config.get("data", {}).get("batch_size", 1))
+    batch_size = int(run.config.get("data", {}).get("batch_size", 1))
     for cell_start in range(0, int(forward_results.shape[0]), batch_size):
         batch_grn = torch.as_tensor(forward_results[cell_start : cell_start + batch_size])
         repeat_count = int(batch_grn.shape[0])
@@ -634,50 +635,6 @@ def build_cell_specific_edges(
     return edges_df
 
 
-def export_cell_specific_grn_edges(
-    *,
-    input_h5ad: str | Path,
-    output_csv: str | Path,
-    model_source: str | Path = "assets",
-    checkpoint_path: str | Path | None = None,
-    config_path: str | Path = "configs/eval_grn.yaml",
-    batch_size: int = 8,
-    max_length: int = 4096,
-    n_top_genes: int | None = None,
-    top_k_per_cell: int | None = 1000,
-    score_threshold: float | None = None,
-    gene_key: str | None = None,
-    species_key: str | None = "species",
-    platform_key: str | None = None,
-    tissue_key: str | None = None,
-    disease_key: str | None = "disease",
-) -> pd.DataFrame:
-    """Export TF-sourced cell-specific SFM GRN edges after normal HVG preprocessing."""
-
-    context = prepare_cell_specific_grn_context(
-        input_h5ad=input_h5ad,
-        model_source=model_source,
-        checkpoint_path=checkpoint_path,
-        config_path=config_path,
-        batch_size=batch_size,
-        max_length=max_length,
-        n_top_genes=n_top_genes,
-        gene_key=gene_key,
-        species_key=species_key,
-        platform_key=platform_key,
-        tissue_key=tissue_key,
-        disease_key=disease_key,
-    )
-    forward_results = collect_sfm_forward_results(context)
-    return build_cell_specific_edges(
-        forward_results,
-        context,
-        output_csv=output_csv,
-        top_k_per_cell=top_k_per_cell,
-        score_threshold=score_threshold,
-    )
-
-
 def _clone_token_template(tokens: dict[str, torch.Tensor | None]) -> dict[str, torch.Tensor | None]:
     template: dict[str, torch.Tensor | None] = {}
     for key in ("input_ids", "padding_mask", "non_tf_mask"):
@@ -701,9 +658,9 @@ def _same_token_template(
     return True
 
 
-def evaluate_dataset_level_forward_results(
+def evaluate(
+    run: GRNRun,
     forward_results: np.ndarray,
-    context: SFMGRNContext,
     *,
     reference_grn_csv: str | Path,
     output_metrics_csv: str | Path | None = None,
@@ -728,10 +685,10 @@ def evaluate_dataset_level_forward_results(
         raise ValueError("Reference GRN must contain Gene1 and Gene2 columns.")
 
     reference_cache = build_evaluation_grn_cache(
-        token_dict=context.data_assets.token_dict,
+        token_dict=run.data_assets.token_dict,
         evaluation_grn_df=reference_grn_df,
     )
-    token_template = _require_forward_token_template(context)
+    token_template = _require_forward_token_template(run)
     cell_count = int(forward_results.shape[0])
     if cell_count <= 0:
         raise RuntimeError("No GRN scores were produced for dataset-level evaluation.")
@@ -788,55 +745,3 @@ def evaluate_dataset_level_forward_results(
         metrics_df.to_csv(output_path, index=False)
     return metrics_df
 
-
-def evaluate_dataset_level_grn(
-    *,
-    input_h5ad: str | Path,
-    reference_grn_csv: str | Path,
-    output_metrics_csv: str | Path,
-    model_source: str | Path = "assets",
-    checkpoint_path: str | Path | None = None,
-    config_path: str | Path = "configs/eval_grn.yaml",
-    batch_size: int = 8,
-    max_length: int = 4096,
-    n_top_genes: int | None = None,
-    preserve_tf_species: str = "mouse",
-    candidate_source_universe: str = "supported_tfs",
-    metric_names: Iterable[str] = ("auprc", "auroc", "ep"),
-    dataset_name: str | None = None,
-    reference_grn_name: str | None = None,
-    gene_key: str | None = None,
-    species_key: str | None = "species",
-    platform_key: str | None = None,
-    tissue_key: str | None = None,
-    disease_key: str | None = "disease",
-) -> pd.DataFrame:
-    """Evaluate the mean dataset-level SFM GRN against a reference GRN."""
-
-    context = prepare_dataset_grn_evaluation_context(
-        input_h5ad=input_h5ad,
-        model_source=model_source,
-        checkpoint_path=checkpoint_path,
-        config_path=config_path,
-        batch_size=batch_size,
-        max_length=max_length,
-        n_top_genes=n_top_genes,
-        gene_key=gene_key,
-        species_key=species_key,
-        platform_key=platform_key,
-        tissue_key=tissue_key,
-        disease_key=disease_key,
-        preserve_tf_species=preserve_tf_species,
-    )
-    forward_results = collect_sfm_forward_results(context)
-    return evaluate_dataset_level_forward_results(
-        forward_results,
-        context,
-        reference_grn_csv=reference_grn_csv,
-        output_metrics_csv=output_metrics_csv,
-        candidate_source_universe=candidate_source_universe,
-        metric_names=metric_names,
-        dataset_name=dataset_name,
-        dataset_path=input_h5ad,
-        reference_grn_name=reference_grn_name,
-    )
