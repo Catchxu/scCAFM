@@ -16,6 +16,8 @@ from safetensors.torch import load_file, save_file
 
 SFM_CONFIG_NAME = "sfm_config.json"
 SFM_MODEL_NAME = "sfm_model.safetensors"
+EFM_CONFIG_NAME = "efm_config.json"
+EFM_MODEL_NAME = "efm_model.safetensors"
 VOCAB_NAME = "vocab.json"
 VOCAB_TENSORS_NAME = "vocab.safetensors"
 MODELS_DIR_NAME = "models"

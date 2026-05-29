@@ -158,7 +158,7 @@ class ModelWrapper(nn.Module):
                 )
             return FoundationModuleOutput(
                 raw=output,
-                grn=grn,
+                grn=grn if compute_grn else None,
                 factors=factors,
                 gene_order=gene_order,
             )
@@ -188,7 +188,12 @@ class ModelWrapper(nn.Module):
                     "Expected `gene_order` to be `GeneOrderState` or None, "
                     f"got {type(gene_order).__name__}."
                 )
-            return FoundationModuleOutput(raw=output, grn=grn, factors=None, gene_order=gene_order)
+            return FoundationModuleOutput(
+                raw=output,
+                grn=grn if compute_grn else None,
+                factors=None,
+                gene_order=gene_order,
+            )
 
         expected_grn = output if compute_grn else None
         return FoundationModuleOutput(raw=output, grn=expected_grn, factors=None)
