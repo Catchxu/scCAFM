@@ -8,6 +8,7 @@ import torch.nn as nn
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
+from .gene_ordering import GeneOrderState
 from .sfm import FactorState
 
 
@@ -20,11 +21,13 @@ class FoundationModuleOutput:
     - `raw`: raw module output before wrapper normalization
     - `grn`: optional per-cell GRN tensor
     - `factors`: optional latent factor assignments
+    - `gene_order`: optional per-cell causal priority ordering over gene-token positions
     """
 
     raw: Any
     grn: Optional[torch.Tensor]
     factors: Optional[FactorState]
+    gene_order: Optional[GeneOrderState] = None
 
 
 @dataclass
@@ -52,7 +55,8 @@ class ModelWrapper(nn.Module):
       `head_to_foundation`
 
     Current expected foundation-module behavior:
-    - forward(tokens, return_factors=..., compute_grn=...) -> `grn` or `(grn, factors)`
+    - forward(tokens, return_factors=..., compute_grn=..., compute_order=...)
+      -> `grn`, `(grn, factors)`, `(grn, gene_order)`, or `(grn, factors, gene_order)`
 
     Current expected head behavior:
     - heads may accept any subset of:
@@ -134,7 +138,31 @@ class ModelWrapper(nn.Module):
         *,
         return_factors: bool,
         compute_grn: bool,
+        compute_order: bool,
     ) -> FoundationModuleOutput:
+        if return_factors and compute_order:
+            if not (isinstance(output, tuple) and len(output) == 3):
+                raise TypeError(
+                    "Expected foundation module to return `(grn, factors, gene_order)` when "
+                    "`return_factors=True` and `compute_order=True`."
+                )
+            grn, factors, gene_order = output
+            if factors is not None and not isinstance(factors, FactorState):
+                raise TypeError(
+                    f"Expected `factors` to be `FactorState` or None, got {type(factors).__name__}."
+                )
+            if gene_order is not None and not isinstance(gene_order, GeneOrderState):
+                raise TypeError(
+                    "Expected `gene_order` to be `GeneOrderState` or None, "
+                    f"got {type(gene_order).__name__}."
+                )
+            return FoundationModuleOutput(
+                raw=output,
+                grn=grn,
+                factors=factors,
+                gene_order=gene_order,
+            )
+
         if return_factors:
             if not (isinstance(output, tuple) and len(output) == 2):
                 raise TypeError(
@@ -147,6 +175,20 @@ class ModelWrapper(nn.Module):
                     f"Expected `factors` to be `FactorState` or None, got {type(factors).__name__}."
                 )
             return FoundationModuleOutput(raw=output, grn=grn, factors=factors)
+
+        if compute_order:
+            if not (isinstance(output, tuple) and len(output) == 2):
+                raise TypeError(
+                    "Expected foundation module to return `(grn, gene_order)` when "
+                    "`return_factors=False` and `compute_order=True`."
+                )
+            grn, gene_order = output
+            if gene_order is not None and not isinstance(gene_order, GeneOrderState):
+                raise TypeError(
+                    "Expected `gene_order` to be `GeneOrderState` or None, "
+                    f"got {type(gene_order).__name__}."
+                )
+            return FoundationModuleOutput(raw=output, grn=grn, factors=None, gene_order=gene_order)
 
         expected_grn = output if compute_grn else None
         return FoundationModuleOutput(raw=output, grn=expected_grn, factors=None)
@@ -163,6 +205,7 @@ class ModelWrapper(nn.Module):
             "tokens": tokens,
             "factors": foundation_output.factors,
             "grn": foundation_output.grn,
+            "gene_order": foundation_output.gene_order,
             "foundation_output": foundation_output,
             "foundation_name": foundation_name,
             "module_output": foundation_output,
@@ -197,6 +240,7 @@ class ModelWrapper(nn.Module):
         head_names: Optional[list[str]] = None,
         compute_grn: bool | Mapping[str, bool] = False,
         return_factors: bool | Mapping[str, bool] = True,
+        compute_order: bool | Mapping[str, bool] = False,
     ) -> ModelWrapperOutput:
         selected_foundation_names = self._normalize_name_subset(
             selected=foundation_names,
@@ -219,6 +263,11 @@ class ModelWrapper(nn.Module):
             names=selected_foundation_names,
             option_name="return_factors",
         )
+        foundation_compute_order = self._normalize_bool_selector(
+            value=compute_order,
+            names=selected_foundation_names,
+            option_name="compute_order",
+        )
 
         for head_name in selected_head_names:
             foundation_name = self.head_to_foundation[head_name]
@@ -226,6 +275,7 @@ class ModelWrapper(nn.Module):
                 selected_foundation_names.append(foundation_name)
                 foundation_compute_grn[foundation_name] = False
                 foundation_return_factors[foundation_name] = True
+                foundation_compute_order[foundation_name] = False
             else:
                 foundation_return_factors[foundation_name] = True
 
@@ -236,11 +286,13 @@ class ModelWrapper(nn.Module):
                 tokens,
                 return_factors=foundation_return_factors[foundation_name],
                 compute_grn=foundation_compute_grn[foundation_name],
+                compute_order=foundation_compute_order[foundation_name],
             )
             foundations[foundation_name] = self._coerce_foundation_output(
                 output,
                 return_factors=foundation_return_factors[foundation_name],
                 compute_grn=foundation_compute_grn[foundation_name],
+                compute_order=foundation_compute_order[foundation_name],
             )
 
         heads: dict[str, Any] = {}

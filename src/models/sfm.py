@@ -12,6 +12,7 @@ from typing import Optional
 from ..assets import load_vocab_json
 from .backbone import TransformerBackbone
 from .embedding import ScEmbedding
+from .gene_ordering import GeneOrderState, order_genes_from_grn
 from .initialization import init_module_xavier
 from .router import GeneRouter
 
@@ -155,11 +156,18 @@ class SFM(nn.Module):
         tokens: dict[str, torch.Tensor | None],
         return_factors: bool = True,
         compute_grn: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor | None, FactorState]:
-        if not compute_grn and not return_factors:
+        compute_order: bool = False,
+    ) -> (
+        torch.Tensor
+        | None
+        | tuple[torch.Tensor | None, FactorState]
+        | tuple[torch.Tensor | None, GeneOrderState]
+        | tuple[torch.Tensor | None, FactorState, GeneOrderState]
+    ):
+        if not compute_grn and not return_factors and not compute_order:
             warnings.warn(
                 "`SFM.forward()` was called with both `compute_grn=False` and "
-                "`return_factors=False`, so it will return `None`.",
+                "`return_factors=False` and `compute_order=False`, so it will return `None`.",
                 stacklevel=2,
             )
 
@@ -217,15 +225,24 @@ class SFM(nn.Module):
                 f"{tuple(u.shape)} and {tuple(v.shape)}."
             )
 
-        if compute_grn:
-            grn = torch.einsum("cim,cjm->cij", u, v)
-        else:
-            grn = None
+        internal_grn = torch.einsum("cim,cjm->cij", u, v) if compute_grn or compute_order else None
+        gene_order = (
+            order_genes_from_grn(
+                internal_grn.detach(),
+                padding_mask=padding_mask,
+            )
+            if compute_order
+            else None
+        )
+        grn = internal_grn if compute_grn else None
 
+        if return_factors and compute_order:
+            return grn, FactorState(u=u, v=v), gene_order
         if return_factors:
             return grn, FactorState(u=u, v=v)
-        else:
-            return grn
+        if compute_order:
+            return grn, gene_order
+        return grn
 
 
 
