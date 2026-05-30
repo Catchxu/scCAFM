@@ -5,7 +5,7 @@ from pybiomart import Dataset
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-TOKEN_DICT_PATH = ROOT_DIR / "assets" / "models" / "vocab.json"
+TOKEN_DICT_PATH = ROOT_DIR / "assets" / "tokenizer" / "vocab.json"
 OUTPUT_PATH = ROOT_DIR / "checkpoints" / "gene_go_terms.csv"
 ENSEMBL_HOST = "http://www.ensembl.org"
 

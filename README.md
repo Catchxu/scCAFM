@@ -35,6 +35,18 @@ cd scCAFM
 hf download kaichenxu/scCAFM --local-dir assets
 ```
 
+The downloaded release separates shared resources from module-specific weights:
+```text
+assets/
+├── release.json
+├── resources/
+├── tokenizer/
+└── models/
+    ├── sfm/
+    └── efm/
+```
+Older flat snapshots remain readable for compatibility, but new checkpoints and Hugging Face releases use this structured layout.
+
 If you encounter dependency conflicts while using scCAFM, please report them at [Issues](https://github.com/Catchxu/scCAFM/issues). For this repository's current Python 3.12 environment, we also provide an exact pinned extra in `pyproject.toml`:
 ```bash
 pip install .[py312]
@@ -59,6 +71,6 @@ These tests directly validate the current FA2/FA4 implementations used by the co
 
 
 ## Data Download
-The data pipeline supports both `Homo sapiens` and `Mus musculus`, writes species-specific folders, adds a `species` column to each downloaded partition, and can keep only genes found in `assets/models/vocab.json`. The supported workflow is now shell-based, including a small demo download before the full SLURM run.
+The data pipeline supports both `Homo sapiens` and `Mus musculus`, writes species-specific folders, adds a `species` column to each downloaded partition, and can keep only genes found in `assets/tokenizer/vocab.json`. The supported workflow is now shell-based, including a small demo download before the full SLURM run.
 
 For complete data pipeline details, see [Data Download Guide](data/README.md).

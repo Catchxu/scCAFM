@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=efm-pretrain
+#SBATCH --job-name=pretrain
 #SBATCH --account=general
 #SBATCH --partition=rp6b-8-gm768-c192-m2048
 #SBATCH --nodes=1
@@ -7,7 +7,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --gpus=8
 #SBATCH --mem=512G
-#SBATCH --time=60:00:00
+#SBATCH --time=120:00:00
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=kxu248@emory.edu
 

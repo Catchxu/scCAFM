@@ -20,11 +20,17 @@ EFM_CONFIG_NAME = "efm_config.json"
 EFM_MODEL_NAME = "efm_model.safetensors"
 VOCAB_NAME = "vocab.json"
 VOCAB_TENSORS_NAME = "vocab.safetensors"
+RELEASE_MANIFEST_NAME = "release.json"
+RESOURCES_DIR_NAME = "resources"
+TOKENIZER_DIR_NAME = "tokenizer"
 MODELS_DIR_NAME = "models"
+SFM_DIR_NAME = "sfm"
+EFM_DIR_NAME = "efm"
 COND_DICT_NAME = "cond_dict.json"
 HUMAN_TFS_NAME = "human_tfs.csv"
 MOUSE_TFS_NAME = "mouse_tfs.csv"
 OMNIPATH_NAME = "OmniPath.csv"
+HOMOLOGOUS_NAME = "homologous.csv"
 
 
 @dataclass(slots=True)
@@ -32,14 +38,22 @@ class ModelAssets:
     model_source: str
     local_dir: Path
     model_dir: Path
+    resources_dir: Path
+    tokenizer_dir: Path
+    sfm_dir: Path
+    efm_dir: Path
+    release_manifest: Path
     sfm_config: Path
     sfm_model: Path
+    efm_config: Path
+    efm_model: Path
     vocab: Path
     vocab_tensors: Path
     cond_dict: Path
     human_tfs: Path
     mouse_tfs: Path
     omnipath: Path
+    homologous: Path
 
 
 def _require_directory(path: Path, source: str) -> Path:
@@ -62,24 +76,120 @@ def _snapshot_download_model_repo(repo_id: str) -> Path:
     return Path(snapshot_path).resolve()
 
 
-def _resolve_model_file(local_dir: Path, filename: str) -> Path:
-    model_subdir_path = local_dir / MODELS_DIR_NAME / filename
-    if model_subdir_path.exists():
-        return model_subdir_path
-    return local_dir / filename
+def _first_existing_path(*candidates: Path) -> Path:
+    if not candidates:
+        raise ValueError("At least one candidate path is required.")
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
 
 
-def _resolve_model_dir(local_dir: Path) -> Path:
-    model_subdir = local_dir / MODELS_DIR_NAME
-    if model_subdir.exists() and model_subdir.is_dir():
-        return model_subdir
-    return local_dir
+def _resolve_release_assets(local_dir: Path, model_source: str) -> ModelAssets:
+    resources_dir = local_dir / RESOURCES_DIR_NAME
+    tokenizer_dir = local_dir / TOKENIZER_DIR_NAME
+    model_dir = local_dir / MODELS_DIR_NAME
+    sfm_dir = model_dir / SFM_DIR_NAME
+    efm_dir = model_dir / EFM_DIR_NAME
+    legacy_model_dir = local_dir / MODELS_DIR_NAME
+
+    return ModelAssets(
+        model_source=model_source,
+        local_dir=local_dir,
+        model_dir=model_dir,
+        resources_dir=resources_dir,
+        tokenizer_dir=tokenizer_dir,
+        sfm_dir=sfm_dir,
+        efm_dir=efm_dir,
+        release_manifest=local_dir / RELEASE_MANIFEST_NAME,
+        sfm_config=_first_existing_path(
+            sfm_dir / SFM_CONFIG_NAME,
+            legacy_model_dir / SFM_CONFIG_NAME,
+            local_dir / SFM_CONFIG_NAME,
+        ),
+        sfm_model=_first_existing_path(
+            sfm_dir / SFM_MODEL_NAME,
+            legacy_model_dir / SFM_MODEL_NAME,
+            local_dir / SFM_MODEL_NAME,
+        ),
+        efm_config=_first_existing_path(
+            efm_dir / EFM_CONFIG_NAME,
+            legacy_model_dir / EFM_CONFIG_NAME,
+            local_dir / EFM_CONFIG_NAME,
+        ),
+        efm_model=_first_existing_path(
+            efm_dir / EFM_MODEL_NAME,
+            legacy_model_dir / EFM_MODEL_NAME,
+            local_dir / EFM_MODEL_NAME,
+        ),
+        vocab=_first_existing_path(
+            tokenizer_dir / VOCAB_NAME,
+            legacy_model_dir / VOCAB_NAME,
+            local_dir / VOCAB_NAME,
+        ),
+        vocab_tensors=_first_existing_path(
+            tokenizer_dir / VOCAB_TENSORS_NAME,
+            legacy_model_dir / VOCAB_TENSORS_NAME,
+            local_dir / VOCAB_TENSORS_NAME,
+        ),
+        cond_dict=_first_existing_path(
+            tokenizer_dir / COND_DICT_NAME,
+            legacy_model_dir / COND_DICT_NAME,
+            local_dir / COND_DICT_NAME,
+        ),
+        human_tfs=_first_existing_path(
+            resources_dir / HUMAN_TFS_NAME,
+            local_dir / HUMAN_TFS_NAME,
+        ),
+        mouse_tfs=_first_existing_path(
+            resources_dir / MOUSE_TFS_NAME,
+            local_dir / MOUSE_TFS_NAME,
+        ),
+        omnipath=_first_existing_path(
+            resources_dir / OMNIPATH_NAME,
+            local_dir / OMNIPATH_NAME,
+        ),
+        homologous=_first_existing_path(
+            resources_dir / HOMOLOGOUS_NAME,
+            local_dir / HOMOLOGOUS_NAME,
+        ),
+    )
+
+
+def _structured_release_assets(local_dir: Path, model_source: str) -> ModelAssets:
+    resources_dir = local_dir / RESOURCES_DIR_NAME
+    tokenizer_dir = local_dir / TOKENIZER_DIR_NAME
+    model_dir = local_dir / MODELS_DIR_NAME
+    sfm_dir = model_dir / SFM_DIR_NAME
+    efm_dir = model_dir / EFM_DIR_NAME
+    return ModelAssets(
+        model_source=model_source,
+        local_dir=local_dir,
+        model_dir=model_dir,
+        resources_dir=resources_dir,
+        tokenizer_dir=tokenizer_dir,
+        sfm_dir=sfm_dir,
+        efm_dir=efm_dir,
+        release_manifest=local_dir / RELEASE_MANIFEST_NAME,
+        sfm_config=sfm_dir / SFM_CONFIG_NAME,
+        sfm_model=sfm_dir / SFM_MODEL_NAME,
+        efm_config=efm_dir / EFM_CONFIG_NAME,
+        efm_model=efm_dir / EFM_MODEL_NAME,
+        vocab=tokenizer_dir / VOCAB_NAME,
+        vocab_tensors=tokenizer_dir / VOCAB_TENSORS_NAME,
+        cond_dict=tokenizer_dir / COND_DICT_NAME,
+        human_tfs=resources_dir / HUMAN_TFS_NAME,
+        mouse_tfs=resources_dir / MOUSE_TFS_NAME,
+        omnipath=resources_dir / OMNIPATH_NAME,
+        homologous=resources_dir / HOMOLOGOUS_NAME,
+    )
 
 
 def resolve_model_assets(
     model_source: str | Path,
     *,
     require_model_weights: bool = False,
+    require_efm_weights: bool = False,
     require_cond_dict: bool = True,
 ) -> ModelAssets:
     model_source_str = str(model_source)
@@ -89,19 +199,7 @@ def resolve_model_assets(
     else:
         local_dir = _snapshot_download_model_repo(model_source_str)
 
-    assets = ModelAssets(
-        model_source=model_source_str,
-        local_dir=local_dir,
-        model_dir=_resolve_model_dir(local_dir),
-        sfm_config=_resolve_model_file(local_dir, SFM_CONFIG_NAME),
-        sfm_model=_resolve_model_file(local_dir, SFM_MODEL_NAME),
-        vocab=_resolve_model_file(local_dir, VOCAB_NAME),
-        vocab_tensors=_resolve_model_file(local_dir, VOCAB_TENSORS_NAME),
-        cond_dict=_resolve_model_file(local_dir, COND_DICT_NAME),
-        human_tfs=local_dir / HUMAN_TFS_NAME,
-        mouse_tfs=local_dir / MOUSE_TFS_NAME,
-        omnipath=local_dir / OMNIPATH_NAME,
-    )
+    assets = _resolve_release_assets(local_dir, model_source_str)
 
     required_paths = {
         "sfm_config": assets.sfm_config,
@@ -114,6 +212,9 @@ def resolve_model_assets(
         required_paths["cond_dict"] = assets.cond_dict
     if require_model_weights:
         required_paths["sfm_model"] = assets.sfm_model
+    if require_efm_weights:
+        required_paths["efm_config"] = assets.efm_config
+        required_paths["efm_model"] = assets.efm_model
 
     missing = [name for name, path in required_paths.items() if not path.exists()]
     if missing:
@@ -139,60 +240,111 @@ def _safe_unlink(path: Path) -> None:
         pass
 
 
+def _copy_file_if_present(source: Path, destination: Path, *, overwrite: bool) -> None:
+    if source.exists():
+        _copy_file_if_needed(source, destination, overwrite=overwrite)
+
+
+def write_release_manifest(assets: ModelAssets) -> None:
+    model_entries: dict[str, Any] = {
+        "sfm": {
+            "config": f"{MODELS_DIR_NAME}/{SFM_DIR_NAME}/{SFM_CONFIG_NAME}",
+            "weights": f"{MODELS_DIR_NAME}/{SFM_DIR_NAME}/{SFM_MODEL_NAME}",
+        }
+    }
+    if assets.efm_config.exists() or assets.efm_model.exists():
+        model_entries["efm"] = {
+            "config": f"{MODELS_DIR_NAME}/{EFM_DIR_NAME}/{EFM_CONFIG_NAME}",
+            "weights": f"{MODELS_DIR_NAME}/{EFM_DIR_NAME}/{EFM_MODEL_NAME}",
+        }
+
+    payload = {
+        "schema_version": 1,
+        "resources": {
+            "human_tfs": f"{RESOURCES_DIR_NAME}/{HUMAN_TFS_NAME}",
+            "mouse_tfs": f"{RESOURCES_DIR_NAME}/{MOUSE_TFS_NAME}",
+            "omnipath": f"{RESOURCES_DIR_NAME}/{OMNIPATH_NAME}",
+            "homologous": f"{RESOURCES_DIR_NAME}/{HOMOLOGOUS_NAME}",
+        },
+        "tokenizer": {
+            "vocab": f"{TOKENIZER_DIR_NAME}/{VOCAB_NAME}",
+            "vocab_tensors": f"{TOKENIZER_DIR_NAME}/{VOCAB_TENSORS_NAME}",
+            "condition_vocab": f"{TOKENIZER_DIR_NAME}/{COND_DICT_NAME}",
+        },
+        "models": model_entries,
+    }
+    save_json(assets.release_manifest, payload)
+
+
 def materialize_model_package(
     source_assets: ModelAssets,
     target_dir: str | Path,
     *,
     include_model_weights: bool = True,
+    include_efm_weights: bool = False,
     include_cond_dict: bool = True,
     overwrite: bool = False,
 ) -> ModelAssets:
     target_path = Path(target_dir).expanduser().resolve()
     target_path.mkdir(parents=True, exist_ok=True)
+    target_assets = _structured_release_assets(target_path, str(target_path))
 
-    _copy_file_if_needed(source_assets.sfm_config, target_path / SFM_CONFIG_NAME, overwrite=overwrite)
-    _copy_file_if_needed(source_assets.vocab, target_path / VOCAB_NAME, overwrite=overwrite)
+    _copy_file_if_needed(source_assets.sfm_config, target_assets.sfm_config, overwrite=overwrite)
+    _copy_file_if_needed(source_assets.vocab, target_assets.vocab, overwrite=overwrite)
     _copy_file_if_needed(
         source_assets.vocab_tensors,
-        target_path / VOCAB_TENSORS_NAME,
+        target_assets.vocab_tensors,
         overwrite=overwrite,
     )
+    _copy_file_if_present(source_assets.human_tfs, target_assets.human_tfs, overwrite=overwrite)
+    _copy_file_if_present(source_assets.mouse_tfs, target_assets.mouse_tfs, overwrite=overwrite)
+    _copy_file_if_present(source_assets.omnipath, target_assets.omnipath, overwrite=overwrite)
+    _copy_file_if_present(source_assets.homologous, target_assets.homologous, overwrite=overwrite)
 
-    target_model_path = target_path / SFM_MODEL_NAME
     if include_model_weights:
         if source_assets.sfm_model.exists():
             _copy_file_if_needed(
                 source_assets.sfm_model,
-                target_model_path,
+                target_assets.sfm_model,
                 overwrite=overwrite,
             )
-        elif overwrite and target_model_path.exists():
-            _safe_unlink(target_model_path)
+        elif overwrite and target_assets.sfm_model.exists():
+            _safe_unlink(target_assets.sfm_model)
 
-    target_cond_path = target_path / COND_DICT_NAME
     if include_cond_dict:
         if source_assets.cond_dict.exists():
             _copy_file_if_needed(
                 source_assets.cond_dict,
-                target_cond_path,
+                target_assets.cond_dict,
                 overwrite=overwrite,
             )
-    elif overwrite and target_cond_path.exists():
-        _safe_unlink(target_cond_path)
+    elif overwrite and target_assets.cond_dict.exists():
+        _safe_unlink(target_assets.cond_dict)
 
-    return ModelAssets(
-        model_source=str(target_path),
-        local_dir=target_path,
-        model_dir=target_path,
-        sfm_config=target_path / SFM_CONFIG_NAME,
-        sfm_model=target_model_path,
-        vocab=target_path / VOCAB_NAME,
-        vocab_tensors=target_path / VOCAB_TENSORS_NAME,
-        cond_dict=target_cond_path,
-        human_tfs=source_assets.human_tfs,
-        mouse_tfs=source_assets.mouse_tfs,
-        omnipath=source_assets.omnipath,
+    if include_efm_weights:
+        if source_assets.efm_config.exists():
+            _copy_file_if_needed(source_assets.efm_config, target_assets.efm_config, overwrite=overwrite)
+        if source_assets.efm_model.exists():
+            _copy_file_if_needed(source_assets.efm_model, target_assets.efm_model, overwrite=overwrite)
+    elif overwrite:
+        _safe_unlink(target_assets.efm_config)
+        _safe_unlink(target_assets.efm_model)
+
+    write_release_manifest(target_assets)
+    return target_assets
+
+
+def resolve_sfm_checkpoint_path(path: str | Path) -> Path:
+    candidate = Path(path).expanduser().resolve()
+    if candidate.is_file():
+        return candidate
+
+    resolved = _first_existing_path(
+        candidate / MODELS_DIR_NAME / SFM_DIR_NAME / SFM_MODEL_NAME,
+        candidate / SFM_MODEL_NAME,
+        candidate / MODELS_DIR_NAME / SFM_MODEL_NAME,
     )
+    return resolved
 
 
 def load_json(path: str | Path) -> Any:

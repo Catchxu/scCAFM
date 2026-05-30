@@ -3,20 +3,20 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CKPT_DIR="${CKPT_DIR:-${ROOT_DIR}/checkpoints/models}"
+CKPT_DIR="${CKPT_DIR:-${ROOT_DIR}/checkpoints/package}"
 ASSETS_DIR="${ASSETS_DIR:-${ROOT_DIR}/assets}"
-ASSETS_MODELS_DIR="${ASSETS_MODELS_DIR:-${ASSETS_DIR}/models}"
 PUSH_HF="${PUSH_HF:-1}"
 HF_REPO_ID="${HF_REPO_ID:-kaichenxu/scCAFM}"
 HF_REPO_TYPE="${HF_REPO_TYPE:-model}"
 HF_EXCLUDE="${HF_EXCLUDE:-.cache/*}"
+HF_DELETE_LEGACY="${HF_DELETE_LEGACY:-1}"
 HF_COMMIT_MESSAGE="${HF_COMMIT_MESSAGE:-Upload scCAFM model assets}"
 
 usage() {
   cat <<EOF
 Usage: bash scripts/push_ckpt.sh [--push-hf 0|1] [--hf-repo-id REPO_ID] [--commit-message MESSAGE]
 
-Promote checkpoint model files into assets/models and upload assets to Hugging Face.
+Promote a structured checkpoint package into assets and upload assets to Hugging Face.
 
 Options:
   --push-hf 0|1             Upload assets to Hugging Face after promotion.
@@ -25,7 +25,7 @@ Options:
   -h, --help                Show this help message.
 
 Environment overrides:
-  CKPT_DIR, ASSETS_DIR, ASSETS_MODELS_DIR, HF_REPO_TYPE, HF_EXCLUDE
+  CKPT_DIR, ASSETS_DIR, HF_REPO_TYPE, HF_EXCLUDE, HF_DELETE_LEGACY
 EOF
 }
 
@@ -76,11 +76,41 @@ while [[ $# -gt 0 ]]; do
 done
 
 required_files=(
+  "release.json"
+  "resources/human_tfs.csv"
+  "resources/mouse_tfs.csv"
+  "resources/OmniPath.csv"
+  "resources/homologous.csv"
+  "tokenizer/cond_dict.json"
+  "tokenizer/vocab.json"
+  "tokenizer/vocab.safetensors"
+  "models/sfm/sfm_config.json"
+  "models/sfm/sfm_model.safetensors"
+)
+optional_efm_files=(
+  "models/efm/efm_config.json"
+  "models/efm/efm_model.safetensors"
+)
+legacy_hf_files=(
+  "human_tfs.csv"
+  "mouse_tfs.csv"
+  "OmniPath.csv"
+  "homologous.csv"
+  "cond_dict.csv"
+  "cond_dict.json"
   "sfm_config.json"
   "sfm_model.safetensors"
-  "cond_dict.json"
+  "efm_config.json"
+  "efm_model.safetensors"
   "vocab.json"
   "vocab.safetensors"
+  "models/cond_dict.json"
+  "models/sfm_config.json"
+  "models/sfm_model.safetensors"
+  "models/efm_config.json"
+  "models/efm_model.safetensors"
+  "models/vocab.json"
+  "models/vocab.safetensors"
 )
 
 if [[ ! -d "${CKPT_DIR}" ]]; then
@@ -95,13 +125,30 @@ for file_name in "${required_files[@]}"; do
   fi
 done
 
-mkdir -p "${ASSETS_MODELS_DIR}"
-
 for file_name in "${required_files[@]}"; do
-  cp -f "${CKPT_DIR}/${file_name}" "${ASSETS_MODELS_DIR}/${file_name}"
+  mkdir -p "$(dirname "${ASSETS_DIR}/${file_name}")"
+  cp -f "${CKPT_DIR}/${file_name}" "${ASSETS_DIR}/${file_name}"
 done
 
-echo "Promoted checkpoint package from ${CKPT_DIR} to ${ASSETS_MODELS_DIR}"
+efm_file_count=0
+for file_name in "${optional_efm_files[@]}"; do
+  if [[ -f "${CKPT_DIR}/${file_name}" ]]; then
+    efm_file_count=$((efm_file_count + 1))
+  fi
+done
+if [[ "${efm_file_count}" -eq "${#optional_efm_files[@]}" ]]; then
+  for file_name in "${optional_efm_files[@]}"; do
+    mkdir -p "$(dirname "${ASSETS_DIR}/${file_name}")"
+    cp -f "${CKPT_DIR}/${file_name}" "${ASSETS_DIR}/${file_name}"
+  done
+elif [[ "${efm_file_count}" -eq 0 ]]; then
+  rm -rf "${ASSETS_DIR}/models/efm"
+else
+  echo "Incomplete EFM checkpoint package under ${CKPT_DIR}/models/efm" >&2
+  exit 1
+fi
+
+echo "Promoted structured checkpoint package from ${CKPT_DIR} to ${ASSETS_DIR}"
 
 if [[ "${PUSH_HF}" == "1" ]]; then
   if ! command -v hf >/dev/null 2>&1; then
@@ -110,8 +157,18 @@ if [[ "${PUSH_HF}" == "1" ]]; then
   fi
 
   echo "Uploading ${ASSETS_DIR} to Hugging Face repo ${HF_REPO_ID}"
-  hf upload "${HF_REPO_ID}" "${ASSETS_DIR}" \
-    --type "${HF_REPO_TYPE}" \
-    --exclude "${HF_EXCLUDE}" \
+  hf_args=(
+    upload
+    "${HF_REPO_ID}"
+    "${ASSETS_DIR}"
+    --type "${HF_REPO_TYPE}"
+    --exclude "${HF_EXCLUDE}"
     --commit-message "${HF_COMMIT_MESSAGE}"
+  )
+  if [[ "${HF_DELETE_LEGACY}" == "1" ]]; then
+    for file_name in "${legacy_hf_files[@]}"; do
+      hf_args+=(--delete "${file_name}")
+    done
+  fi
+  hf "${hf_args[@]}"
 fi

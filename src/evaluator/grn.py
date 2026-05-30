@@ -21,6 +21,7 @@ from ..assets import (
     load_model_state_dict,
     load_sfm_config,
     resolve_model_assets,
+    resolve_sfm_checkpoint_path,
 )
 from .metrics import DEFAULT_BINARY_METRICS, summarize_binary_metrics
 from ..config import load_yaml_config
@@ -98,7 +99,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Optional model checkpoint directory or weight file. Directories are "
-            f"resolved as <dir>/{SFM_MODEL_NAME}."
+            f"resolved as <dir>/models/sfm/{SFM_MODEL_NAME}."
         ),
     )
     return parser.parse_args()
@@ -436,7 +437,7 @@ def prepare_evaluation_paths(
     logs = root / "logs"
     results = root / "results"
     checkpoints = root / "checkpoints"
-    model_package_dir = checkpoints / "models"
+    model_package_dir = checkpoints / "package"
 
     if runtime.is_main:
         logs.mkdir(parents=True, exist_ok=True)
@@ -655,7 +656,7 @@ def _resolve_checkpoint_path(
         resolved = default_model_path.expanduser().resolve()
     else:
         candidate = Path(str(checkpoint_path)).expanduser().resolve()
-        resolved = candidate / SFM_MODEL_NAME if candidate.is_dir() else candidate
+        resolved = resolve_sfm_checkpoint_path(candidate)
 
     if not resolved.exists():
         raise FileNotFoundError(f"Model checkpoint not found: {resolved}")

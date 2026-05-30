@@ -5,7 +5,6 @@ import contextlib
 import copy
 import gc
 import os
-import shutil
 import warnings
 
 from dataclasses import replace
@@ -21,8 +20,13 @@ from tqdm import tqdm
 
 from ..assets import (
     EFM_CONFIG_NAME,
+    EFM_DIR_NAME,
     EFM_MODEL_NAME,
+    MODELS_DIR_NAME,
     ModelAssets,
+    SFM_CONFIG_NAME,
+    SFM_DIR_NAME,
+    SFM_MODEL_NAME,
     apply_model_assets_to_runtime_config,
     load_model_state_dict,
     load_sfm_config,
@@ -30,6 +34,7 @@ from ..assets import (
     resolve_model_assets,
     save_json,
     save_model_state_dict,
+    write_release_manifest,
 )
 from ..config import load_yaml_config
 from ..data import (
@@ -264,11 +269,11 @@ def _save_efm_package(
     runtime: RuntimeContext,
     logger: ExperimentLogger,
     model_package_dir: Path,
-    train_state: dict[str, Any],
 ) -> None:
     model_state = _model_state_dict_for_save(model)
     if runtime.is_main:
-        model_path = save_model_state_dict(model_package_dir / EFM_MODEL_NAME, model_state)
+        efm_dir = model_package_dir / MODELS_DIR_NAME / EFM_DIR_NAME
+        model_path = save_model_state_dict(efm_dir / EFM_MODEL_NAME, model_state)
         config_payload = {
             "efm": copy.deepcopy(config["efm"]),
             "loss": copy.deepcopy(config.get("loss", {})),
@@ -279,23 +284,18 @@ def _save_efm_package(
             },
             "frozen_sfm": {
                 "model_source": assets.model_source,
-                "checkpoint_path": str(config.get("frozen_sfm", {}).get("checkpoint_path") or assets.sfm_model),
+                "config": f"{MODELS_DIR_NAME}/{SFM_DIR_NAME}/{SFM_CONFIG_NAME}",
+                "weights": f"{MODELS_DIR_NAME}/{SFM_DIR_NAME}/{SFM_MODEL_NAME}",
             },
         }
-        metadata_payload = {
-            "model_type": "EFM",
-            "global_step": int(train_state.get("global_step", 0)),
-            "epoch": int(train_state.get("epoch", 0)),
-            "model_weights_path": str(model_path),
-            "frozen_sfm_model_source": assets.model_source,
-            "frozen_sfm_checkpoint_path": str(
-                config.get("frozen_sfm", {}).get("checkpoint_path") or assets.sfm_model
-            ),
-        }
-        save_json(model_package_dir / EFM_CONFIG_NAME, config_payload)
-        save_json(model_package_dir / "efm_metadata.json", metadata_payload)
+        save_json(efm_dir / EFM_CONFIG_NAME, config_payload)
+        write_release_manifest(resolve_model_assets(model_package_dir))
+        try:
+            (model_package_dir / "efm_metadata.json").unlink()
+        except FileNotFoundError:
+            pass
         logger.info("EFM weights saved to %s", model_path)
-        logger.info("EFM config saved to %s", model_package_dir / EFM_CONFIG_NAME)
+        logger.info("EFM config saved to %s", efm_dir / EFM_CONFIG_NAME)
     del model_state
     gc.collect()
     if runtime.device.type == "cuda":
@@ -481,7 +481,6 @@ class EFMPretrainingTrainer:
                 runtime=self.runtime,
                 logger=self.logger,
                 model_package_dir=self.model_package_dir,
-                train_state=self.train_state,
             )
 
 
@@ -560,30 +559,16 @@ def main() -> None:
             materialize_model_package(
                 source_assets=source_assets,
                 target_dir=paths.model_package_dir,
-                include_model_weights=False,
+                include_model_weights=True,
+                include_efm_weights=False,
                 include_cond_dict=True,
                 overwrite=True,
             )
-            try:
-                (paths.model_package_dir / "sfm_model.safetensors").unlink()
-            except FileNotFoundError:
-                pass
-            if source_assets.cond_dict.exists():
-                shutil.copy2(source_assets.cond_dict, paths.model_package_dir / "cond_dict.json")
         barrier()
 
-        runtime_assets = ModelAssets(
-            model_source=source_assets.model_source,
-            local_dir=paths.model_package_dir,
-            model_dir=paths.model_package_dir,
-            sfm_config=paths.model_package_dir / "sfm_config.json",
-            sfm_model=source_assets.sfm_model,
-            vocab=paths.model_package_dir / "vocab.json",
-            vocab_tensors=paths.model_package_dir / "vocab.safetensors",
-            cond_dict=paths.model_package_dir / "cond_dict.json",
-            human_tfs=source_assets.human_tfs,
-            mouse_tfs=source_assets.mouse_tfs,
-            omnipath=source_assets.omnipath,
+        runtime_assets = resolve_model_assets(
+            model_source=paths.model_package_dir,
+            require_model_weights=True,
         )
         config = apply_model_assets_to_runtime_config(
             config,

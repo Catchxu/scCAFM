@@ -49,7 +49,7 @@ def prepare_experiment_paths(
     root = Path(broadcast_object(str(root) if root is not None else None))
     logs = root / "logs"
     checkpoints = root / "checkpoints"
-    model_package_dir = checkpoints / "models"
+    model_package_dir = checkpoints / "package"
 
     if runtime.is_main:
         logs.mkdir(parents=True, exist_ok=True)

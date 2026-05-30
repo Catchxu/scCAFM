@@ -17,11 +17,11 @@ from torch.utils.data import DataLoader, SequentialSampler
 
 from ..assets import (
     ModelAssets,
-    SFM_MODEL_NAME,
     apply_model_assets_to_runtime_config,
     load_model_state_dict,
     load_sfm_config,
     resolve_model_assets,
+    resolve_sfm_checkpoint_path,
 )
 from ..config import load_yaml_config
 from ..data import (
@@ -126,7 +126,7 @@ def _resolve_checkpoint_path(checkpoint_path: object, default_model_path: Path) 
         resolved = default_model_path
     else:
         candidate = Path(str(checkpoint_path)).expanduser().resolve()
-        resolved = candidate / SFM_MODEL_NAME if candidate.is_dir() else candidate
+        resolved = resolve_sfm_checkpoint_path(candidate)
     if not resolved.exists():
         raise FileNotFoundError(f"SFM checkpoint not found: {resolved}")
     return resolved
@@ -744,4 +744,3 @@ def evaluate(
         output_path.parent.mkdir(parents=True, exist_ok=True)
         metrics_df.to_csv(output_path, index=False)
     return metrics_df
-

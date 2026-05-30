@@ -10,7 +10,6 @@ from typing import Any
 import torch
 
 from ..assets import (
-    ModelAssets,
     apply_model_assets_to_runtime_config,
     load_sfm_config,
     materialize_model_package,
@@ -563,24 +562,17 @@ def main() -> None:
                 source_assets=source_assets,
                 target_dir=paths.model_package_dir,
                 include_model_weights=is_resume,
+                include_efm_weights=False,
                 include_cond_dict=is_resume or (not regenerate_condition_vocab),
                 overwrite=not is_resume,
             )
             if init_assets is not None:
-                shutil.copy2(init_assets.sfm_model, paths.model_package_dir / "sfm_model.safetensors")
+                shutil.copy2(init_assets.sfm_model, checkpoint_assets.sfm_model)
         barrier()
-        checkpoint_assets = ModelAssets(
-            model_source=str(paths.model_package_dir),
-            local_dir=paths.model_package_dir,
-            model_dir=paths.model_package_dir,
-            sfm_config=paths.model_package_dir / "sfm_config.json",
-            sfm_model=paths.model_package_dir / "sfm_model.safetensors",
-            vocab=paths.model_package_dir / "vocab.json",
-            vocab_tensors=paths.model_package_dir / "vocab.safetensors",
-            cond_dict=paths.model_package_dir / "cond_dict.json",
-            human_tfs=source_assets.human_tfs,
-            mouse_tfs=source_assets.mouse_tfs,
-            omnipath=source_assets.omnipath,
+        checkpoint_assets = resolve_model_assets(
+            model_source=paths.model_package_dir,
+            require_model_weights=is_resume or init_model_source_enabled,
+            require_cond_dict=is_resume or (not regenerate_condition_vocab),
         )
         runtime_assets = source_assets
         config = apply_model_assets_to_runtime_config(

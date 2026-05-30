@@ -10,9 +10,9 @@ from src.assets import load_vocab_json, save_vocab_tensor_file
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_MODEL_NAME = "/data1021/xukaichen/data/LLM/pubmedbert-base-embeddings"
-DEFAULT_TOKEN_DICT_JSON = ROOT_DIR / "assets" / "models" / "vocab.json"
+DEFAULT_TOKEN_DICT_JSON = ROOT_DIR / "assets" / "tokenizer" / "vocab.json"
 DEFAULT_INPUT_CSV = ROOT_DIR / "checkpoints" / "gene_go_terms.csv"
-DEFAULT_OUTPUT_CKPT = ROOT_DIR / "checkpoints" / "models" / "vocab.safetensors"
+DEFAULT_OUTPUT_CKPT = ROOT_DIR / "checkpoints" / "package" / "tokenizer" / "vocab.safetensors"
 DEFAULT_BATCH_SIZE = 1024
 UNKNOWN_TERM_TEXT = "GO term: unknown. Domain: unknown."
 
