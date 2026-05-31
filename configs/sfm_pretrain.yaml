@@ -3,7 +3,7 @@ model_source: assets
 runtime:
   # Use FA4/CuTe for supported GPUs. Set to fa2 only when debugging kernel
   # instability or running on hardware without FA4 support.
-  attention_backend: fa4
+  attention_backend: fa2
   precision:
     model_dtype: fp32
     autocast_dtype: bf16

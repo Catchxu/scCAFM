@@ -11,6 +11,9 @@ import torch
 import torch.distributed as dist
 
 
+_CONTROL_GROUP: dist.ProcessGroup | None = None
+
+
 @dataclass
 class RuntimeContext:
     rank: int
@@ -22,6 +25,8 @@ class RuntimeContext:
 
 
 def initialize_distributed() -> RuntimeContext:
+    global _CONTROL_GROUP
+
     rank = int(os.environ.get("RANK", "0"))
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     local_rank = int(os.environ.get("LOCAL_RANK", str(rank)))
@@ -40,6 +45,12 @@ def initialize_distributed() -> RuntimeContext:
         # connect during process-group setup. This is more robust across Slurm
         # environments where CUDA/NCCL library resolution can be finicky.
         dist.init_process_group(backend=backend)
+    if distributed and _CONTROL_GROUP is None:
+        _CONTROL_GROUP = (
+            dist.group.WORLD
+            if dist.get_backend() == "gloo"
+            else dist.new_group(backend="gloo")
+        )
 
     return RuntimeContext(
         rank=rank,
@@ -52,13 +63,18 @@ def initialize_distributed() -> RuntimeContext:
 
 
 def cleanup_distributed() -> None:
+    global _CONTROL_GROUP
+
     if dist.is_available() and dist.is_initialized():
+        if _CONTROL_GROUP is not None and _CONTROL_GROUP is not dist.group.WORLD:
+            dist.destroy_process_group(_CONTROL_GROUP)
+        _CONTROL_GROUP = None
         dist.destroy_process_group()
 
 
 def barrier() -> None:
     if dist.is_available() and dist.is_initialized():
-        dist.barrier()
+        dist.barrier(group=_CONTROL_GROUP)
 
 
 def seed_everything(seed: int, rank: int = 0) -> None:
@@ -74,7 +90,7 @@ def broadcast_object(value: Any, src: int = 0) -> Any:
     if not (dist.is_available() and dist.is_initialized()):
         return value
     objects = [value]
-    dist.broadcast_object_list(objects, src=src)
+    dist.broadcast_object_list(objects, src=src, group=_CONTROL_GROUP)
     return objects[0]
 
 
@@ -106,9 +122,8 @@ def reduce_scalar_dict(metrics: dict[str, float], runtime: RuntimeContext) -> di
     keys = list(metrics.keys())
     values = torch.tensor(
         [float(metrics[key]) for key in keys],
-        device=runtime.device,
         dtype=torch.float64,
     )
-    dist.all_reduce(values, op=dist.ReduceOp.SUM)
+    dist.all_reduce(values, op=dist.ReduceOp.SUM, group=_CONTROL_GROUP)
     values /= runtime.world_size
     return {key: float(values[idx].item()) for idx, key in enumerate(keys)}

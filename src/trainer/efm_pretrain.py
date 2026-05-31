@@ -25,10 +25,8 @@ from ..assets import (
     EFM_MODEL_NAME,
     MODELS_DIR_NAME,
     ModelAssets,
-    SFM_CONFIG_NAME,
-    SFM_DIR_NAME,
-    SFM_MODEL_NAME,
     apply_model_assets_to_runtime_config,
+    load_efm_config,
     load_model_state_dict,
     load_sfm_config,
     materialize_model_package,
@@ -156,7 +154,7 @@ def _initialize_efm_from_sfm(efm: EFM, frozen_sfm: ModelWrapper, logger: Experim
     sfm = _unwrap_sfm(frozen_sfm)
     if getattr(efm, "embed_dim", None) != getattr(sfm, "embed_dim", None):
         raise ValueError(
-            "`efm.init_from_sfm=true` requires matching embed_dim, "
+            "Initializing EFM from SFM requires matching embed_dim, "
             f"got EFM={getattr(efm, 'embed_dim', None)} and SFM={getattr(sfm, 'embed_dim', None)}."
         )
 
@@ -193,8 +191,7 @@ def _build_efm(
     data_assets: PretrainingAssets,
     assets: ModelAssets,
 ) -> EFM:
-    efm_kwargs = copy.deepcopy(config["efm"])
-    efm_kwargs.pop("init_from_sfm", None)
+    efm_kwargs = copy.deepcopy(config["efm_model"]["efm"])
     if "attention_backend" in config.get("runtime", {}):
         efm_kwargs["attention_backend"] = config["runtime"]["attention_backend"]
     efm_kwargs.pop("gene_embedding_ckpt", None)
@@ -232,8 +229,7 @@ def _load_frozen_sfm(
         assets=assets,
         runtime_config=config.get("runtime", {}),
     )
-    checkpoint_path = config.get("frozen_sfm", {}).get("checkpoint_path") or assets.sfm_model
-    state_dict = load_model_state_dict(checkpoint_path)
+    state_dict = load_model_state_dict(assets.sfm_model)
     frozen_sfm.load_state_dict(state_dict, strict=True)
 
     precision_cfg = config.get("runtime", {}).get("precision", {})
@@ -241,7 +237,7 @@ def _load_frozen_sfm(
     frozen_sfm = frozen_sfm.to(device=runtime.device, dtype=model_dtype)
     frozen_sfm.eval()
     frozen_sfm.requires_grad_(False)
-    logger.info("Loaded frozen SFM weights from %s", checkpoint_path)
+    logger.info("Loaded frozen SFM weights from %s", assets.sfm_model)
     return frozen_sfm
 
 
@@ -324,8 +320,6 @@ def _save_efm_package(
     scheduler: torch.optim.lr_scheduler.LRScheduler,
     train_state: dict[str, Any],
     config: dict[str, Any],
-    data_assets: PretrainingAssets,
-    assets: ModelAssets,
     runtime: RuntimeContext,
     logger: ExperimentLogger,
     checkpoint_dir: Path,
@@ -335,20 +329,7 @@ def _save_efm_package(
     if runtime.is_main:
         efm_dir = checkpoint_dir / MODELS_DIR_NAME / EFM_DIR_NAME
         model_path = save_model_state_dict(efm_dir / EFM_MODEL_NAME, model_state)
-        config_payload = {
-            "efm": copy.deepcopy(config["efm"]),
-            "loss": copy.deepcopy(config.get("loss", {})),
-            "runtime": copy.deepcopy(config.get("runtime", {})),
-            "data": {
-                "max_length": int(config["data"]["max_length"]),
-                "cond_vocab_size": int(data_assets.cond_vocab_size),
-            },
-            "frozen_sfm": {
-                "model_source": assets.model_source,
-                "config": f"{MODELS_DIR_NAME}/{SFM_DIR_NAME}/{SFM_CONFIG_NAME}",
-                "weights": f"{MODELS_DIR_NAME}/{SFM_DIR_NAME}/{SFM_MODEL_NAME}",
-            },
-        }
+        config_payload = copy.deepcopy(config["efm_model"])
         save_json(efm_dir / EFM_CONFIG_NAME, config_payload)
         write_release_manifest(
             resolve_model_assets(checkpoint_dir, require_resources=False)
@@ -396,7 +377,6 @@ class EFMPretrainingTrainer:
         logger: ExperimentLogger,
         runtime: RuntimeContext,
         config: dict[str, Any],
-        assets: ModelAssets,
         checkpoint_dir: Path,
         resume_state_file: Path,
         train_state: dict[str, Any] | None = None,
@@ -410,7 +390,6 @@ class EFMPretrainingTrainer:
         self.logger = logger
         self.runtime = runtime
         self.config = config
-        self.assets = assets
         self.checkpoint_dir = checkpoint_dir
         self.resume_state_file = resume_state_file
         self.train_cfg = config["trainer"]
@@ -446,8 +425,6 @@ class EFMPretrainingTrainer:
             scheduler=self.scheduler,
             train_state=self.train_state,
             config=self.config,
-            data_assets=self.data_assets,
-            assets=self.assets,
             runtime=self.runtime,
             logger=self.logger,
             checkpoint_dir=self.checkpoint_dir,
@@ -614,7 +591,10 @@ def _log_run_summary(
         "Runtime: distributed=%s, world_size=%s, attention_backend=%s",
         runtime.distributed,
         runtime.world_size,
-        config["runtime"].get("attention_backend", config.get("efm", {}).get("attention_backend", "fa4")),
+        config["runtime"].get(
+            "attention_backend",
+            config.get("efm_model", {}).get("efm", {}).get("attention_backend", "fa4"),
+        ),
     )
     logger.info(
         "Data: num_adata=%s, batch_size=%s, gradient_accumulation_steps=%s, max_length=%s, cond_vocab_size=%s",
@@ -625,11 +605,10 @@ def _log_run_summary(
         int(data_assets.cond_vocab_size),
     )
     logger.info(
-        "EFM: embed_dim=%s, layers=%s, heads=%s, init_from_sfm=%s",
-        config["efm"].get("embed_dim"),
-        config["efm"].get("num_layers"),
-        config["efm"].get("num_heads"),
-        config["efm"].get("init_from_sfm", True),
+        "EFM: embed_dim=%s, layers=%s, heads=%s",
+        config["efm_model"]["efm"].get("embed_dim"),
+        config["efm_model"]["efm"].get("num_layers"),
+        config["efm_model"]["efm"].get("num_heads"),
     )
     logger.info(
         "Optimizer: name=%s, lr=%s, estimated_total_steps=%s",
@@ -653,12 +632,18 @@ def main() -> None:
     try:
         pretrain_config = load_yaml_config(args.efm_pretrain_config)
         model_source = pretrain_config["model_source"]
-        source_assets = resolve_model_assets(model_source=model_source, require_model_weights=True)
+        source_assets = resolve_model_assets(
+            model_source=model_source,
+            require_model_weights=True,
+            require_efm_config=True,
+        )
         sfm_config = load_sfm_config(source_assets.sfm_config)
+        efm_config = load_efm_config(source_assets.efm_config)
         config = apply_model_assets_to_runtime_config(
             {
                 **pretrain_config,
                 "model": sfm_config,
+                "efm_model": efm_config,
             },
             source_assets,
             require_model_weights=True,
@@ -695,8 +680,11 @@ def main() -> None:
         checkpoint_assets = resolve_model_assets(
             model_source=paths.checkpoints,
             require_model_weights=True,
+            require_efm_weights=args.resume is not None,
             require_resources=False,
         )
+        if args.resume is not None:
+            config["efm_model"] = load_efm_config(checkpoint_assets.efm_config)
         data_assets = build_pretraining_assets(config=config, runtime=runtime)
 
         frozen_sfm = _load_frozen_sfm(
@@ -714,7 +702,7 @@ def main() -> None:
                 )
             efm.load_state_dict(load_model_state_dict(checkpoint_assets.efm_model), strict=True)
             logger.info("Loaded resume EFM weights from %s", checkpoint_assets.efm_model)
-        elif bool(config.get("efm", {}).get("init_from_sfm", True)):
+        else:
             _initialize_efm_from_sfm(efm, frozen_sfm, logger)
         efm = maybe_wrap_fsdp(
             model=efm,
@@ -765,7 +753,6 @@ def main() -> None:
             logger=logger,
             runtime=runtime,
             config=config,
-            assets=source_assets,
             checkpoint_dir=paths.checkpoints,
             resume_state_file=paths.resume_state_file,
             train_state=train_state,

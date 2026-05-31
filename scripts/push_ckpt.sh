@@ -82,6 +82,7 @@ required_files=(
   "tokenizer/vocab.safetensors"
   "models/sfm/sfm_config.json"
   "models/sfm/sfm_model.safetensors"
+  "models/efm/efm_config.json"
 )
 required_asset_resources=(
   "resources/human_tfs.csv"
@@ -90,7 +91,6 @@ required_asset_resources=(
   "resources/homologous.csv"
 )
 optional_efm_files=(
-  "models/efm/efm_config.json"
   "models/efm/efm_model.safetensors"
 )
 legacy_hf_files=(
@@ -151,7 +151,7 @@ if [[ "${efm_file_count}" -eq "${#optional_efm_files[@]}" ]]; then
     cp -f "${CKPT_DIR}/${file_name}" "${ASSETS_DIR}/${file_name}"
   done
 elif [[ "${efm_file_count}" -eq 0 ]]; then
-  rm -rf "${ASSETS_DIR}/models/efm"
+  rm -f "${ASSETS_DIR}/models/efm/efm_model.safetensors"
 else
   echo "Incomplete EFM checkpoint package under ${CKPT_DIR}/models/efm" >&2
   exit 1

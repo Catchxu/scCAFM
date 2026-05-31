@@ -189,6 +189,7 @@ def resolve_model_assets(
     model_source: str | Path,
     *,
     require_model_weights: bool = False,
+    require_efm_config: bool = False,
     require_efm_weights: bool = False,
     require_cond_dict: bool = True,
     require_resources: bool = True,
@@ -214,6 +215,8 @@ def resolve_model_assets(
         required_paths["cond_dict"] = assets.cond_dict
     if require_model_weights:
         required_paths["sfm_model"] = assets.sfm_model
+    if require_efm_config:
+        required_paths["efm_config"] = assets.efm_config
     if require_efm_weights:
         required_paths["efm_config"] = assets.efm_config
         required_paths["efm_model"] = assets.efm_model
@@ -325,13 +328,15 @@ def materialize_model_package(
     elif overwrite and target_assets.cond_dict.exists():
         _safe_unlink(target_assets.cond_dict)
 
+    if source_assets.efm_config.exists():
+        _copy_file_if_needed(source_assets.efm_config, target_assets.efm_config, overwrite=overwrite)
+    elif overwrite:
+        _safe_unlink(target_assets.efm_config)
+
     if include_efm_weights:
-        if source_assets.efm_config.exists():
-            _copy_file_if_needed(source_assets.efm_config, target_assets.efm_config, overwrite=overwrite)
         if source_assets.efm_model.exists():
             _copy_file_if_needed(source_assets.efm_model, target_assets.efm_model, overwrite=overwrite)
     elif overwrite:
-        _safe_unlink(target_assets.efm_config)
         _safe_unlink(target_assets.efm_model)
 
     write_release_manifest(target_assets)
@@ -371,6 +376,15 @@ def load_sfm_config(path: str | Path) -> dict[str, Any]:
         raise ValueError(f"`{path}` must contain a JSON object.")
     if "sfm" not in payload or "vgae" not in payload:
         raise ValueError(f"`{path}` must contain both 'sfm' and 'vgae' sections.")
+    return payload
+
+
+def load_efm_config(path: str | Path) -> dict[str, Any]:
+    payload = load_json(path)
+    if not isinstance(payload, dict):
+        raise ValueError(f"`{path}` must contain a JSON object.")
+    if "efm" not in payload:
+        raise ValueError(f"`{path}` must contain an 'efm' section.")
     return payload
 
 

@@ -51,35 +51,6 @@ data:
     X_fill_value: 0.0
     inplace: false
 
-frozen_sfm:
-  checkpoint_path: null
-
-efm:
-  init_from_sfm: true
-  embed_dim: 768
-  expr_num_bins: 32
-  expr_hidden_dim: 128
-  expr_tau: 1.0
-  batch_num_bins: 128
-  batch_hidden_dim: 128
-  batch_tau: 1.0
-  cond_dropout: 0.1
-  out_dropout: 0.1
-  freeze_loaded_gene_embeddings: false
-  num_layers: 12
-  num_heads: 12
-  backbone_mlp_hidden_dim: 3072
-  backbone_mlp_dropout: 0.02
-  use_rotary: true
-  qkv_bias: true
-  out_bias: true
-  backbone_mlp_bias: true
-  norm_eps: 1.0e-6
-  rotary_base: 10000.0
-  rotary_interleaved: false
-  head_hidden_dim: 768
-  head_dropout: 0.1
-
 optimizer:
   name: adamw
   lr: 0.0001
