@@ -47,6 +47,7 @@ from ..data import (
 from ..distributed import (
     RuntimeContext,
     barrier,
+    clip_sharded_grad_norm_,
     cleanup_distributed,
     initialize_distributed,
     move_batch_to_device,
@@ -419,7 +420,11 @@ class EFMPretrainingTrainer:
         if max_norm is None:
             return None
         if isinstance(self.model, FSDP):
-            grad_norm = self.model.clip_grad_norm_(float(max_norm))
+            return clip_sharded_grad_norm_(
+                self.model.parameters(),
+                float(max_norm),
+                self.runtime,
+            )
         else:
             grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), float(max_norm))
         if torch.is_tensor(grad_norm):
@@ -427,9 +432,11 @@ class EFMPretrainingTrainer:
         return float(grad_norm)
 
     def _grad_sync_context(self, should_sync: bool):
-        if should_sync or not isinstance(self.model, FSDP):
-            return contextlib.nullcontext()
-        return self.model.no_sync()
+        # EFM keeps optimizer-step accumulation, but FSDP gradients are reduced
+        # on every microbatch. Deferring all reductions with no_sync() triggers
+        # an NCCL illegal-memory-access failure at the first update boundary on
+        # this Slurm environment when several EFM microbatches are accumulated.
+        return contextlib.nullcontext()
 
     def _save_checkpoint(self) -> None:
         _save_efm_package(

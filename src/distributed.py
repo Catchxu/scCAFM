@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import random
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -127,3 +128,36 @@ def reduce_scalar_dict(metrics: dict[str, float], runtime: RuntimeContext) -> di
     dist.all_reduce(values, op=dist.ReduceOp.SUM, group=_CONTROL_GROUP)
     values /= runtime.world_size
     return {key: float(values[idx].item()) for idx, key in enumerate(keys)}
+
+
+@torch.no_grad()
+def clip_sharded_grad_norm_(
+    parameters: Iterable[torch.nn.Parameter],
+    max_norm: float,
+    runtime: RuntimeContext,
+) -> float:
+    """Clip fully sharded gradients while reducing the global norm over Gloo."""
+    grads = [
+        parameter.grad
+        for parameter in parameters
+        if parameter.grad is not None
+    ]
+    if not grads:
+        return 0.0
+
+    local_norm_sq = torch.zeros((), dtype=torch.float32, device=grads[0].device)
+    for grad in grads:
+        local_norm_sq += torch.linalg.vector_norm(
+            grad.detach(),
+            ord=2,
+            dtype=torch.float32,
+        ).square()
+
+    total_norm_sq = local_norm_sq.detach().double().cpu()
+    if runtime.distributed:
+        dist.all_reduce(total_norm_sq, op=dist.ReduceOp.SUM, group=_CONTROL_GROUP)
+    total_norm = float(total_norm_sq.sqrt().item())
+    clip_coef = min(float(max_norm) / (total_norm + 1e-6), 1.0)
+    for grad in grads:
+        grad.mul_(clip_coef)
+    return total_norm
