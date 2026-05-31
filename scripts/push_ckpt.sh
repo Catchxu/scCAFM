@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CKPT_DIR="${CKPT_DIR:-${ROOT_DIR}/checkpoints/package}"
+CKPT_DIR="${CKPT_DIR:-${ROOT_DIR}/checkpoints}"
 ASSETS_DIR="${ASSETS_DIR:-${ROOT_DIR}/assets}"
 PUSH_HF="${PUSH_HF:-1}"
 HF_REPO_ID="${HF_REPO_ID:-kaichenxu/scCAFM}"
@@ -77,15 +77,17 @@ done
 
 required_files=(
   "release.json"
-  "resources/human_tfs.csv"
-  "resources/mouse_tfs.csv"
-  "resources/OmniPath.csv"
-  "resources/homologous.csv"
   "tokenizer/cond_dict.json"
   "tokenizer/vocab.json"
   "tokenizer/vocab.safetensors"
   "models/sfm/sfm_config.json"
   "models/sfm/sfm_model.safetensors"
+)
+required_asset_resources=(
+  "resources/human_tfs.csv"
+  "resources/mouse_tfs.csv"
+  "resources/OmniPath.csv"
+  "resources/homologous.csv"
 )
 optional_efm_files=(
   "models/efm/efm_config.json"
@@ -121,6 +123,13 @@ fi
 for file_name in "${required_files[@]}"; do
   if [[ ! -f "${CKPT_DIR}/${file_name}" ]]; then
     echo "Missing required checkpoint file: ${CKPT_DIR}/${file_name}" >&2
+    exit 1
+  fi
+done
+
+for file_name in "${required_asset_resources[@]}"; do
+  if [[ ! -f "${ASSETS_DIR}/${file_name}" ]]; then
+    echo "Missing shared asset resource: ${ASSETS_DIR}/${file_name}" >&2
     exit 1
   fi
 done

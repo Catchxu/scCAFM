@@ -191,6 +191,7 @@ def resolve_model_assets(
     require_model_weights: bool = False,
     require_efm_weights: bool = False,
     require_cond_dict: bool = True,
+    require_resources: bool = True,
 ) -> ModelAssets:
     model_source_str = str(model_source)
     local_candidate = Path(model_source_str).expanduser()
@@ -205,9 +206,10 @@ def resolve_model_assets(
         "sfm_config": assets.sfm_config,
         "vocab": assets.vocab,
         "vocab_tensors": assets.vocab_tensors,
-        "human_tfs": assets.human_tfs,
-        "mouse_tfs": assets.mouse_tfs,
     }
+    if require_resources:
+        required_paths["human_tfs"] = assets.human_tfs
+        required_paths["mouse_tfs"] = assets.mouse_tfs
     if require_cond_dict:
         required_paths["cond_dict"] = assets.cond_dict
     if require_model_weights:
@@ -283,6 +285,7 @@ def materialize_model_package(
     include_model_weights: bool = True,
     include_efm_weights: bool = False,
     include_cond_dict: bool = True,
+    include_resources: bool = True,
     overwrite: bool = False,
 ) -> ModelAssets:
     target_path = Path(target_dir).expanduser().resolve()
@@ -296,10 +299,11 @@ def materialize_model_package(
         target_assets.vocab_tensors,
         overwrite=overwrite,
     )
-    _copy_file_if_present(source_assets.human_tfs, target_assets.human_tfs, overwrite=overwrite)
-    _copy_file_if_present(source_assets.mouse_tfs, target_assets.mouse_tfs, overwrite=overwrite)
-    _copy_file_if_present(source_assets.omnipath, target_assets.omnipath, overwrite=overwrite)
-    _copy_file_if_present(source_assets.homologous, target_assets.homologous, overwrite=overwrite)
+    if include_resources:
+        _copy_file_if_present(source_assets.human_tfs, target_assets.human_tfs, overwrite=overwrite)
+        _copy_file_if_present(source_assets.mouse_tfs, target_assets.mouse_tfs, overwrite=overwrite)
+        _copy_file_if_present(source_assets.omnipath, target_assets.omnipath, overwrite=overwrite)
+        _copy_file_if_present(source_assets.homologous, target_assets.homologous, overwrite=overwrite)
 
     if include_model_weights:
         if source_assets.sfm_model.exists():

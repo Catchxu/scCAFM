@@ -3,7 +3,7 @@ model_source: assets
 runtime:
   # FA4 remains selectable here, but the current flash_attn.cute backward path
   # fails on this Slurm environment. FA2 is the runnable default for now.
-  attention_backend: fa4
+  attention_backend: fa2
   precision:
     model_dtype: fp32
     autocast_dtype: bf16
@@ -17,8 +17,8 @@ data:
   train_paths: /scratch/kxu248/data/Atlas/
   shuffle_train_paths: true
   shuffle_train_paths_seed: 42
-  batch_size: 24
-  gradient_accumulation_steps: 8
+  batch_size: 20
+  gradient_accumulation_steps: 15
   num_workers: 0
   pin_memory: false
   drop_last: false
@@ -98,3 +98,4 @@ loss:
 trainer:
   epochs: 1
   grad_clip_norm: 1.0
+  checkpoint_frequency: adata

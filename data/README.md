@@ -3,7 +3,7 @@
 This directory contains:
 
 1. Cell download scripts for building pretraining partitions from Cellxgene Census.
-2. Gene embedding scripts for rebuilding `checkpoints/package/tokenizer/vocab.safetensors` from GO annotations.
+2. Gene embedding scripts for rebuilding `checkpoints/tokenizer/vocab.safetensors` from GO annotations.
 
 
 ## Cell Download
@@ -119,7 +119,7 @@ python3 data/check_and_redownload_h5ad.py \
 2. Query Ensembl BioMart for GO annotations.
 3. Save GO annotations to `checkpoints/gene_go_terms.csv`.
 4. Encode GO text with PubMedBERT.
-5. Save the final gene embedding asset to `checkpoints/package/tokenizer/vocab.safetensors`.
+5. Save the final gene embedding asset to `checkpoints/tokenizer/vocab.safetensors`.
 
 ### One-command run
 ```bash
@@ -139,4 +139,4 @@ python data/build_gene_embeddings.py --gpus 0,1,2,3 --batch-size 1024
 
 ### Output
 * `checkpoints/gene_go_terms.csv`
-* `checkpoints/package/tokenizer/vocab.safetensors`
+* `checkpoints/tokenizer/vocab.safetensors`

@@ -437,7 +437,6 @@ def prepare_evaluation_paths(
     logs = root / "logs"
     results = root / "results"
     checkpoints = root / "checkpoints"
-    model_package_dir = checkpoints / "package"
 
     if runtime.is_main:
         logs.mkdir(parents=True, exist_ok=True)
@@ -448,10 +447,8 @@ def prepare_evaluation_paths(
         root=root,
         logs=logs,
         checkpoints=checkpoints,
-        model_package_dir=model_package_dir,
         log_file=logs / "evaluate_grn.log",
-        resume_manifest_file=checkpoints / "resume_manifest.json",
-        resume_state_file=checkpoints / "sfm_train_state.pt",
+        resume_state_file=checkpoints / "train_state.pt",
     )
 
 

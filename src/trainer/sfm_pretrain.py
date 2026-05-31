@@ -558,21 +558,25 @@ def main() -> None:
         # Warm-start is only model-weight initialization for a new run.
         include_model_weights = is_resume or init_model_source_enabled
         if runtime.is_main:
+            if not is_resume:
+                paths.resume_state_file.unlink(missing_ok=True)
             checkpoint_assets = materialize_model_package(
                 source_assets=source_assets,
-                target_dir=paths.model_package_dir,
+                target_dir=paths.checkpoints,
                 include_model_weights=is_resume,
                 include_efm_weights=False,
                 include_cond_dict=is_resume or (not regenerate_condition_vocab),
+                include_resources=False,
                 overwrite=not is_resume,
             )
             if init_assets is not None:
                 shutil.copy2(init_assets.sfm_model, checkpoint_assets.sfm_model)
         barrier()
         checkpoint_assets = resolve_model_assets(
-            model_source=paths.model_package_dir,
+            model_source=paths.checkpoints,
             require_model_weights=is_resume or init_model_source_enabled,
             require_cond_dict=is_resume or (not regenerate_condition_vocab),
+            require_resources=False,
         )
         runtime_assets = source_assets
         config = apply_model_assets_to_runtime_config(

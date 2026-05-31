@@ -8,7 +8,7 @@ BATCH_SIZE="${BATCH_SIZE:-1024}"
 MODEL_NAME="${MODEL_NAME:-/data1021/xukaichen/data/LLM/pubmedbert-base-embeddings}"
 TOKEN_DICT="${TOKEN_DICT:-$ROOT_DIR/assets/tokenizer/vocab.json}"
 INPUT_CSV="${INPUT_CSV:-$ROOT_DIR/checkpoints/gene_go_terms.csv}"
-OUTPUT_CKPT="${OUTPUT_CKPT:-$ROOT_DIR/checkpoints/package/tokenizer/vocab.safetensors}"
+OUTPUT_CKPT="${OUTPUT_CKPT:-$ROOT_DIR/checkpoints/tokenizer/vocab.safetensors}"
 
 python "$ROOT_DIR/data/build_gene_go_terms.py"
 

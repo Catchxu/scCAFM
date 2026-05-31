@@ -5,8 +5,8 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --gpus=8
-#SBATCH --mem=512G
+#SBATCH --gpus=4
+#SBATCH --mem=128G
 #SBATCH --time=120:00:00
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=kxu248@emory.edu
@@ -23,7 +23,7 @@ fi
 cd "${ROOT_DIR}"
 export PYTHONPATH="${ROOT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 export NCCL_NET="${NCCL_NET:-Socket}"
-export NCCL_SHM_DISABLE="${NCCL_SHM_DISABLE:-1}"
+export NCCL_SHM_DISABLE="${NCCL_SHM_DISABLE:-0}"
 export NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-0}"
 
 if command -v python3 >/dev/null 2>&1; then
