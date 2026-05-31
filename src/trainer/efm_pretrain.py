@@ -177,6 +177,19 @@ def _initialize_efm_from_sfm(efm: EFM, frozen_sfm: ModelWrapper, logger: Experim
     )
 
 
+def _save_initialized_efm_weights(
+    *,
+    efm: EFM,
+    checkpoint_assets: ModelAssets,
+    runtime: RuntimeContext,
+    logger: ExperimentLogger,
+) -> None:
+    if runtime.is_main:
+        model_path = save_model_state_dict(checkpoint_assets.efm_model, efm.state_dict())
+        logger.info("Initialized EFM weights saved to %s", model_path)
+    barrier()
+
+
 def _resolve_eos_token_id(token_dict) -> int:
     mask = token_dict["gene_id"].astype(str).str.lower() == "<eos>"
     if not bool(mask.any()):
@@ -704,6 +717,12 @@ def main() -> None:
             logger.info("Loaded resume EFM weights from %s", checkpoint_assets.efm_model)
         else:
             _initialize_efm_from_sfm(efm, frozen_sfm, logger)
+            _save_initialized_efm_weights(
+                efm=efm,
+                checkpoint_assets=checkpoint_assets,
+                runtime=runtime,
+                logger=logger,
+            )
         efm = maybe_wrap_fsdp(
             model=efm,
             config=config,
