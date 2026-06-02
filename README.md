@@ -55,7 +55,7 @@ Please note that GPU-specific packages such as FlashAttention still depend on yo
 
 
 ## FlashAttention
-scCAFM are developed with the latest FlashAttention-4 (FA4) to enhance the compuational performance, where FA4 is optimized and only available for Blackwell GPUs (e.g. B200). If your hardware or FlashAttention build only supports FA2, change config files under `configs` as:
+scCAFM uses FlashAttention-4 (FA4) by default for improved computational performance on Blackwell GPUs such as B200. If your hardware or FlashAttention build only supports FA2, change the relevant config files under `configs/`:
 ```yaml
 runtime:
   attention_backend: fa2
@@ -63,14 +63,14 @@ runtime:
 
 If you haven't installed any FA, please install suitable FA according to your specific hardware and software environment. You can follow the [official repository instructions](https://github.com/Dao-AILab/flash-attention) to install it.
 
-Before using scCAFM on a new machine, we recommend running a FlashAttention smoke test:
+Before using scCAFM on a new machine, run the FA4 smoke test on a compatible GPU:
 ```bash
-python test/test_FA4.py # or test/test_FA2.py
+PYTHONPATH=. python test/test_FA4.py
 ```
-These tests directly validate the current FA2/FA4 implementations used by the codebase, including the dense and variable-length attention paths required for training and evaluation.
+Use `test/test_FA2.py` instead when you select `attention_backend: fa2`. These tests directly validate the dense and variable-length attention paths required for training and evaluation.
 
 
 ## Data Download
-The data pipeline supports both `Homo sapiens` and `Mus musculus`, writes species-specific folders, adds a `species` column to each downloaded partition, and can keep only genes found in `assets/tokenizer/vocab.json`. The supported workflow is now shell-based, including a small demo download before the full SLURM run.
+The data pipeline supports both `Homo sapiens` and `Mus musculus`, writes species-specific folders, adds a `species` column to each downloaded partition, and can keep only genes found in `assets/tokenizer/vocab.json`.
 
 For complete data pipeline details, see [Data Download Guide](data/README.md).

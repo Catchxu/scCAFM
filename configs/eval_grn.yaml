@@ -1,7 +1,7 @@
 model_source: assets
 
 runtime:
-  # Keep evaluation on the same safer attention backend used by pretraining.
+  # Keep evaluation on the same FA4 backend used by the B200 pretraining jobs.
   attention_backend: fa4
   precision:
     model_dtype: fp32
@@ -13,7 +13,7 @@ runtime:
     limit_all_gathers: true
 
 data:
-  batch_size: 256
+  batch_size: 512
   num_workers: 0
   pin_memory: true
   drop_last: false

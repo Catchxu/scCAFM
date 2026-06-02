@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=eval-grn
 #SBATCH --account=general
-#SBATCH --partition=rp6b-8-gm768-c192-m2048
+#SBATCH --partition=b200-8-gm1432-c192-m2048
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8

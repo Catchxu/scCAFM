@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=pretrain
+#SBATCH --job-name=efm-pretrain
 #SBATCH --account=general
-#SBATCH --partition=rp6b-8-gm768-c192-m2048
+#SBATCH --partition=b200-8-gm1432-c192-m2048
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
@@ -54,7 +54,11 @@ if [[ -z "${NPROC_PER_NODE:-}" ]]; then
       NPROC_PER_NODE="${#_GPU_LIST[@]}"
     fi
   elif command -v nvidia-smi >/dev/null 2>&1; then
-    NPROC_PER_NODE="$(nvidia-smi -L | wc -l | tr -d '[:space:]')"
+    if GPU_COUNT="$(nvidia-smi -L 2>/dev/null | wc -l | tr -d '[:space:]')" && [[ -n "${GPU_COUNT}" && "${GPU_COUNT}" -gt 0 ]]; then
+      NPROC_PER_NODE="${GPU_COUNT}"
+    else
+      NPROC_PER_NODE=1
+    fi
   else
     NPROC_PER_NODE=1
   fi
