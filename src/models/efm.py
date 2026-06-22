@@ -7,6 +7,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 
+from .attention import AttentionKVCache
 from .backbone import TransformerBackbone
 from .embedding import ScEmbedding
 from .gene_ordering import GeneOrderState
@@ -270,3 +271,154 @@ class EFM(nn.Module):
             id_logits=id_logits,
             expression_pred=expression_pred,
         )
+
+    def _validate_incremental_tokens(
+        self,
+        tokens: dict[str, torch.Tensor | None],
+        expression_values: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        input_ids = tokens.get("input_ids")
+        condition_ids = tokens.get("condition_ids")
+        non_tf_mask = tokens.get("non_tf_mask")
+        padding_mask = tokens.get("padding_mask")
+        if not torch.is_tensor(input_ids):
+            raise TypeError("`tokens['input_ids']` must be a torch.Tensor.")
+        if not torch.is_tensor(condition_ids):
+            raise TypeError("`tokens['condition_ids']` must be a torch.Tensor.")
+        if not torch.is_tensor(non_tf_mask):
+            raise TypeError("`tokens['non_tf_mask']` must be a torch.Tensor.")
+        if not torch.is_tensor(expression_values):
+            raise TypeError("`expression_values` must be a torch.Tensor.")
+        self.embedding._validate_inputs(
+            input_ids=input_ids,
+            expression_values=expression_values,
+            condition_ids=condition_ids,
+            padding_mask=padding_mask if torch.is_tensor(padding_mask) else None,
+            non_tf_mask=non_tf_mask,
+        )
+        cond_vocab_size = self.embedding.condition_embedding.cond_embedding.num_embeddings
+        if condition_ids.max().item() >= cond_vocab_size:
+            raise ValueError(
+                "Found `condition_ids` outside the configured `cond_vocab_size`. "
+                f"Max value: {condition_ids.max().item()}, "
+                f"vocab size: {cond_vocab_size}."
+            )
+        return input_ids, expression_values, condition_ids, non_tf_mask, padding_mask
+
+    def _embed_prefix_token(
+        self,
+        tokens: dict[str, torch.Tensor | None],
+        expression_values: torch.Tensor,
+    ) -> torch.Tensor:
+        input_ids, expression_values, condition_ids, non_tf_mask, padding_mask = (
+            self._validate_incremental_tokens(tokens, expression_values)
+        )
+        if padding_mask is not None and padding_mask.dtype != torch.bool:
+            padding_mask = padding_mask.to(torch.bool)
+        if non_tf_mask.dtype != torch.bool:
+            non_tf_mask = non_tf_mask.to(torch.bool)
+
+        prefix_token = self.embedding.condition_embedding(condition_ids)
+        batch_emb = self.embedding.batch_embedding(
+            expression_values,
+            padding_mask=padding_mask if torch.is_tensor(padding_mask) else None,
+        ).unsqueeze(1)
+        cell_token = prefix_token.to(batch_emb.dtype) + batch_emb
+        cell_token = cell_token.to(self.embedding.prefix_type_embedding.dtype)
+        cell_token = cell_token + self.embedding.prefix_type_embedding.to(cell_token.dtype)
+        cell_token = self.embedding.final_norm(cell_token)
+        return self.embedding.dropout(cell_token)
+
+    def _embed_gene_token(
+        self,
+        tokens: dict[str, torch.Tensor | None],
+        expression_values: torch.Tensor,
+        *,
+        gene_position: int,
+        key_padding_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.BoolTensor | None]:
+        input_ids, expression_values, _, non_tf_mask, padding_mask = (
+            self._validate_incremental_tokens(tokens, expression_values)
+        )
+        gene_position = int(gene_position)
+        if not 0 <= gene_position < input_ids.shape[1]:
+            raise ValueError(f"`gene_position` out of range: {gene_position}")
+        if non_tf_mask.dtype != torch.bool:
+            non_tf_mask = non_tf_mask.to(torch.bool)
+
+        current_input_ids = input_ids[:, gene_position : gene_position + 1]
+        current_expression = expression_values[:, gene_position : gene_position + 1]
+        current_non_tf_mask = non_tf_mask[:, gene_position : gene_position + 1]
+        current_padding_mask = None
+        if torch.is_tensor(padding_mask):
+            current_padding_mask = padding_mask[:, gene_position : gene_position + 1].to(
+                torch.bool
+            )
+        if key_padding_mask is not None:
+            if key_padding_mask.shape != current_input_ids.shape:
+                raise ValueError(
+                    "`key_padding_mask` must match the single-token gene shape, "
+                    f"got {tuple(key_padding_mask.shape)} vs {tuple(current_input_ids.shape)}."
+                )
+            key_padding_mask = key_padding_mask.to(device=input_ids.device, dtype=torch.bool)
+            current_padding_mask = (
+                key_padding_mask
+                if current_padding_mask is None
+                else current_padding_mask | key_padding_mask
+            )
+
+        gene_emb = self.embedding.gene_embedding(current_input_ids)
+        expr_emb = self.embedding.expr_embedding(current_expression).to(gene_emb.dtype)
+        tf_type_emb = self.embedding.tf_type_embedding(current_non_tf_mask.long()).to(
+            gene_emb.dtype
+        )
+        token_emb = gene_emb + expr_emb + tf_type_emb
+        token_emb = token_emb + self.embedding.gene_type_embedding.to(token_emb.dtype)
+        token_emb = self.embedding.final_norm(token_emb)
+        token_emb = self.embedding.dropout(token_emb)
+        if current_padding_mask is not None:
+            token_emb = token_emb.masked_fill(current_padding_mask.unsqueeze(-1), 0.0)
+        return token_emb, current_padding_mask
+
+    def prefill_incremental_cache(
+        self,
+        tokens: dict[str, torch.Tensor | None],
+    ) -> tuple[torch.Tensor, list[AttentionKVCache]]:
+        expression_values = tokens.get("expression_values")
+        if not torch.is_tensor(expression_values):
+            raise TypeError("`tokens['expression_values']` must be a torch.Tensor.")
+        prefix_embedding = self._embed_prefix_token(tokens, expression_values)
+        return self.backbone.forward_incremental(
+            prefix_embedding,
+            caches=None,
+            key_padding_mask=None,
+        )
+
+    def append_incremental_gene(
+        self,
+        tokens: dict[str, torch.Tensor | None],
+        *,
+        expression_values: torch.Tensor,
+        gene_position: int,
+        caches: list[AttentionKVCache],
+        key_padding_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, list[AttentionKVCache]]:
+        gene_embedding, current_padding_mask = self._embed_gene_token(
+            tokens,
+            expression_values,
+            gene_position=gene_position,
+            key_padding_mask=key_padding_mask,
+        )
+        return self.backbone.forward_incremental(
+            gene_embedding,
+            caches=caches,
+            key_padding_mask=current_padding_mask,
+        )
+
+    def predict_expression_from_hidden(self, hidden_state: torch.Tensor) -> torch.Tensor:
+        if hidden_state.ndim != 3 or hidden_state.shape[1] != 1:
+            raise ValueError(
+                "`hidden_state` must have shape (batch, 1, dim), "
+                f"got {tuple(hidden_state.shape)}."
+            )
+        return self.ph_exp(hidden_state).squeeze(-1).squeeze(1)

@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from .attention import FlashMHA
+from .attention import AttentionKVCache, FlashMHA
 
 
 class SwiGLUMLP(nn.Module):
@@ -97,6 +97,26 @@ class TransformerBlock(nn.Module):
 
         return x
 
+    def forward_incremental(
+        self,
+        x: torch.Tensor,
+        *,
+        cache: AttentionKVCache | None = None,
+        key_padding_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, AttentionKVCache]:
+        attn_out, updated_cache = self.attn.forward_incremental(
+            self.attn_norm(x),
+            cache=cache,
+            key_padding_mask=key_padding_mask,
+        )
+        x = x + attn_out
+        x = x + self.mlp(self.mlp_norm(x))
+
+        if key_padding_mask is not None:
+            x = x.masked_fill(key_padding_mask.unsqueeze(-1), 0.0)
+
+        return x, updated_cache
+
 
 class TransformerBackbone(nn.Module):
     """
@@ -174,3 +194,40 @@ class TransformerBackbone(nn.Module):
             x = x.masked_fill(key_padding_mask.unsqueeze(-1), 0.0)
 
         return x
+
+    def forward_incremental(
+        self,
+        x: torch.Tensor,
+        *,
+        caches: list[AttentionKVCache | None] | None = None,
+        key_padding_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, list[AttentionKVCache]]:
+        if x.ndim != 3:
+            raise ValueError(f"`x` must have shape (B, L, D), got {tuple(x.shape)}.")
+        if x.shape[-1] != self.embed_dim:
+            raise ValueError(
+                f"Expected input last dim {self.embed_dim}, got {x.shape[-1]}."
+            )
+        if caches is None:
+            caches = [None] * len(self.layers)
+        if len(caches) != len(self.layers):
+            raise ValueError(
+                f"`caches` length must match number of layers ({len(self.layers)}), "
+                f"got {len(caches)}."
+            )
+
+        updated_caches: list[AttentionKVCache] = []
+        for layer, layer_cache in zip(self.layers, caches):
+            x, updated_cache = layer.forward_incremental(
+                x,
+                cache=layer_cache,
+                key_padding_mask=key_padding_mask,
+            )
+            updated_caches.append(updated_cache)
+
+        x = self.final_norm(x)
+
+        if key_padding_mask is not None:
+            x = x.masked_fill(key_padding_mask.unsqueeze(-1), 0.0)
+
+        return x, updated_caches

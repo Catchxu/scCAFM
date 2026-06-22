@@ -1,7 +1,20 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
 import torch.nn as nn
+
+
+@dataclass(slots=True)
+class AttentionKVCache:
+    k: torch.Tensor
+    v: torch.Tensor
+    key_padding_mask: torch.BoolTensor | None = None
+
+    @property
+    def seq_len(self) -> int:
+        return int(self.k.shape[1])
 
 
 class FlashAttentionBackend(nn.Module):
@@ -168,7 +181,12 @@ class FlashMHA(nn.Module):
             return None
         return key_padding_mask
 
-    def _project_qkv(self, x: torch.Tensor) -> torch.Tensor:
+    def _project_qkv(
+        self,
+        x: torch.Tensor,
+        *,
+        seqlen_offset: int | torch.Tensor = 0,
+    ) -> torch.Tensor:
         batch_size, seq_len = x.shape[:2]
         qkv = self.qkv_proj(x).reshape(
             batch_size,
@@ -178,8 +196,60 @@ class FlashMHA(nn.Module):
             self.head_dim,
         )
         if self.rotary_emb is not None:
-            qkv = self.rotary_emb(qkv)
+            qkv = self.rotary_emb(qkv, seqlen_offset=seqlen_offset)
         return qkv.contiguous()
+
+    def _append_key_padding_mask(
+        self,
+        cache: AttentionKVCache | None,
+        new_key_padding_mask: torch.Tensor | None,
+        *,
+        batch_size: int,
+        new_seq_len: int,
+        device: torch.device,
+    ) -> torch.BoolTensor | None:
+        new_key_padding_mask = self._normalize_key_padding_mask(
+            new_key_padding_mask,
+            batch_size=batch_size,
+            seq_len=new_seq_len,
+        )
+        if cache is None:
+            return new_key_padding_mask
+        if cache.key_padding_mask is None and new_key_padding_mask is None:
+            return None
+
+        previous = cache.key_padding_mask
+        if previous is None:
+            previous = torch.zeros(
+                (batch_size, cache.seq_len),
+                device=device,
+                dtype=torch.bool,
+            )
+        if new_key_padding_mask is None:
+            new_key_padding_mask = torch.zeros(
+                (batch_size, new_seq_len),
+                device=device,
+                dtype=torch.bool,
+            )
+        return torch.cat([previous, new_key_padding_mask], dim=1)
+
+    def _run_incremental_attention(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        *,
+        key_padding_mask: torch.Tensor | None,
+    ) -> torch.Tensor:
+        scores = torch.einsum("bqhd,bkhd->bhqk", q, k).to(torch.float32)
+        scores = scores * float(self.head_dim ** -0.5)
+        if key_padding_mask is not None:
+            scores = scores.masked_fill(key_padding_mask[:, None, None, :], -torch.inf)
+        all_masked = torch.isneginf(scores).all(dim=-1, keepdim=True)
+        scores = scores.masked_fill(all_masked, 0.0)
+        weights = torch.softmax(scores, dim=-1).to(q.dtype)
+        weights = weights.masked_fill(all_masked, 0.0)
+        return torch.einsum("bhqk,bkhd->bqhd", weights, v)
 
     def forward(
         self,
@@ -223,6 +293,77 @@ class FlashMHA(nn.Module):
         if key_padding_mask is not None:
             out = out.masked_fill(key_padding_mask.unsqueeze(-1), 0.0)
         return out
+
+    def forward_incremental(
+        self,
+        x: torch.Tensor,
+        *,
+        cache: AttentionKVCache | None = None,
+        key_padding_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, AttentionKVCache]:
+        """
+        Decode one new token while reusing cached K/V tensors.
+
+        This path uses manual single-query attention over cached K/V so it does
+        not depend on backend-specific incremental FlashAttention kernels.
+        """
+
+        if x.ndim != 3:
+            raise ValueError(f"x must have shape (B, L, D), got {tuple(x.shape)}")
+        batch_size, seq_len, embed_dim = x.shape
+        if seq_len != 1:
+            raise ValueError(
+                "`forward_incremental` currently supports exactly one new token, "
+                f"got sequence length {seq_len}."
+            )
+        if embed_dim != self.embed_dim:
+            raise ValueError(
+                f"Expected input last dim {self.embed_dim}, got {embed_dim}."
+            )
+        if cache is not None and cache.k.shape[0] != batch_size:
+            raise ValueError(
+                "KV cache batch size does not match input batch size: "
+                f"{cache.k.shape[0]} vs {batch_size}."
+            )
+
+        seqlen_offset = 0 if cache is None else cache.seq_len
+        qkv = self._project_qkv(x, seqlen_offset=seqlen_offset)
+        q, new_k, new_v = qkv.unbind(dim=2)
+        if cache is None:
+            k = new_k
+            v = new_v
+        else:
+            k = torch.cat([cache.k, new_k], dim=1)
+            v = torch.cat([cache.v, new_v], dim=1)
+
+        combined_key_padding_mask = self._append_key_padding_mask(
+            cache,
+            key_padding_mask,
+            batch_size=batch_size,
+            new_seq_len=seq_len,
+            device=x.device,
+        )
+        out = self._run_incremental_attention(
+            q,
+            k,
+            v,
+            key_padding_mask=combined_key_padding_mask,
+        )
+        out = out.reshape(batch_size, seq_len, self.embed_dim)
+        out = self.out_proj(out)
+
+        current_key_padding_mask = self._normalize_key_padding_mask(
+            key_padding_mask,
+            batch_size=batch_size,
+            seq_len=seq_len,
+        )
+        if current_key_padding_mask is not None:
+            out = out.masked_fill(current_key_padding_mask.unsqueeze(-1), 0.0)
+        return out, AttentionKVCache(
+            k=k,
+            v=v,
+            key_padding_mask=combined_key_padding_mask,
+        )
 
 
 if __name__ == "__main__":

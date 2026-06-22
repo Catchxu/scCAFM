@@ -1,0 +1,58 @@
+model_source: assets
+
+runtime:
+  attention_backend: fa4
+  precision:
+    model_dtype: fp32
+    autocast_dtype: bf16
+  fsdp:
+    enabled: false
+    sharding_strategy: FULL_SHARD
+    use_orig_params: true
+    limit_all_gathers: true
+
+data:
+  batch_size: 64
+  num_workers: 0
+  pin_memory: true
+  drop_last: false
+  max_length: 4096
+  gene_key: null
+  platform_key: null
+  species_key: species
+  tissue_key: null
+  disease_key: disease
+  expr_pad_value: 0.0
+  condition_defaults:
+    species: human
+    disease: normal
+  preprocess:
+    enabled: true
+    min_genes: 200
+    min_cells: 3
+    max_pct_counts_mt: 20.0
+    target_sum: 10000.0
+    log1p: true
+    n_top_genes: 4094
+    hvg_flavor: seurat
+    subset_hvg: true
+    preserve_gene_names: []
+    hvg_exclude_preserved_genes: true
+    remove_mito_genes: true
+    remove_ribo_genes: true
+    remove_hb_genes: true
+    sanitize_X: true
+    X_fill_value: 0.0
+    inplace: false
+
+cell_fate:
+  sfm_checkpoint_path: null
+  efm_checkpoint_path: null
+  layer_key: cell_fate_transition
+  # Both modes keep the SFM causal order and fixed input gene IDs. They do not
+  # decode gene IDs from EFM's probability head.
+  # - iterative_replace: feed each generated expression back before predicting later genes.
+  # - one_forward: run EFM once on the perturbed profile and use the shifted predictions.
+  generation_mode: iterative_replace
+  use_kv_cache: true
+  clamp_min: 0.0
