@@ -7,17 +7,17 @@ from .metrics import (
 )
 
 __all__ = [
-    "CellFateDEGSimilarityResult",
+    "CellFateMedianSimilarityResult",
     "CellFateSimilarityResult",
     "EvaluationGRNCache",
     "EvaluationPairSpec",
     "build_evaluation_grn_cache",
     "build_reference_grn",
     "evaluate_cell_specific_grns",
-    "evaluate_deg_median_similarity",
     "evaluate_median_similarity",
     "prepare_evaluation_paths",
     "run_evaluation",
+    "select_target_up_degs",
     "binary_auprc",
     "binary_auroc",
     "early_precision_ratio",
@@ -28,10 +28,10 @@ __all__ = [
 
 def __getattr__(name: str):
     if name in {
-        "CellFateDEGSimilarityResult",
+        "CellFateMedianSimilarityResult",
         "CellFateSimilarityResult",
-        "evaluate_deg_median_similarity",
         "evaluate_median_similarity",
+        "select_target_up_degs",
     }:
         from . import cell_fate as _cell_fate
 

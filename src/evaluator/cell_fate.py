@@ -21,70 +21,74 @@ class CellFateSimilarityResult:
     distribution: pd.Series
     average: float
     median: float
+    perturbed_count: int
     target_count: int
-    reference_count: int
     gene_count: int
+    expression_key: str
     target_key: str
-    reference_key: str
     similarity: str
+    genes: list[str]
 
     def to_summary(self) -> dict[str, Any]:
         return {
             "average": self.average,
             "median": self.median,
+            "perturbed_count": self.perturbed_count,
             "target_count": self.target_count,
-            "reference_count": self.reference_count,
             "gene_count": self.gene_count,
+            "expression_key": self.expression_key,
             "target_key": self.target_key,
-            "reference_key": self.reference_key,
             "similarity": self.similarity,
         }
 
 
 @dataclass(frozen=True)
-class CellFateDEGSimilarityResult:
-    unperturbed: pd.Series
-    perturbed: pd.Series
-    deg_genes: list[str]
+class CellFateMedianSimilarityResult:
+    unperturbed: CellFateSimilarityResult
+    perturbed: CellFateSimilarityResult
+    genes: list[str]
     perturbed_layer_key: str
-    target_count: int
-    perturbed_count: int
-    similarity: str
+    gene_selection: str
+    deg_method: str | None = None
+    top_n_degs: int | None = None
+
+    @property
+    def unperturbed_distribution(self) -> pd.Series:
+        return self.unperturbed.distribution
+
+    @property
+    def perturbed_distribution(self) -> pd.Series:
+        return self.perturbed.distribution
+
+    @property
+    def deg_genes(self) -> list[str]:
+        return self.genes
 
     def to_summary(self) -> dict[str, Any]:
         return {
-            "unperturbed_average": float(self.unperturbed.mean()),
-            "perturbed_average": float(self.perturbed.mean()),
-            "unperturbed_median": float(self.unperturbed.median()),
-            "perturbed_median": float(self.perturbed.median()),
-            "target_count": self.target_count,
-            "perturbed_count": self.perturbed_count,
-            "deg_count": len(self.deg_genes),
+            "unperturbed_average": self.unperturbed.average,
+            "perturbed_average": self.perturbed.average,
+            "unperturbed_median": self.unperturbed.median,
+            "perturbed_median": self.perturbed.median,
+            "target_count": self.unperturbed.target_count,
+            "perturbed_count": self.unperturbed.perturbed_count,
+            "gene_count": len(self.genes),
             "perturbed_layer_key": self.perturbed_layer_key,
-            "similarity": self.similarity,
+            "gene_selection": self.gene_selection,
+            "deg_method": self.deg_method,
+            "similarity": self.unperturbed.similarity,
         }
 
 
-def evaluate_deg_median_similarity(
+def select_target_up_degs(
     *,
     perturbed_h5ad: AnnDataLike,
     target_h5ad: AnnDataLike,
-    perturbed_layer_key: str,
     top_n_degs: int = 20,
     deg_method: str = "wilcoxon",
     cell_type_key: str | None = None,
-    similarity: str = "cosine",
-    chunk_size: int = 128,
-) -> CellFateDEGSimilarityResult:
-    """Evaluate initial and generated perturbed cells on target-up DEGs.
-
-    The two input AnnData objects are expected to contain one cell type each.
-    DEGs are computed from `perturbed.X` and `target.X`; the top target-up genes
-    are then used to compute two median-similarity distributions:
-
-    - unperturbed: `perturbed.X` vs `target.X`
-    - perturbed: `perturbed.layers[perturbed_layer_key]` vs `target.X`
-    """
+) -> list[str]:
+    """Return top target-up DEGs from `perturbed_h5ad.X` vs `target_h5ad.X`."""
 
     top_n_degs = int(top_n_degs)
     if top_n_degs <= 0:
@@ -102,106 +106,126 @@ def evaluate_deg_median_similarity(
         top_n_degs=top_n_degs,
         method=deg_method,
     )
-    perturbed_degs = perturbed[:, deg_genes].copy()
-    target_degs = target[:, deg_genes].copy()
-
-    reference_matrix = _matrix_to_tensor(_get_matrix(target_degs, "X", role="target"))
-    unperturbed_tensor = median_similarity_distribution(
-        _matrix_to_tensor(_get_matrix(perturbed_degs, "X", role="perturbed")),
-        reference_matrix,
-        similarity=similarity,
-        chunk_size=chunk_size,
-    )
-    perturbed_tensor = median_similarity_distribution(
-        _matrix_to_tensor(
-            _get_matrix(perturbed_degs, perturbed_layer_key, role="perturbed")
-        ),
-        reference_matrix,
-        similarity=similarity,
-        chunk_size=chunk_size,
-    )
-    index = perturbed_degs.obs_names.astype(str)
-    return CellFateDEGSimilarityResult(
-        unperturbed=pd.Series(
-            unperturbed_tensor.numpy(),
-            index=index,
-            name="unperturbed_median_similarity",
-        ),
-        perturbed=pd.Series(
-            perturbed_tensor.numpy(),
-            index=index,
-            name="perturbed_median_similarity",
-        ),
-        deg_genes=deg_genes,
-        perturbed_layer_key=str(perturbed_layer_key),
-        target_count=int(target_degs.n_obs),
-        perturbed_count=int(perturbed_degs.n_obs),
-        similarity=str(similarity),
-    )
+    return deg_genes
 
 
 def evaluate_median_similarity(
     *,
+    perturbed_h5ad: AnnDataLike,
     target_h5ad: AnnDataLike,
-    reference_h5ad: AnnDataLike,
-    target_key: str = "X",
-    reference_key: str = "X",
-    target_obs_key: str | None = None,
-    target_obs_value: object | None = None,
-    reference_obs_key: str | None = None,
-    reference_obs_value: object | None = None,
+    perturbed_layer_key: str,
+    genes: list[str] | tuple[str, ...] | pd.Index | None = None,
+    top_n_degs: int | None = None,
+    deg_method: str = "wilcoxon",
+    cell_type_key: str | None = None,
     similarity: str = "cosine",
     chunk_size: int = 128,
-) -> CellFateSimilarityResult:
-    """Evaluate target cells against reference cells with median similarity.
+) -> CellFateMedianSimilarityResult:
+    """Evaluate unperturbed and perturbed cells against target cells.
 
-    `target_key` and `reference_key` use `"X"` for `.X`; any other value is
-    read from `.layers[key]`. The returned distribution contains one value per
-    target cell: the median similarity from that target cell to all reference
-    cells.
+    `perturbed_h5ad.X` is treated as the initial expression, and
+    `perturbed_h5ad.layers[perturbed_layer_key]` is treated as the generated
+    perturbed expression. Both are compared against `target_h5ad.X`.
+
+    If `top_n_degs` is set, target-up DEGs are selected from
+    `perturbed_h5ad.X` vs `target_h5ad.X`; otherwise `genes` is used when
+    provided, or all shared genes are used.
     """
 
+    perturbed = _load_adata(perturbed_h5ad)
     target = _load_adata(target_h5ad)
-    reference = _load_adata(reference_h5ad)
-    target = _subset_obs(
-        target,
-        obs_key=target_obs_key,
-        obs_value=target_obs_value,
-        role="target",
-    )
-    reference = _subset_obs(
-        reference,
-        obs_key=reference_obs_key,
-        obs_value=reference_obs_value,
-        role="reference",
-    )
-    target, reference, common_genes = _align_genes(target, reference)
+    _validate_single_cell_type(perturbed, cell_type_key=cell_type_key, role="perturbed")
+    _validate_single_cell_type(target, cell_type_key=cell_type_key, role="target")
+    perturbed, target, common_genes = _align_genes(perturbed, target)
 
-    target_matrix = _matrix_to_tensor(_get_matrix(target, target_key, role="target"))
-    reference_matrix = _matrix_to_tensor(
-        _get_matrix(reference, reference_key, role="reference")
+    if top_n_degs is not None:
+        if genes is not None:
+            raise ValueError("Pass either `genes` or `top_n_degs`, not both.")
+        top_n_degs = int(top_n_degs)
+        if top_n_degs <= 0:
+            raise ValueError(f"`top_n_degs` must be positive, got {top_n_degs}.")
+        selected_genes = _target_up_degs(
+            perturbed,
+            target,
+            top_n_degs=top_n_degs,
+            method=deg_method,
+        )
+        gene_selection = "target_up_degs"
+    else:
+        selected_genes = _resolve_eval_genes(common_genes, genes)
+        gene_selection = "provided_genes" if genes is not None else "shared_genes"
+
+    perturbed = perturbed[:, selected_genes].copy()
+    target = target[:, selected_genes].copy()
+
+    unperturbed = _evaluate_similarity_pair(
+        perturbed=perturbed,
+        target=target,
+        expression_key="X",
+        target_key="X",
+        expression_label="unperturbed",
+        similarity=similarity,
+        chunk_size=chunk_size,
+        genes=selected_genes,
     )
+    perturbed_result = _evaluate_similarity_pair(
+        perturbed=perturbed,
+        target=target,
+        expression_key=perturbed_layer_key,
+        target_key="X",
+        expression_label="perturbed",
+        similarity=similarity,
+        chunk_size=chunk_size,
+        genes=selected_genes,
+    )
+    return CellFateMedianSimilarityResult(
+        unperturbed=unperturbed,
+        perturbed=perturbed_result,
+        genes=selected_genes,
+        perturbed_layer_key=str(perturbed_layer_key),
+        gene_selection=gene_selection,
+        deg_method=str(deg_method) if top_n_degs is not None else None,
+        top_n_degs=top_n_degs,
+    )
+
+
+def _evaluate_similarity_pair(
+    *,
+    perturbed: ad.AnnData,
+    target: ad.AnnData,
+    expression_key: str,
+    target_key: str,
+    expression_label: str,
+    similarity: str,
+    chunk_size: int,
+    genes: list[str],
+) -> CellFateSimilarityResult:
+    perturbed_matrix = _matrix_to_tensor(
+        _get_matrix(perturbed, expression_key, role=expression_label)
+    )
+    target_matrix = _matrix_to_tensor(_get_matrix(target, target_key, role="target"))
     distribution_tensor = median_similarity_distribution(
+        perturbed_matrix,
         target_matrix,
-        reference_matrix,
         similarity=similarity,
         chunk_size=chunk_size,
     )
     distribution = pd.Series(
         distribution_tensor.numpy(),
-        index=target.obs_names.astype(str),
-        name="median_similarity",
+        index=perturbed.obs_names.astype(str),
+        name=f"{expression_label}_median_similarity",
     )
     return CellFateSimilarityResult(
         distribution=distribution,
         average=float(distribution.mean()),
         median=float(distribution.median()),
+        perturbed_count=int(perturbed.n_obs),
         target_count=int(target.n_obs),
-        reference_count=int(reference.n_obs),
-        gene_count=len(common_genes),
+        gene_count=len(genes),
+        expression_key=str(expression_key),
         target_key=str(target_key),
-        reference_key=str(reference_key),
         similarity=str(similarity),
+        genes=list(genes),
     )
 
 
@@ -272,6 +296,25 @@ def _align_genes(
     if not common_genes:
         raise ValueError("Target and reference AnnData have no shared genes.")
     return target[:, common_genes].copy(), reference[:, common_genes].copy(), common_genes
+
+
+def _resolve_eval_genes(
+    common_genes: list[str],
+    genes: list[str] | tuple[str, ...] | pd.Index | None,
+) -> list[str]:
+    if genes is None:
+        return list(common_genes)
+    common = set(common_genes)
+    selected = [str(gene) for gene in genes]
+    missing = [gene for gene in selected if gene not in common]
+    if missing:
+        raise ValueError(
+            "Requested evaluation genes are not shared by perturbed and target AnnData: "
+            + ", ".join(missing[:10])
+        )
+    if not selected:
+        raise ValueError("`genes` must contain at least one gene.")
+    return selected
 
 
 def _target_up_degs(
