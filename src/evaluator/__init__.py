@@ -2,25 +2,40 @@ from .metrics import (
     binary_auprc,
     binary_auroc,
     early_precision_ratio,
+    median_similarity_distribution,
     summarize_binary_metrics,
 )
 
 __all__ = [
+    "CellFateDEGSimilarityResult",
+    "CellFateSimilarityResult",
     "EvaluationGRNCache",
     "EvaluationPairSpec",
     "build_evaluation_grn_cache",
     "build_reference_grn",
     "evaluate_cell_specific_grns",
+    "evaluate_deg_median_similarity",
+    "evaluate_median_similarity",
     "prepare_evaluation_paths",
     "run_evaluation",
     "binary_auprc",
     "binary_auroc",
     "early_precision_ratio",
+    "median_similarity_distribution",
     "summarize_binary_metrics",
 ]
 
 
 def __getattr__(name: str):
+    if name in {
+        "CellFateDEGSimilarityResult",
+        "CellFateSimilarityResult",
+        "evaluate_deg_median_similarity",
+        "evaluate_median_similarity",
+    }:
+        from . import cell_fate as _cell_fate
+
+        return getattr(_cell_fate, name)
     if name in {
         "EvaluationGRNCache",
         "EvaluationPairSpec",

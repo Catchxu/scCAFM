@@ -8,6 +8,82 @@ import torch
 DEFAULT_BINARY_METRICS = ("auprc", "auprc_ratio", "auroc", "ep", "ep_ratio")
 
 
+def _validate_similarity_inputs(
+    target: torch.Tensor,
+    reference: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if target.ndim != 2 or reference.ndim != 2:
+        raise ValueError(
+            "`target` and `reference` must be 2D matrices, got "
+            f"{tuple(target.shape)} and {tuple(reference.shape)}."
+        )
+    if target.shape[1] != reference.shape[1]:
+        raise ValueError(
+            "`target` and `reference` must have the same number of features, got "
+            f"{target.shape[1]} and {reference.shape[1]}."
+        )
+    if target.shape[0] == 0:
+        raise ValueError("`target` must contain at least one cell.")
+    if reference.shape[0] == 0:
+        raise ValueError("`reference` must contain at least one cell.")
+
+    target = target.detach().to(dtype=torch.float64, device="cpu")
+    reference = reference.detach().to(dtype=torch.float64, device="cpu")
+    if not torch.isfinite(target).all():
+        raise ValueError("`target` must contain only finite values.")
+    if not torch.isfinite(reference).all():
+        raise ValueError("`reference` must contain only finite values.")
+    return target, reference
+
+
+def median_similarity_distribution(
+    target: torch.Tensor,
+    reference: torch.Tensor,
+    *,
+    similarity: str = "cosine",
+    chunk_size: int = 128,
+) -> torch.Tensor:
+    """Return one median similarity per target cell.
+
+    For each target row, this computes similarity to every reference row and
+    returns the median of those similarities. The output has shape
+    ``(target_cells,)``.
+    """
+
+    target, reference = _validate_similarity_inputs(target, reference)
+    normalized_similarity = str(similarity).lower()
+    if normalized_similarity != "cosine":
+        raise ValueError(
+            f"`similarity` must be 'cosine', got {similarity!r}."
+        )
+
+    chunk_size = int(chunk_size)
+    if chunk_size <= 0:
+        raise ValueError(f"`chunk_size` must be positive, got {chunk_size}.")
+
+    reference_norm = torch.linalg.vector_norm(reference, dim=1, keepdim=True)
+    reference_norm = torch.where(
+        reference_norm == 0.0,
+        torch.ones_like(reference_norm),
+        reference_norm,
+    )
+    reference = reference / reference_norm
+
+    medians: list[torch.Tensor] = []
+    for start in range(0, int(target.shape[0]), chunk_size):
+        target_chunk = target[start : start + chunk_size]
+        target_norm = torch.linalg.vector_norm(target_chunk, dim=1, keepdim=True)
+        target_norm = torch.where(
+            target_norm == 0.0,
+            torch.ones_like(target_norm),
+            target_norm,
+        )
+        similarity_matrix = (target_chunk / target_norm) @ reference.T
+        medians.append(torch.quantile(similarity_matrix, 0.5, dim=1))
+
+    return torch.cat(medians, dim=0)
+
+
 def _validate_binary_inputs(
     scores: torch.Tensor,
     labels: torch.Tensor,
