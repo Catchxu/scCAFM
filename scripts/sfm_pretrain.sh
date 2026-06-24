@@ -83,7 +83,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     -h|--help)
-      exec "${PYTHON_BIN}" -u -m src.trainer.sfm_pretrain --help
+      exec "${PYTHON_BIN}" -u -m sccafm.trainer.sfm_pretrain --help
       ;;
     *)
       EXTRA_ARGS+=("$1")
@@ -103,7 +103,7 @@ if [[ ! -f "${SFM_PRETRAIN_CONFIG}" ]]; then
 fi
 
 if [[ "${NPROC_PER_NODE}" -gt 1 ]]; then
-  exec torchrun --nproc_per_node="${NPROC_PER_NODE}" -m src.trainer.sfm_pretrain "${ARGS[@]}"
+  exec torchrun --nproc_per_node="${NPROC_PER_NODE}" -m sccafm.trainer.sfm_pretrain "${ARGS[@]}"
 fi
 
-exec "${PYTHON_BIN}" -u -m src.trainer.sfm_pretrain "${ARGS[@]}"
+exec "${PYTHON_BIN}" -u -m sccafm.trainer.sfm_pretrain "${ARGS[@]}"

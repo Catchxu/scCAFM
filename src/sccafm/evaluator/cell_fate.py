@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import anndata as ad
 import numpy as np
@@ -14,6 +13,7 @@ from .metrics import median_similarity_distribution
 
 
 AnnDataLike = ad.AnnData | str | Path
+GeneCollection = list[str] | tuple[str, ...] | pd.Index
 
 
 @dataclass(frozen=True)
@@ -29,7 +29,7 @@ class CellFateSimilarityResult:
     similarity: str
     genes: list[str]
 
-    def to_summary(self) -> dict[str, Any]:
+    def to_summary(self) -> dict[str, object]:
         return {
             "average": self.average,
             "median": self.median,
@@ -64,7 +64,7 @@ class CellFateMedianSimilarityResult:
     def deg_genes(self) -> list[str]:
         return self.genes
 
-    def to_summary(self) -> dict[str, Any]:
+    def to_summary(self) -> dict[str, object]:
         return {
             "unperturbed_average": self.unperturbed.average,
             "perturbed_average": self.perturbed.average,
@@ -76,8 +76,31 @@ class CellFateMedianSimilarityResult:
             "perturbed_layer_key": self.perturbed_layer_key,
             "gene_selection": self.gene_selection,
             "deg_method": self.deg_method,
+            "top_n_degs": self.top_n_degs,
             "similarity": self.unperturbed.similarity,
         }
+
+
+@dataclass(frozen=True)
+class _PreparedCellFateData:
+    perturbed: ad.AnnData
+    target: ad.AnnData
+    shared_genes: list[str]
+
+    def subset_genes(self, genes: list[str]) -> _PreparedCellFateData:
+        return _PreparedCellFateData(
+            perturbed=self.perturbed[:, genes].copy(),
+            target=self.target[:, genes].copy(),
+            shared_genes=list(genes),
+        )
+
+
+@dataclass(frozen=True)
+class _GeneSelection:
+    genes: list[str]
+    name: str
+    deg_method: str | None = None
+    top_n_degs: int | None = None
 
 
 def select_target_up_degs(
@@ -90,23 +113,16 @@ def select_target_up_degs(
 ) -> list[str]:
     """Return top target-up DEGs from `perturbed_h5ad.X` vs `target_h5ad.X`."""
 
-    top_n_degs = int(top_n_degs)
-    if top_n_degs <= 0:
-        raise ValueError(f"`top_n_degs` must be positive, got {top_n_degs}.")
-
-    perturbed = _load_adata(perturbed_h5ad)
-    target = _load_adata(target_h5ad)
-    _validate_single_cell_type(perturbed, cell_type_key=cell_type_key, role="perturbed")
-    _validate_single_cell_type(target, cell_type_key=cell_type_key, role="target")
-    perturbed, target, _ = _align_genes(perturbed, target)
-
-    deg_genes = _target_up_degs(
-        perturbed,
-        target,
-        top_n_degs=top_n_degs,
+    data = _prepare_cell_fate_data(
+        perturbed_h5ad=perturbed_h5ad,
+        target_h5ad=target_h5ad,
+        cell_type_key=cell_type_key,
+    )
+    return _find_target_up_degs(
+        data,
+        top_n_degs=_positive_int(top_n_degs, name="top_n_degs"),
         method=deg_method,
     )
-    return deg_genes
 
 
 def evaluate_median_similarity(
@@ -114,7 +130,7 @@ def evaluate_median_similarity(
     perturbed_h5ad: AnnDataLike,
     target_h5ad: AnnDataLike,
     perturbed_layer_key: str,
-    genes: list[str] | tuple[str, ...] | pd.Index | None = None,
+    genes: GeneCollection | None = None,
     top_n_degs: int | None = None,
     deg_method: str = "wilcoxon",
     cell_type_key: str | None = None,
@@ -132,78 +148,56 @@ def evaluate_median_similarity(
     provided, or all shared genes are used.
     """
 
-    perturbed = _load_adata(perturbed_h5ad)
-    target = _load_adata(target_h5ad)
-    _validate_single_cell_type(perturbed, cell_type_key=cell_type_key, role="perturbed")
-    _validate_single_cell_type(target, cell_type_key=cell_type_key, role="target")
-    perturbed, target, common_genes = _align_genes(perturbed, target)
-
-    if top_n_degs is not None:
-        if genes is not None:
-            raise ValueError("Pass either `genes` or `top_n_degs`, not both.")
-        top_n_degs = int(top_n_degs)
-        if top_n_degs <= 0:
-            raise ValueError(f"`top_n_degs` must be positive, got {top_n_degs}.")
-        selected_genes = _target_up_degs(
-            perturbed,
-            target,
-            top_n_degs=top_n_degs,
-            method=deg_method,
-        )
-        gene_selection = "target_up_degs"
-    else:
-        selected_genes = _resolve_eval_genes(common_genes, genes)
-        gene_selection = "provided_genes" if genes is not None else "shared_genes"
-
-    perturbed = perturbed[:, selected_genes].copy()
-    target = target[:, selected_genes].copy()
+    data = _prepare_cell_fate_data(
+        perturbed_h5ad=perturbed_h5ad,
+        target_h5ad=target_h5ad,
+        cell_type_key=cell_type_key,
+    )
+    selection = _select_evaluation_genes(
+        data,
+        genes=genes,
+        top_n_degs=top_n_degs,
+        deg_method=deg_method,
+    )
+    data = data.subset_genes(selection.genes)
 
     unperturbed = _evaluate_similarity_pair(
-        perturbed=perturbed,
-        target=target,
+        data=data,
         expression_key="X",
-        target_key="X",
         expression_label="unperturbed",
         similarity=similarity,
         chunk_size=chunk_size,
-        genes=selected_genes,
     )
     perturbed_result = _evaluate_similarity_pair(
-        perturbed=perturbed,
-        target=target,
+        data=data,
         expression_key=perturbed_layer_key,
-        target_key="X",
         expression_label="perturbed",
         similarity=similarity,
         chunk_size=chunk_size,
-        genes=selected_genes,
     )
     return CellFateMedianSimilarityResult(
         unperturbed=unperturbed,
         perturbed=perturbed_result,
-        genes=selected_genes,
+        genes=selection.genes,
         perturbed_layer_key=str(perturbed_layer_key),
-        gene_selection=gene_selection,
-        deg_method=str(deg_method) if top_n_degs is not None else None,
-        top_n_degs=top_n_degs,
+        gene_selection=selection.name,
+        deg_method=selection.deg_method,
+        top_n_degs=selection.top_n_degs,
     )
 
 
 def _evaluate_similarity_pair(
     *,
-    perturbed: ad.AnnData,
-    target: ad.AnnData,
+    data: _PreparedCellFateData,
     expression_key: str,
-    target_key: str,
     expression_label: str,
     similarity: str,
     chunk_size: int,
-    genes: list[str],
 ) -> CellFateSimilarityResult:
     perturbed_matrix = _matrix_to_tensor(
-        _get_matrix(perturbed, expression_key, role=expression_label)
+        _get_matrix(data.perturbed, expression_key, role=expression_label)
     )
-    target_matrix = _matrix_to_tensor(_get_matrix(target, target_key, role="target"))
+    target_matrix = _matrix_to_tensor(_get_matrix(data.target, "X", role="target"))
     distribution_tensor = median_similarity_distribution(
         perturbed_matrix,
         target_matrix,
@@ -212,20 +206,38 @@ def _evaluate_similarity_pair(
     )
     distribution = pd.Series(
         distribution_tensor.numpy(),
-        index=perturbed.obs_names.astype(str),
+        index=data.perturbed.obs_names.astype(str),
         name=f"{expression_label}_median_similarity",
     )
     return CellFateSimilarityResult(
         distribution=distribution,
         average=float(distribution.mean()),
         median=float(distribution.median()),
-        perturbed_count=int(perturbed.n_obs),
-        target_count=int(target.n_obs),
-        gene_count=len(genes),
+        perturbed_count=int(data.perturbed.n_obs),
+        target_count=int(data.target.n_obs),
+        gene_count=len(data.shared_genes),
         expression_key=str(expression_key),
-        target_key=str(target_key),
+        target_key="X",
         similarity=str(similarity),
-        genes=list(genes),
+        genes=list(data.shared_genes),
+    )
+
+
+def _prepare_cell_fate_data(
+    *,
+    perturbed_h5ad: AnnDataLike,
+    target_h5ad: AnnDataLike,
+    cell_type_key: str | None,
+) -> _PreparedCellFateData:
+    perturbed = _load_adata(perturbed_h5ad)
+    target = _load_adata(target_h5ad)
+    _validate_single_cell_type(perturbed, cell_type_key=cell_type_key, role="perturbed")
+    _validate_single_cell_type(target, cell_type_key=cell_type_key, role="target")
+    perturbed, target, shared_genes = _align_shared_genes(perturbed, target)
+    return _PreparedCellFateData(
+        perturbed=perturbed,
+        target=target,
+        shared_genes=shared_genes,
     )
 
 
@@ -233,28 +245,6 @@ def _load_adata(source: AnnDataLike) -> ad.AnnData:
     if isinstance(source, ad.AnnData):
         return source
     return ad.read_h5ad(Path(source).expanduser())
-
-
-def _subset_obs(
-    adata: ad.AnnData,
-    *,
-    obs_key: str | None,
-    obs_value: object | None,
-    role: str,
-) -> ad.AnnData:
-    if obs_key is None:
-        return adata
-    if obs_key not in adata.obs:
-        raise KeyError(
-            f"`{role}_obs_key={obs_key}` not found in {role} AnnData obs columns. "
-            f"Available columns: {list(adata.obs.columns)}"
-        )
-    mask = adata.obs[obs_key].astype(str).to_numpy() == str(obs_value)
-    if not bool(mask.any()):
-        raise ValueError(
-            f"No {role} cells found with `{obs_key}` == {obs_value!r}."
-        )
-    return adata[mask].copy()
 
 
 def _validate_single_cell_type(
@@ -270,7 +260,7 @@ def _validate_single_cell_type(
             f"`cell_type_key={cell_type_key}` not found in {role} AnnData obs columns. "
             f"Available columns: {list(adata.obs.columns)}"
         )
-    values = pd.Index(adata.obs[cell_type_key].astype(str).unique()).dropna()
+    values = pd.Index(adata.obs[cell_type_key].dropna().astype(str).unique())
     if len(values) != 1:
         raise ValueError(
             f"{role} AnnData must contain exactly one `{cell_type_key}` value; "
@@ -278,35 +268,62 @@ def _validate_single_cell_type(
         )
 
 
-def _align_genes(
+def _align_shared_genes(
+    perturbed: ad.AnnData,
     target: ad.AnnData,
-    reference: ad.AnnData,
 ) -> tuple[ad.AnnData, ad.AnnData, list[str]]:
+    if not perturbed.var_names.is_unique:
+        raise ValueError("Perturbed AnnData var_names must be unique.")
     if not target.var_names.is_unique:
         raise ValueError("Target AnnData var_names must be unique.")
-    if not reference.var_names.is_unique:
-        raise ValueError("Reference AnnData var_names must be unique.")
 
-    reference_genes = set(reference.var_names.astype(str))
-    common_genes = [
+    target_genes = set(target.var_names.astype(str))
+    shared_genes = [
         str(gene)
-        for gene in target.var_names.astype(str)
-        if str(gene) in reference_genes
+        for gene in perturbed.var_names.astype(str)
+        if str(gene) in target_genes
     ]
-    if not common_genes:
-        raise ValueError("Target and reference AnnData have no shared genes.")
-    return target[:, common_genes].copy(), reference[:, common_genes].copy(), common_genes
+    if not shared_genes:
+        raise ValueError("Perturbed and target AnnData have no shared genes.")
+    return (
+        perturbed[:, shared_genes].copy(),
+        target[:, shared_genes].copy(),
+        shared_genes,
+    )
 
 
-def _resolve_eval_genes(
-    common_genes: list[str],
-    genes: list[str] | tuple[str, ...] | pd.Index | None,
-) -> list[str]:
+def _select_evaluation_genes(
+    data: _PreparedCellFateData,
+    *,
+    genes: GeneCollection | None,
+    top_n_degs: int | None,
+    deg_method: str,
+) -> _GeneSelection:
+    if genes is not None and top_n_degs is not None:
+        raise ValueError("Pass either `genes` or `top_n_degs`, not both.")
+    if top_n_degs is not None:
+        count = _positive_int(top_n_degs, name="top_n_degs")
+        return _GeneSelection(
+            genes=_find_target_up_degs(data, top_n_degs=count, method=deg_method),
+            name="target_up_degs",
+            deg_method=str(deg_method),
+            top_n_degs=count,
+        )
     if genes is None:
-        return list(common_genes)
-    common = set(common_genes)
+        return _GeneSelection(genes=list(data.shared_genes), name="shared_genes")
+    return _GeneSelection(
+        genes=_validate_requested_genes(data.shared_genes, genes),
+        name="provided_genes",
+    )
+
+
+def _validate_requested_genes(
+    shared_genes: list[str],
+    genes: GeneCollection,
+) -> list[str]:
+    shared = set(shared_genes)
     selected = [str(gene) for gene in genes]
-    missing = [gene for gene in selected if gene not in common]
+    missing = [gene for gene in selected if gene not in shared]
     if missing:
         raise ValueError(
             "Requested evaluation genes are not shared by perturbed and target AnnData: "
@@ -317,9 +334,8 @@ def _resolve_eval_genes(
     return selected
 
 
-def _target_up_degs(
-    perturbed: ad.AnnData,
-    target: ad.AnnData,
+def _find_target_up_degs(
+    data: _PreparedCellFateData,
     *,
     top_n_degs: int,
     method: str,
@@ -327,7 +343,7 @@ def _target_up_degs(
     import scanpy as sc
 
     combined = ad.concat(
-        {"perturbed": perturbed, "target": target},
+        {"perturbed": data.perturbed, "target": data.target},
         label="_cell_fate_group",
         join="inner",
         index_unique="-",
@@ -363,6 +379,13 @@ def _target_up_degs(
             f"Only found {len(selected)} target-up genes, fewer than top_n_degs={top_n_degs}."
         )
     return selected
+
+
+def _positive_int(value: int, *, name: str) -> int:
+    value = int(value)
+    if value <= 0:
+        raise ValueError(f"`{name}` must be positive, got {value}.")
+    return value
 
 
 def _get_matrix(adata: ad.AnnData, key: str, *, role: str):

@@ -65,20 +65,19 @@ documentation = "https://github.com/Catchxu/scCAFM#readme"
 
 
 [project.scripts]
-sccafm-sfm-pretrain = "src.trainer.sfm_pretrain:main"
-sccafm-efm-pretrain = "src.trainer.efm_pretrain:main"
+sccafm-sfm-pretrain = "sccafm.trainer.sfm_pretrain:main"
+sccafm-efm-pretrain = "sccafm.trainer.efm_pretrain:main"
 
 
 [tool.hatch.build.targets.wheel]
 packages = [
-    "src",
-    "configs"
+    "src/sccafm"
 ]
 
 
 [tool.hatch.build.targets.sdist]
 include = [
-    "src",
+    "src/sccafm",
     "README.md",
     "configs",
 ]

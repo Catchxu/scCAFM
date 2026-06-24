@@ -5,7 +5,7 @@ import pandas as pd
 import torch
 from transformers import AutoModel, AutoTokenizer
 
-from src.assets import load_vocab_json, save_vocab_tensor_file
+from sccafm.assets import load_vocab_json, save_vocab_tensor_file
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]

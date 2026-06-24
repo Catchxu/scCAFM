@@ -85,7 +85,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     -h|--help)
-      exec "${PYTHON_BIN}" -u -m src.evaluator.grn --help
+      exec "${PYTHON_BIN}" -u -m sccafm.evaluator.grn --help
       ;;
     *)
       EXTRA_ARGS+=("$1")
@@ -105,7 +105,7 @@ if [[ ! -f "${EVAL_GRN_CONFIG}" ]]; then
 fi
 
 if [[ "${NPROC_PER_NODE}" -gt 1 ]]; then
-  exec torchrun --nproc_per_node="${NPROC_PER_NODE}" -m src.evaluator.grn "${ARGS[@]}"
+  exec torchrun --nproc_per_node="${NPROC_PER_NODE}" -m sccafm.evaluator.grn "${ARGS[@]}"
 fi
 
-exec "${PYTHON_BIN}" -u -m src.evaluator.grn "${ARGS[@]}"
+exec "${PYTHON_BIN}" -u -m sccafm.evaluator.grn "${ARGS[@]}"

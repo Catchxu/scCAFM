@@ -9,7 +9,7 @@ TOKEN_DICT_PATH = ROOT_DIR / "assets" / "tokenizer" / "vocab.json"
 OUTPUT_PATH = ROOT_DIR / "checkpoints" / "gene_go_terms.csv"
 ENSEMBL_HOST = "http://www.ensembl.org"
 
-from src.assets import load_vocab_json
+from sccafm.assets import load_vocab_json
 
 
 def load_gene_tokens(path):

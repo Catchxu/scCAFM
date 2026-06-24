@@ -37,7 +37,7 @@ fi
 for arg in "$@"; do
   case "${arg}" in
     -h|--help)
-      exec "${PYTHON_BIN}" -u -m src.trainer.efm_pretrain --help
+      exec "${PYTHON_BIN}" -u -m sccafm.trainer.efm_pretrain --help
       ;;
   esac
 done
@@ -92,7 +92,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     -h|--help)
-      exec "${PYTHON_BIN}" -u -m src.trainer.efm_pretrain --help
+      exec "${PYTHON_BIN}" -u -m sccafm.trainer.efm_pretrain --help
       ;;
     *)
       EXTRA_ARGS+=("$1")
@@ -112,7 +112,7 @@ if [[ ! -f "${EFM_PRETRAIN_CONFIG}" ]]; then
 fi
 
 if [[ "${NPROC_PER_NODE}" -gt 1 ]]; then
-  exec torchrun --nproc_per_node="${NPROC_PER_NODE}" -m src.trainer.efm_pretrain "${ARGS[@]}"
+  exec torchrun --nproc_per_node="${NPROC_PER_NODE}" -m sccafm.trainer.efm_pretrain "${ARGS[@]}"
 fi
 
-exec "${PYTHON_BIN}" -u -m src.trainer.efm_pretrain "${ARGS[@]}"
+exec "${PYTHON_BIN}" -u -m sccafm.trainer.efm_pretrain "${ARGS[@]}"
