@@ -79,9 +79,13 @@ loss:
       initial: 20.0
       final: 10.0
   dag:
-    enabled: false
+    enabled: true
     kwargs:
       lambda_dag: 1.0
+  sparsity:
+    enabled: true
+    kwargs:
+      lambda_sparsity: 0.001
 
 trainer:
   epochs: 1

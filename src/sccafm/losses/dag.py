@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 
 from ..models.sfm import FactorState
+from .reduction import distributed_weighted_mean_loss
 
 
 class DAGLoss(nn.Module):
@@ -68,11 +69,21 @@ class DAGLoss(nn.Module):
             u = factors.u.float()
             v = factors.v.float()
             adj_factor = torch.bmm(v.transpose(1, 2), u)
-            dag_h_batch = self._compute_dag_constraint(adj_factor).mean()
+            dag_h_per_cell = self._compute_dag_constraint(adj_factor)
+            dag_h_sum = dag_h_per_cell.sum()
+            dag_h_count = torch.tensor(
+                float(dag_h_per_cell.numel()),
+                device=dag_h_sum.device,
+                dtype=dag_h_sum.dtype,
+            )
+            dag_h_loss, dag_h_metric = distributed_weighted_mean_loss(
+                local_sum=dag_h_sum,
+                local_count=dag_h_count,
+            )
 
-        self.last_h.copy_(dag_h_batch.detach().to(torch.float32))
+        self.last_h.copy_(dag_h_metric.detach().to(torch.float32))
 
         if int(global_step) < self.warmup_steps:
-            return dag_h_batch.to(dtype=factors.u.dtype) * 0.0
+            return dag_h_loss.to(dtype=factors.u.dtype) * 0.0
 
-        return dag_h_batch.to(dtype=factors.u.dtype) * self.lambda_dag
+        return dag_h_loss.to(dtype=factors.u.dtype) * self.lambda_dag

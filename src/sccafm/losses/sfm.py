@@ -12,6 +12,7 @@ import torch.nn as nn
 from .dag import DAGLoss
 from .elbo import ELBOLoss
 from .prior import PriorLoss
+from .sparsity import SparsityLoss
 from ..models.wrapper import ModelWrapperOutput
 
 
@@ -51,15 +52,24 @@ class PretrainingLossManager(nn.Module):
         self.use_elbo = bool(loss_cfg.get("elbo", {}).get("enabled", True))
         self.use_prior = bool(loss_cfg.get("prior", {}).get("enabled", False))
         self.use_dag = bool(loss_cfg.get("dag", {}).get("enabled", False))
+        self.use_sparsity = bool(loss_cfg.get("sparsity", {}).get("enabled", False))
 
         self.elbo = ELBOLoss() if self.use_elbo else None
+        scheduler_cfg = config.get("scheduler", {})
+        warmup_ratio = float(scheduler_cfg.get("warmup_ratio", 0.03))
+        warmup_steps = int(total_steps * warmup_ratio)
+
         dag_cfg = loss_cfg.get("dag", {})
         dag_kwargs = dict(dag_cfg.get("kwargs", {}))
         if self.use_dag and "warmup_steps" not in dag_kwargs:
-            scheduler_cfg = config.get("scheduler", {})
-            warmup_ratio = float(scheduler_cfg.get("warmup_ratio", 0.03))
-            dag_kwargs["warmup_steps"] = int(total_steps * warmup_ratio)
+            dag_kwargs["warmup_steps"] = warmup_steps
         self.dag = DAGLoss(**dag_kwargs) if self.use_dag else None
+
+        sparsity_cfg = loss_cfg.get("sparsity", {})
+        sparsity_kwargs = dict(sparsity_cfg.get("kwargs", {}))
+        if self.use_sparsity and "warmup_steps" not in sparsity_kwargs:
+            sparsity_kwargs["warmup_steps"] = warmup_steps
+        self.sparsity = SparsityLoss(**sparsity_kwargs) if self.use_sparsity else None
 
         prior_cfg = loss_cfg.get("prior", {})
         prior_kwargs = dict(prior_cfg.get("kwargs", {}))
@@ -119,6 +129,15 @@ class PretrainingLossManager(nn.Module):
             dag_raw = self.dag(foundation_output.factors, global_step=global_step)
             total_loss = dag_raw if total_loss is None else total_loss + dag_raw
             metrics["dag"] = float(self.dag.last_h.detach().item())
+
+        if self.use_sparsity:
+            sparsity_raw = self.sparsity(
+                tokens=tokens,
+                factors=foundation_output.factors,
+                global_step=global_step,
+            )
+            total_loss = sparsity_raw if total_loss is None else total_loss + sparsity_raw
+            metrics["sparsity"] = float(self.sparsity.last_mean.detach().item())
 
         if total_loss is None:
             raise ValueError("At least one loss component must be enabled.")
