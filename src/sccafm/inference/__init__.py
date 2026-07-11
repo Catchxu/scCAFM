@@ -1,5 +1,5 @@
 """Inference helpers."""
 
-from . import cell_fate, grn
+from . import cell_fate, cell_type_annotation, grn
 
-__all__ = ["cell_fate", "grn"]
+__all__ = ["cell_fate", "cell_type_annotation", "grn"]
