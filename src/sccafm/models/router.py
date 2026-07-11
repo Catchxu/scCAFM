@@ -165,6 +165,11 @@ class QBGating(nn.Module):
         self._beta_update_sum.zero_()
         self._beta_update_weight.zero_()
 
+    @torch.no_grad()
+    def discard_beta_update(self) -> None:
+        self._beta_update_sum.zero_()
+        self._beta_update_weight.zero_()
+
 
 class GeneRouter(nn.Module):
     """

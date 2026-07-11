@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+import torch.distributed as dist
 
 from torch.distributed.fsdp import FullOptimStateDictConfig
 from torch.distributed.fsdp import FullStateDictConfig
@@ -31,6 +32,39 @@ def _cast_floating_tensors_to_fp32(payload: Any) -> Any:
     if isinstance(payload, tuple):
         return tuple(_cast_floating_tensors_to_fp32(value) for value in payload)
     return payload
+
+
+def _payload_has_nonfinite(payload: Any) -> bool:
+    if torch.is_tensor(payload):
+        return bool(payload.is_floating_point() and not torch.isfinite(payload).all())
+    if isinstance(payload, dict):
+        return any(_payload_has_nonfinite(value) for value in payload.values())
+    if isinstance(payload, (list, tuple)):
+        return any(_payload_has_nonfinite(value) for value in payload)
+    return False
+
+
+def _require_finite_training_state(
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    runtime: RuntimeContext,
+) -> None:
+    local_bad = any(
+        not bool(torch.isfinite(parameter.detach()).all())
+        for parameter in model.parameters()
+    ) or _payload_has_nonfinite(optimizer.state)
+    bad_flag = torch.tensor(
+        int(local_bad),
+        device=runtime.device,
+        dtype=torch.int32,
+    )
+    if dist.is_available() and dist.is_initialized():
+        dist.all_reduce(bad_flag, op=dist.ReduceOp.MAX)
+    if bool(bad_flag.item()):
+        raise FloatingPointError(
+            "Refusing to overwrite the latest checkpoint with non-finite model "
+            "parameters or optimizer state."
+        )
 
 
 class CheckpointManager:
@@ -66,6 +100,7 @@ class CheckpointManager:
     ) -> tuple[Path, Path]:
         model_weights_path = self.model_weights_path()
         resume_state_path = self.latest_resume_state_path()
+        _require_finite_training_state(model, optimizer, self.runtime)
         if isinstance(model, FSDP):
             state_cfg = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
             optim_state_cfg = FullOptimStateDictConfig(offload_to_cpu=True, rank0_only=True)
@@ -122,7 +157,12 @@ class CheckpointManager:
         model_weights_path = self.model_weights_path()
         if not model_weights_path.exists():
             return None
-        return load_model_state_dict(model_weights_path)
+        model_state = load_model_state_dict(model_weights_path)
+        if _payload_has_nonfinite(model_state):
+            raise FloatingPointError(
+                f"Model weights contain non-finite values: {model_weights_path}"
+            )
+        return model_state
 
     def load_resume_state(self, resume_path: str | None) -> dict[str, Any] | None:
         if resume_path is None:
@@ -130,6 +170,10 @@ class CheckpointManager:
 
         resume_state_path = Path(resume_path).expanduser().resolve()
         payload = torch.load(resume_state_path, map_location="cpu")
+        if _payload_has_nonfinite(payload.get("optimizer_state_dict", {})):
+            raise FloatingPointError(
+                f"Optimizer state contains non-finite values: {resume_state_path}"
+            )
         module = payload.get("module")
         if module not in {None, "sfm"}:
             raise ValueError(

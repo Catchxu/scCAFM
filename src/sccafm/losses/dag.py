@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 
 from ..models.sfm import FactorState
-from .reduction import distributed_weighted_mean_loss
+from .reduction import distributed_any_nonfinite, distributed_weighted_mean_loss
 
 
 class DAGLoss(nn.Module):
@@ -24,6 +24,26 @@ class DAGLoss(nn.Module):
         self.register_buffer(
             "last_h",
             torch.zeros((), dtype=torch.float32),
+            persistent=False,
+        )
+        self.register_buffer(
+            "last_weighted",
+            torch.zeros((), dtype=torch.float32),
+            persistent=False,
+        )
+        self.register_buffer(
+            "disabled",
+            torch.zeros((), dtype=torch.bool),
+            persistent=True,
+        )
+        self.register_buffer(
+            "active",
+            torch.zeros((), dtype=torch.bool),
+            persistent=False,
+        )
+        self.register_buffer(
+            "just_disabled",
+            torch.zeros((), dtype=torch.bool),
             persistent=False,
         )
 
@@ -64,6 +84,15 @@ class DAGLoss(nn.Module):
             raise ValueError("`factors` must be provided.")
         self._validate_factors(factors)
 
+        self.just_disabled.zero_()
+        if bool(self.disabled.item()) or int(global_step) < self.warmup_steps:
+            self.active.zero_()
+            self.last_h.zero_()
+            self.last_weighted.zero_()
+            return torch.zeros((), device=factors.u.device, dtype=torch.float32)
+
+        self.active.fill_(True)
+
         # Keep the DAG computation in fp32 for stability even if training uses bf16 autocast.
         with torch.autocast(device_type=factors.u.device.type, enabled=False):
             u = factors.u.float()
@@ -81,9 +110,16 @@ class DAGLoss(nn.Module):
                 local_count=dag_h_count,
             )
 
-        self.last_h.copy_(dag_h_metric.detach().to(torch.float32))
+        weighted_loss = dag_h_loss * self.lambda_dag
+        weighted_metric = dag_h_metric * self.lambda_dag
+        if distributed_any_nonfinite(dag_h_loss, dag_h_metric, weighted_loss, weighted_metric):
+            self.disabled.fill_(True)
+            self.active.zero_()
+            self.just_disabled.fill_(True)
+            self.last_h.zero_()
+            self.last_weighted.zero_()
+            return torch.zeros((), device=factors.u.device, dtype=torch.float32)
 
-        if int(global_step) < self.warmup_steps:
-            return dag_h_loss.to(dtype=factors.u.dtype) * 0.0
-
-        return dag_h_loss.to(dtype=factors.u.dtype) * self.lambda_dag
+        self.last_h.copy_(dag_h_metric.detach())
+        self.last_weighted.copy_(weighted_metric.detach())
+        return weighted_loss

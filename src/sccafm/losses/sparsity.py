@@ -10,7 +10,7 @@ from ..utils import (
     require_tensor,
     validate_factor_shapes,
 )
-from .reduction import distributed_weighted_mean_loss
+from .reduction import distributed_any_nonfinite, distributed_weighted_mean_loss
 
 
 class SparsityLoss(nn.Module):
@@ -35,6 +35,26 @@ class SparsityLoss(nn.Module):
             torch.zeros((), dtype=torch.float32),
             persistent=False,
         )
+        self.register_buffer(
+            "last_weighted",
+            torch.zeros((), dtype=torch.float32),
+            persistent=False,
+        )
+        self.register_buffer(
+            "disabled",
+            torch.zeros((), dtype=torch.bool),
+            persistent=True,
+        )
+        self.register_buffer(
+            "active",
+            torch.zeros((), dtype=torch.bool),
+            persistent=False,
+        )
+        self.register_buffer(
+            "just_disabled",
+            torch.zeros((), dtype=torch.bool),
+            persistent=False,
+        )
 
     def forward(
         self,
@@ -49,6 +69,15 @@ class SparsityLoss(nn.Module):
         non_tf_mask = require_tensor(tokens, "non_tf_mask")
         padding_mask = tokens.get("padding_mask")
         validate_factor_shapes(factors=factors, input_shape_prefix=input_ids.shape)
+
+        self.just_disabled.zero_()
+        if bool(self.disabled.item()) or int(global_step) < self.warmup_steps:
+            self.active.zero_()
+            self.last_mean.zero_()
+            self.last_weighted.zero_()
+            return torch.zeros((), device=factors.u.device, dtype=torch.float32)
+
+        self.active.fill_(True)
 
         active_gene_mask = build_active_gene_mask(
             input_ids=input_ids,
@@ -79,9 +108,21 @@ class SparsityLoss(nn.Module):
                 local_count=local_count,
             )
 
-        self.last_mean.copy_(sparsity_metric.detach().to(torch.float32))
+        weighted_loss = sparsity_loss * self.lambda_sparsity
+        weighted_metric = sparsity_metric * self.lambda_sparsity
+        if distributed_any_nonfinite(
+            sparsity_loss,
+            sparsity_metric,
+            weighted_loss,
+            weighted_metric,
+        ):
+            self.disabled.fill_(True)
+            self.active.zero_()
+            self.just_disabled.fill_(True)
+            self.last_mean.zero_()
+            self.last_weighted.zero_()
+            return torch.zeros((), device=factors.u.device, dtype=torch.float32)
 
-        if int(global_step) < self.warmup_steps:
-            return sparsity_loss.to(dtype=factors.u.dtype) * 0.0
-
-        return sparsity_loss.to(dtype=factors.u.dtype) * self.lambda_sparsity
+        self.last_mean.copy_(sparsity_metric.detach())
+        self.last_weighted.copy_(weighted_metric.detach())
+        return weighted_loss

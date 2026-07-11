@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import gc
+import math
 import os
 import shutil
 from typing import Any
@@ -89,10 +90,31 @@ def _load_resume_states(
     return payload.get("train_state")
 
 
+def _load_loss_manager_state(
+    loss_manager: PretrainingLossManager,
+    state_dict: dict[str, Any],
+) -> None:
+    incompatible = loss_manager.load_state_dict(state_dict, strict=False)
+    allowed_missing = {"dag.disabled", "sparsity.disabled"}
+    unexpected_missing = set(incompatible.missing_keys).difference(allowed_missing)
+    if unexpected_missing or incompatible.unexpected_keys:
+        raise RuntimeError(
+            "Incompatible SFM loss-manager resume state: "
+            f"missing={sorted(unexpected_missing)}, "
+            f"unexpected={sorted(incompatible.unexpected_keys)}."
+        )
+
+
 def _apply_qb_gating_updates(model: torch.nn.Module) -> None:
     for module in model.modules():
         if isinstance(module, QBGating):
             module.apply_beta_update()
+
+
+def _discard_qb_gating_updates(model: torch.nn.Module) -> None:
+    for module in model.modules():
+        if isinstance(module, QBGating):
+            module.discard_beta_update()
 
 
 def _normalize_checkpoint_frequency(config: dict[str, Any]) -> str:
@@ -110,6 +132,18 @@ def _normalize_checkpoint_frequency(config: dict[str, Any]) -> str:
             f"got {frequency!r}."
         )
     return frequency
+
+
+def _normalize_nonfinite_policy(config: dict[str, Any]) -> str:
+    policy = str(
+        config.get("trainer", {}).get("nonfinite_policy", "disable_regularizer")
+    ).strip().lower()
+    if policy != "disable_regularizer":
+        raise ValueError(
+            "`trainer.nonfinite_policy` must be 'disable_regularizer', "
+            f"got {policy!r}."
+        )
+    return policy
 
 
 def _drop_regenerated_condition_embedding_weights(
@@ -297,18 +331,39 @@ class PretrainingTrainer:
             return torch.autocast(device_type="cuda", dtype=torch.float16)
         raise ValueError(f"Unsupported `runtime.precision.autocast_dtype`: {autocast_dtype}")
 
-    def _clip_grad_norm(self) -> float | None:
+    def _clip_grad_norm(self) -> float:
         max_norm = self.train_cfg.get("grad_clip_norm")
-        if max_norm is None:
-            return None
+        resolved_max_norm = float("inf") if max_norm is None else float(max_norm)
 
         if isinstance(self.model, FSDP):
-            grad_norm = self.model.clip_grad_norm_(float(max_norm))
+            grad_norm = self.model.clip_grad_norm_(resolved_max_norm)
         else:
-            grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), float(max_norm))
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                self.model.parameters(),
+                resolved_max_norm,
+            )
         if torch.is_tensor(grad_norm):
             return float(grad_norm.detach().item())
         return float(grad_norm)
+
+    def _discard_nonfinite_window(self, grad_norm: float) -> str:
+        self.optimizer.zero_grad(set_to_none=True)
+        _discard_qb_gating_updates(self.model)
+        disabled_name = self.loss_manager.disable_next_regularizer()
+        if disabled_name is None:
+            raise FloatingPointError(
+                "Non-finite gradients persisted after DAG and sparsity were disabled "
+                f"(global_step={int(self.train_state['global_step'])}, grad_norm={grad_norm})."
+            )
+        if self.runtime.is_main:
+            self.logger.warning(
+                "Discarded non-finite gradient accumulation window at global_step=%s "
+                "(grad_norm=%s); disabled %s for the remainder of the run.",
+                int(self.train_state["global_step"]),
+                grad_norm,
+                disabled_name,
+            )
+        return disabled_name
 
     def _checkpoint_frequency(self) -> str:
         return _normalize_checkpoint_frequency(self.config)
@@ -424,32 +479,50 @@ class PretrainingTrainer:
                                         compute_grn=False,
                                         return_factors=True,
                                     )
-                                    loss_result = self.loss_manager(
-                                        tokens=tokens,
-                                        model_output=model_output,
-                                        current_epoch=epoch,
-                                        global_step=int(self.train_state["global_step"]),
-                                    )
+
+                                loss_result = self.loss_manager(
+                                    tokens=tokens,
+                                    model_output=model_output,
+                                    current_epoch=epoch,
+                                    global_step=int(self.train_state["global_step"]),
+                                )
 
                                 (loss_result.total / grad_accum_steps).backward()
+
+                            for regularizer_name in loss_result.disabled_regularizers:
+                                if self.runtime.is_main:
+                                    self.logger.warning(
+                                        "Disabled non-finite %s regularizer at global_step=%s; "
+                                        "continuing with the remaining losses.",
+                                        regularizer_name,
+                                        int(self.train_state["global_step"]),
+                                    )
 
                             metrics = dict(loss_result.metrics)
                             accum_micro_steps += 1
                             for key, value in metrics.items():
                                 accum_metric_sums[key] = accum_metric_sums.get(key, 0.0) + float(value)
 
-                            epoch_steps += 1
-                            for key, value in metrics.items():
-                                epoch_metric_sums[key] = epoch_metric_sums.get(key, 0.0) + float(value)
-
                             if should_step:
-                                self._clip_grad_norm()
+                                grad_norm = self._clip_grad_norm()
+                                if not math.isfinite(grad_norm):
+                                    self._discard_nonfinite_window(grad_norm)
+                                    accum_metric_sums = {}
+                                    accum_micro_steps = 0
+                                    del loss_result, model_output, tokens
+                                    continue
+
                                 self.optimizer.step()
                                 _apply_qb_gating_updates(self.model)
                                 self.scheduler.step()
                                 self.optimizer.zero_grad(set_to_none=True)
 
                                 self.train_state["global_step"] += 1
+                                epoch_steps += accum_micro_steps
+                                for key, value in accum_metric_sums.items():
+                                    epoch_metric_sums[key] = (
+                                        epoch_metric_sums.get(key, 0.0) + float(value)
+                                    )
                                 accum_metric_sums = {}
                                 accum_micro_steps = 0
 
@@ -508,6 +581,7 @@ def main() -> None:
             require_model_weights=False,
         )
         _normalize_checkpoint_frequency(config)
+        _normalize_nonfinite_policy(config)
 
         paths = prepare_experiment_paths(
             runtime=runtime,
@@ -652,7 +726,10 @@ def main() -> None:
                 else:
                     logger.info("Loaded resume model weights from %s", checkpoint_assets.sfm_model)
         if resume_payload is not None:
-            loss_manager.load_state_dict(resume_payload["loss_manager_state_dict"])
+            _load_loss_manager_state(
+                loss_manager,
+                resume_payload["loss_manager_state_dict"],
+            )
 
         model = maybe_wrap_fsdp(
             model=model,

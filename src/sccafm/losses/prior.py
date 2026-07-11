@@ -155,6 +155,21 @@ class PriorLoss(nn.Module):
         if factors is None:
             raise ValueError("`factors` must be provided.")
 
+        with torch.autocast(device_type=factors.u.device.type, enabled=False):
+            factors_fp32 = FactorState(u=factors.u.float(), v=factors.v.float())
+            return self._forward_fp32(
+                tokens=tokens,
+                factors=factors_fp32,
+                true_grn_df=true_grn_df,
+            )
+
+    def _forward_fp32(
+        self,
+        tokens: dict[str, torch.Tensor | None],
+        factors: FactorState,
+        true_grn_df: Optional[pd.DataFrame],
+    ) -> torch.Tensor:
+
         input_ids = require_tensor(tokens, "input_ids").to(torch.long)
         non_tf_mask = require_tensor(tokens, "non_tf_mask")
         padding_mask = tokens.get("padding_mask")
@@ -175,10 +190,10 @@ class PriorLoss(nn.Module):
         )
 
         if prior_pair_keys.numel() == 0:
-            return factors.u.new_zeros(())
+            return torch.zeros((), device=factors.u.device, dtype=torch.float32)
 
         if not tf_mask.any() or not active_gene_mask.any():
-            return factors.u.new_zeros(())
+            return torch.zeros((), device=factors.u.device, dtype=torch.float32)
 
         batch_indices: list[torch.Tensor] = []
         src_indices: list[torch.Tensor] = []
@@ -224,7 +239,7 @@ class PriorLoss(nn.Module):
             weights.append(edge_weights.to(dtype=factors.u.dtype))
 
         if not batch_indices:
-            return factors.u.new_zeros(())
+            return torch.zeros((), device=factors.u.device, dtype=torch.float32)
 
         batch_idx = torch.cat(batch_indices)
         src_idx = torch.cat(src_indices)
@@ -241,4 +256,4 @@ class PriorLoss(nn.Module):
 
         numer = (loss * weight).sum()
         denom = weight.sum()
-        return numer / (denom + 1e-8)
+        return (numer / (denom + 1e-8)).float()

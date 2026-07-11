@@ -4,6 +4,25 @@ import torch
 import torch.distributed as dist
 
 
+def distributed_any_nonfinite(*values: torch.Tensor) -> bool:
+    """Return whether any supplied value is non-finite on any rank."""
+
+    if not values:
+        return False
+    device = values[0].device
+    local_bad = torch.zeros((), device=device, dtype=torch.int32)
+    for value in values:
+        if value.device != device:
+            raise ValueError("All finite-check tensors must be on the same device.")
+        local_bad = torch.maximum(
+            local_bad,
+            torch.logical_not(torch.isfinite(value).all()).to(torch.int32),
+        )
+    if dist.is_available() and dist.is_initialized():
+        dist.all_reduce(local_bad, op=dist.ReduceOp.MAX)
+    return bool(local_bad.item())
+
+
 def distributed_weighted_mean_loss(
     local_sum: torch.Tensor,
     local_count: torch.Tensor,
@@ -21,8 +40,10 @@ def distributed_weighted_mean_loss(
     if local_count.ndim != 0:
         raise ValueError(f"`local_count` must be scalar, got shape {tuple(local_count.shape)}.")
 
-    global_sum = local_sum.detach().to(dtype=torch.float64)
-    global_count = local_count.detach().to(device=local_sum.device, dtype=torch.float64)
+    if local_sum.dtype != torch.float32:
+        raise ValueError(f"`local_sum` must be fp32, got {local_sum.dtype}.")
+    global_sum = local_sum.detach().clone()
+    global_count = local_count.detach().to(device=local_sum.device, dtype=torch.float32)
 
     if dist.is_available() and dist.is_initialized():
         dist.all_reduce(global_sum, op=dist.ReduceOp.SUM)

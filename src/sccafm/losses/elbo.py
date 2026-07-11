@@ -65,22 +65,23 @@ class ELBOLoss(nn.Module):
         tokens: dict[str, torch.Tensor | None],
         vgae_output: VGAEOutput,
     ) -> torch.Tensor:
-        expression_values = require_tensor(tokens, "expression_values")
+        expression_values = require_tensor(tokens, "expression_values").float()
         active_mask = build_active_value_mask(
             values=expression_values,
             padding_mask=tokens.get("padding_mask"),
         )
 
-        log_px = self.zinormal_loglik(
-            x=expression_values,
-            mu=vgae_output.mu_h,
-            sigma=vgae_output.sigma_h,
-            p_drop=vgae_output.p_drop,
-            active_mask=active_mask,
-        ).mean()
-        kl_z = self.kl_normal(
-            mu=vgae_output.mu_z,
-            sigma=vgae_output.sigma_z,
-            active_mask=active_mask,
-        ).mean()
-        return -log_px + kl_z
+        with torch.autocast(device_type=expression_values.device.type, enabled=False):
+            log_px = self.zinormal_loglik(
+                x=expression_values,
+                mu=vgae_output.mu_h.float(),
+                sigma=vgae_output.sigma_h.float(),
+                p_drop=vgae_output.p_drop.float(),
+                active_mask=active_mask,
+            ).mean()
+            kl_z = self.kl_normal(
+                mu=vgae_output.mu_z.float(),
+                sigma=vgae_output.sigma_z.float(),
+                active_mask=active_mask,
+            ).mean()
+            return (-log_px + kl_z).float()
