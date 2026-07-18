@@ -7,6 +7,7 @@ from .metrics import (
 )
 
 __all__ = [
+    "CellTypeAnnotationResult",
     "CellFateMedianSimilarityResult",
     "CellFateSimilarityResult",
     "EvaluationGRNCache",
@@ -14,6 +15,7 @@ __all__ = [
     "build_evaluation_grn_cache",
     "build_reference_grn",
     "evaluate_cell_specific_grns",
+    "evaluate_cell_type_annotation",
     "evaluate_median_similarity",
     "prepare_evaluation_paths",
     "run_evaluation",
@@ -27,6 +29,10 @@ __all__ = [
 
 
 def __getattr__(name: str):
+    if name in {"CellTypeAnnotationResult", "evaluate_cell_type_annotation"}:
+        from . import cell_type_annotation as _cell_type_annotation
+
+        return getattr(_cell_type_annotation, name)
     if name in {
         "CellFateMedianSimilarityResult",
         "CellFateSimilarityResult",
