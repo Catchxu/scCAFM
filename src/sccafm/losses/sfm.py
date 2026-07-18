@@ -144,9 +144,6 @@ class PretrainingLossManager(nn.Module):
             self._require_fp32("dag", dag_raw)
             total_loss = dag_raw if total_loss is None else total_loss + dag_raw
             metrics["dag"] = float(self.dag.last_h.detach().item())
-            metrics["dag_weighted"] = float(self.dag.last_weighted.detach().item())
-            metrics["dag_active"] = float(self.dag.active.item())
-            metrics["dag_disabled"] = float(self.dag.disabled.item())
             if bool(self.dag.just_disabled.item()):
                 disabled_regularizers.append("dag")
 
@@ -159,9 +156,6 @@ class PretrainingLossManager(nn.Module):
             self._require_fp32("sparsity", sparsity_raw)
             total_loss = sparsity_raw if total_loss is None else total_loss + sparsity_raw
             metrics["sparsity"] = float(self.sparsity.last_mean.detach().item())
-            metrics["sparsity_weighted"] = float(self.sparsity.last_weighted.detach().item())
-            metrics["sparsity_active"] = float(self.sparsity.active.item())
-            metrics["sparsity_disabled"] = float(self.sparsity.disabled.item())
             if bool(self.sparsity.just_disabled.item()):
                 disabled_regularizers.append("sparsity")
 
