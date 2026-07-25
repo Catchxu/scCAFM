@@ -1,7 +1,3 @@
-from .cell_type_annotation import (
-    CellTypeAnnotationModelOutput,
-    EFMCellTypeClassifier,
-)
 from .efm import EFM, EFMOutput, build_efm_targets, reorder_gene_aligned_tokens
 from .gene_ordering import GeneOrderState, order_genes_from_grn
 from .sfm import FactorState, SFM
@@ -9,9 +5,7 @@ from .wrapper import FoundationModuleOutput, ModelWrapper, ModelWrapperOutput
 
 __all__ = [
     "EFM",
-    "EFMCellTypeClassifier",
     "EFMOutput",
-    "CellTypeAnnotationModelOutput",
     "FactorState",
     "GeneOrderState",
     "SFM",

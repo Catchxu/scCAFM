@@ -208,15 +208,6 @@ def _save_condition_vocab(config: dict[str, Any], tokenizer: ScTokenizer, runtim
     save_table_json(output_path, tokenizer.cond_tokenizer.cond_dict)
 
 
-def build_evaluation_assets(config: dict[str, Any], runtime: RuntimeContext) -> PretrainingAssets:
-    eval_config = dict(config)
-    data_cfg = dict(config["data"])
-    data_cfg["condition_vocab"] = {"regenerate": False}
-    data_cfg["condition_mask"] = {"enabled": False, "unk_ratio": 0.0}
-    eval_config["data"] = data_cfg
-    return build_pretraining_assets(config=eval_config, runtime=runtime)
-
-
 def build_pretraining_assets(config: dict[str, Any], runtime: RuntimeContext) -> PretrainingAssets:
     data_cfg = config["data"]
     token_dict = load_vocab_json(data_cfg["token_dict_path"])

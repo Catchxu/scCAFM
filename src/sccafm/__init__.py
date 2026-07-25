@@ -14,9 +14,6 @@ except PackageNotFoundError:
 
 __all__ = [
     "ScPreprocessor",
-    "cell_fate",
-    "cell_type_annotation",
-    "grn",
     "load_vocab_json",
     "load_yaml_config",
     "resolve_model_assets",
@@ -24,8 +21,6 @@ __all__ = [
 
 
 def __getattr__(name: str):
-    if name in {"cell_fate", "cell_type_annotation", "grn"}:
-        return getattr(import_module(".inference", __name__), name)
     if name == "ScPreprocessor":
         return getattr(import_module(".data", __name__), name)
     if name in {"load_vocab_json", "resolve_model_assets"}:
