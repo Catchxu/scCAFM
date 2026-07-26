@@ -35,6 +35,7 @@ class ScPreprocessor:
         token_dict: Optional[pd.DataFrame] = None,
         gene_key: Optional[str] = None,
         preserve_gene_names: Optional[list[str]] = None,
+        hvg_exclude_gene_names: Optional[list[str]] = None,
         hvg_exclude_preserved_genes: bool = False,
         sanitize_X: bool = True,
         X_fill_value: float = 0.0,
@@ -54,15 +55,23 @@ class ScPreprocessor:
         self.token_dict = token_dict
         self.gene_key = gene_key
         self.preserve_gene_names = list(preserve_gene_names or [])
+        self.hvg_exclude_gene_names = list(hvg_exclude_gene_names or [])
         self.hvg_exclude_preserved_genes = bool(hvg_exclude_preserved_genes)
         self.sanitize_X = sanitize_X
         self.X_fill_value = float(X_fill_value)
         self.inplace = inplace
         self._refresh_preserve_gene_lookup()
+        self._refresh_hvg_exclude_gene_lookup()
 
     def set_preserve_gene_names(self, gene_names: list[str]) -> None:
         self.preserve_gene_names = list(gene_names or [])
         self._refresh_preserve_gene_lookup()
+
+    def set_hvg_exclude_gene_names(self, gene_names: list[str]) -> None:
+        """Exclude genes from HVG competition without preserving them."""
+
+        self.hvg_exclude_gene_names = list(gene_names or [])
+        self._refresh_hvg_exclude_gene_lookup()
 
     def _refresh_preserve_gene_lookup(self) -> None:
         self._preserve_symbols = {
@@ -95,6 +104,38 @@ class ScPreprocessor:
             )
             if symbol_match or ensembl_match:
                 self._preserve_token_ids.add(token_index)
+
+    def _refresh_hvg_exclude_gene_lookup(self) -> None:
+        self._hvg_exclude_symbols = {
+            self._normalize_symbol(gene_name)
+            for gene_name in self.hvg_exclude_gene_names
+            if str(gene_name).strip()
+        }
+        self._hvg_exclude_ensembl = {
+            self._normalize_ensembl(gene_name)
+            for gene_name in self.hvg_exclude_gene_names
+            if str(gene_name).strip()
+        }
+        self._hvg_exclude_token_ids: set[int] = set()
+        if self.token_dict is None or not isinstance(self.token_dict, pd.DataFrame):
+            return
+
+        for _, row in self.token_dict.iterrows():
+            token_index = int(row["token_index"]) if pd.notna(row.get("token_index")) else None
+            if token_index is None:
+                continue
+            gene_symbol = row.get("gene_symbol")
+            gene_id = row.get("gene_id")
+            symbol_match = (
+                pd.notna(gene_symbol)
+                and self._normalize_symbol(gene_symbol) in self._hvg_exclude_symbols
+            )
+            ensembl_match = (
+                pd.notna(gene_id)
+                and self._normalize_ensembl(gene_id) in self._hvg_exclude_ensembl
+            )
+            if symbol_match or ensembl_match:
+                self._hvg_exclude_token_ids.add(token_index)
 
     def _coerce_expression_value(self, value) -> float:
         if value is None:
@@ -225,6 +266,38 @@ class ScPreprocessor:
             return name_mask | token_mask
         return name_mask
 
+    def _hvg_excluded_gene_mask(self, adata) -> np.ndarray:
+        gene_names = self._get_gene_names(adata)
+        if not self.hvg_exclude_gene_names:
+            return np.zeros(len(gene_names), dtype=bool)
+
+        gene_name_type = self._detect_gene_name_type(gene_names)
+        if gene_name_type == "ensembl":
+            name_mask = np.array(
+                [
+                    self._normalize_ensembl(gene_name) in self._hvg_exclude_ensembl
+                    for gene_name in gene_names
+                ],
+                dtype=bool,
+            )
+        else:
+            name_mask = np.array(
+                [
+                    self._normalize_symbol(gene_name) in self._hvg_exclude_symbols
+                    for gene_name in gene_names
+                ],
+                dtype=bool,
+            )
+
+        if self._hvg_exclude_token_ids:
+            token_ids = self._map_gene_names_to_token_ids(gene_names)
+            token_mask = np.isin(
+                token_ids,
+                np.fromiter(self._hvg_exclude_token_ids, dtype=np.int64),
+            )
+            return name_mask | token_mask
+        return name_mask
+
     @staticmethod
     def _normalize_symbol(x) -> str:
         return str(x).strip().upper()
@@ -349,9 +422,15 @@ class ScPreprocessor:
         )
         self._sanitize_expression_matrix(adata)
 
-    def _select_hvg_preserving_genes(self, adata, preserve_mask: np.ndarray) -> None:
-        target_mask = ~preserve_mask
+    def _select_hvg_preserving_genes(
+        self,
+        adata,
+        preserve_mask: np.ndarray,
+        exclude_mask: np.ndarray,
+    ) -> None:
+        target_mask = ~(preserve_mask | exclude_mask)
         adata.var["preserved_gene"] = preserve_mask
+        adata.var["hvg_excluded_gene"] = exclude_mask & ~preserve_mask
         adata.var["hvg_target_candidate"] = target_mask
 
         if not target_mask.any():
@@ -379,8 +458,15 @@ class ScPreprocessor:
             return
 
         preserve_mask = self._preserved_gene_mask(adata)
-        if self.hvg_exclude_preserved_genes and preserve_mask.any():
-            self._select_hvg_preserving_genes(adata, preserve_mask=preserve_mask)
+        exclude_mask = self._hvg_excluded_gene_mask(adata)
+        if self.hvg_exclude_preserved_genes and (
+            preserve_mask.any() or exclude_mask.any()
+        ):
+            self._select_hvg_preserving_genes(
+                adata,
+                preserve_mask=preserve_mask,
+                exclude_mask=exclude_mask,
+            )
             self._sanitize_expression_matrix(adata)
             return
 
@@ -446,6 +532,7 @@ def preprocess_adata(
     token_dict: Optional[pd.DataFrame] = None,
     gene_key: Optional[str] = None,
     preserve_gene_names: Optional[list[str]] = None,
+    hvg_exclude_gene_names: Optional[list[str]] = None,
     hvg_exclude_preserved_genes: bool = False,
     sanitize_X: bool = True,
     X_fill_value: float = 0.0,
@@ -470,6 +557,7 @@ def preprocess_adata(
         token_dict=token_dict,
         gene_key=gene_key,
         preserve_gene_names=preserve_gene_names,
+        hvg_exclude_gene_names=hvg_exclude_gene_names,
         hvg_exclude_preserved_genes=hvg_exclude_preserved_genes,
         sanitize_X=sanitize_X,
         X_fill_value=X_fill_value,
