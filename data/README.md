@@ -1,4 +1,4 @@
-# Data Pipeline Guide
+# Data pipeline guide
 
 This directory contains:
 
@@ -6,7 +6,7 @@ This directory contains:
 2. Gene embedding scripts for rebuilding `checkpoints/tokenizer/vocab.safetensors` from GO annotations.
 
 
-## Cell Download
+## Cell download
 
 ### What it does
 * Build SOMA index files for each query in `data/query_list.txt`.
@@ -112,7 +112,7 @@ python3 data/check_and_redownload_h5ad.py \
 ```
 
 
-## Gene Embeddings
+## Gene embeddings
 
 ### What it does
 1. Read `assets/tokenizer/vocab.json`.

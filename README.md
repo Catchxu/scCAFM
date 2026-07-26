@@ -8,13 +8,13 @@ scCAFM is a causality-aware foundation model for large-scale single-cell transcr
 <br/>
 
 
-## Key Features
-**Structure Foundation Module (SFM)**
+## Key features
+**Structure foundation module (SFM)**
 * Learns context-aware structural representations in a latent factor space.
 * Uses a Mixture-of-Experts (MoE) architecture to capture distinct regulatory contexts.
 * Provides the structural factors and causal gene ordering used by EFM pretraining.
 
-**Embedding Foundation Module (EFM)**
+**Embedding foundation module (EFM)**
 * Learns gene and cell embeddings guided by the frozen SFM causal ordering.
 * Includes the EFM pretraining objective and checkpoint packaging workflow.
 
@@ -70,7 +70,7 @@ PYTHONPATH=. python test/test_FA4.py
 Use `test/test_FA2.py` instead when you select `attention_backend: fa2`. These tests directly validate the dense and variable-length attention paths required for training and evaluation.
 
 
-## Data Download
+## Data download
 The data pipeline supports both `Homo sapiens` and `Mus musculus`, writes species-specific folders, adds a `species` column to each downloaded partition, and can keep only genes found in `assets/tokenizer/vocab.json`.
 
 For complete data pipeline details, see [Data Download Guide](data/README.md).
