@@ -1,76 +1,105 @@
-# Building a causality-aware single-cell RNA-seq foundation model via context-specific causal regulation modeling
+<h1 align="center">Building a causality-aware single-cell RNA-seq foundation model via context-specific causal regulation modeling</h1>
 
-scCAFM is a causality-aware foundation model for large-scale single-cell transcriptomic pretraining. This repository contains the Structure Foundation Module (SFM), the Embedding Foundation Module (EFM), and the shared data, model, and training infrastructure required to pretrain them.
-<br/>
-<div align=center>
-<img src="/docs/Fig1.png" width="70%">
-</div>
-<br/>
+<p align="center">
+  <strong>A causality-aware foundation model for single-cell transcriptomics</strong>
+</p>
 
+<p align="center">
+  <a href="https://huggingface.co/kaichenxu/scCAFM">
+    <img alt="Hugging Face" src="https://img.shields.io/badge/🤗%20Hugging%20Face-Model-FFD21E">
+  </a>
+  <a href="https://www.gnu.org/licenses/gpl-3.0.en.html">
+    <img alt="License" src="https://img.shields.io/badge/License-GPL--3.0-blue">
+  </a>
+  <img alt="Python" src="https://img.shields.io/badge/Python-3.10–3.14-3776AB?logo=python&logoColor=white">
+</p>
 
-## Key features
-**Structure foundation module (SFM)**
-* Learns context-aware structural representations in a latent factor space.
-* Uses a Mixture-of-Experts (MoE) architecture to capture distinct regulatory contexts.
-* Provides the structural factors and causal gene ordering used by EFM pretraining.
+**scCAFM** learns context-specific gene-regulatory structure together with transferable gene and cell representations from single-cell RNA sequencing data. It combines a **Structure Foundation Module (SFM)** for regulatory modeling with an **Embedding Foundation Module (EFM)** guided by the structure learned by SFM.
 
-**Embedding foundation module (EFM)**
-* Learns gene and cell embeddings guided by the frozen SFM causal ordering.
-* Includes the EFM pretraining objective and checkpoint packaging workflow.
+<p align="center">
+  <img src="docs/Fig1.png" width="85%" alt="Overview of the scCAFM framework">
+</p>
 
+## What scCAFM provides
 
-## Installation
-scCAFM is a Python package for causal modeling of single-cell RNA-seq data. It requires Python 3.10–3.14 (Python 3.12.9 recommended).
+- **Cell-specific gene-regulatory networks:** infer a TF-to-target network for every cell while preserving cellular heterogeneity.
+- **Pooled gene-regulatory networks:** summarize cell-specific networks into one network for a population of cells.
+- **Structure-guided representations:** learn gene and cell embeddings informed by context-specific regulatory structure.
+- **Human and mouse support:** use shared vocabularies, transcription-factor catalogues, and cross-species resources.
+- **Memory-aware result generation:** stream cell-specific networks and optionally retain edges by score threshold or top-k selection.
 
-Install the package from a local clone:
+The model is designed for research in gene regulation, cellular heterogeneity, perturbation response, developmental biology, and related single-cell applications.
+
+## Get started
+
+scCAFM supports Python 3.10–3.14; Python 3.12.9 is recommended. A CUDA-capable GPU is recommended for model inference and training.
+
+Clone the repository and install the package:
+
 ```bash
 git clone https://github.com/Catchxu/scCAFM.git
 cd scCAFM
 pip install .
 ```
 
-The package install includes the runtime code and `configs/`, but **not model assets** (such as pretrained model files and external prior knowledge). scCAFM resolves assets on the Hugging Face [model repo](https://huggingface.co/kaichenxu/scCAFM) (ID: `kaichenxu/scCAFM`). We recommand to download a local copy as:
+For the pinned Python 3.12 environment, use:
+
 ```bash
-cd scCAFM
+pip install ".[py312]"
+```
+
+Download the pretrained model and shared resources from [Hugging Face](https://huggingface.co/kaichenxu/scCAFM):
+
+```bash
+pip install -U huggingface_hub
 hf download kaichenxu/scCAFM --local-dir assets
 ```
 
-The downloaded release separates shared resources from module-specific weights:
-```text
-assets/
-├── release.json
-├── resources/
-├── tokenizer/
-└── models/
-    ├── sfm/
-    └── efm/
-```
-Older flat snapshots remain readable for compatibility, but new checkpoints and Hugging Face releases use this structured layout.
+The `assets/` directory is intentionally not tracked by Git. Its release manifest keeps the model weights, vocabularies, TF catalogues, and prior-knowledge resources in a consistent layout.
 
-If you encounter dependency conflicts while using scCAFM, please report them at [Issues](https://github.com/Catchxu/scCAFM/issues). For this repository's current Python 3.12 environment, we also provide an exact pinned extra in `pyproject.toml`:
-```bash
-pip install .[py312]
-```
-Please note that GPU-specific packages such as FlashAttention still depend on your CUDA, PyTorch, compiler, and GPU stack.
+## Explore the tutorials
 
+| Tutorial | What it demonstrates | Status |
+|---|---|---|
+| [Recovering ChIP-seq GRNs from homogeneous cell populations](docs/chipseq_grn_recovery.ipynb) | Preprocess hESC and mESC data, infer pooled GRNs, and compare them with ChIP-seq reference networks | Available |
+| [Inferring cell-specific GRNs in heterogeneous cell populations](docs/cell_specific_grns.ipynb) | Preprocess mouse pancreas data, generate cell-specific GRNs, inspect representative edges, and optionally stream results to CSV | Available |
+| [Validating regulatory edges with Perturb-seq](docs/perturbseq_edge_validation.ipynb) | Evaluate predicted regulatory relationships using perturbation evidence | Planned |
 
-## FlashAttention
-scCAFM uses FlashAttention-4 (FA4) by default for improved computational performance on Blackwell GPUs such as B200. If your hardware or FlashAttention build only supports FA2, change the relevant config files under `configs/`:
-```yaml
-runtime:
-  attention_backend: fa2
-```
+The tutorials are intentionally concise and focus on biological use rather than training internals.
 
-If you haven't installed any FA, please install suitable FA according to your specific hardware and software environment. You can follow the [official repository instructions](https://github.com/Dao-AILab/flash-attention) to install it.
+## Choose an attention backend
 
-Before using scCAFM on a new machine, run the FA4 smoke test on a compatible GPU:
+scCAFM supports FlashAttention-4 (FA4) and FlashAttention-2 (FA2). FA4 is intended for compatible Blackwell GPUs such as the B200; use FA2 when your hardware or software stack does not support FA4. Follow the [FlashAttention installation instructions](https://github.com/Dao-AILab/flash-attention) for your CUDA and PyTorch environment.
+
+Validate the selected backend before running a large job:
+
 ```bash
 PYTHONPATH=. python test/test_FA4.py
+# Or, for FA2:
+PYTHONPATH=. python test/test_FA2.py
 ```
-Use `test/test_FA2.py` instead when you select `attention_backend: fa2`. These tests directly validate the dense and variable-length attention paths required for training and evaluation.
 
+## Find your way around the repository
 
-## Data download
-The data pipeline supports both `Homo sapiens` and `Mus musculus`, writes species-specific folders, adds a `species` column to each downloaded partition, and can keep only genes found in `assets/tokenizer/vocab.json`.
+| Path | Contents |
+|---|---|
+| `src/sccafm/` | Public package, model implementations, preprocessing, GRN tasks, and training code |
+| `docs/` | Task-oriented notebooks for GRN inference and validation |
+| `configs/` | Model and training configurations |
+| `data/` | Data acquisition and preparation utilities |
+| `test/` and `tests/` | Backend checks and automated tests |
+| `assets/` | Ignored local directory for pretrained weights and shared resources |
 
-For complete data pipeline details, see [Data Download Guide](data/README.md).
+For dataset acquisition and vocabulary-aware preparation, see the [data pipeline guide](data/README.md). For checkpoint contents, intended use, and model limitations, see the [Hugging Face model card](https://huggingface.co/kaichenxu/scCAFM).
+
+## Use scCAFM responsibly
+
+scCAFM is a research model and is not intended for clinical diagnosis or treatment decisions. Predicted regulatory relationships are computational hypotheses and should be validated with suitable experimental or independent evidence. Results may vary across tissues, technologies, species, preprocessing choices, and biological contexts.
+
+## Get support
+
+Questions, bug reports, and feature requests are welcome through [GitHub Issues](https://github.com/Catchxu/scCAFM/issues).
+
+## License
+
+scCAFM is released under the [GNU General Public License v3.0](LICENSE).
