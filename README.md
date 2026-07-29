@@ -59,11 +59,11 @@ The `assets/` directory is intentionally not tracked by Git. Its release manifes
 
 ## Explore the tutorials
 
-| Tutorial | What it demonstrates | Status |
-|---|---|---|
-| [Recovering ChIP-seq GRNs from homogeneous cell populations](docs/chipseq_grn_recovery.ipynb) | Preprocess hESC and mESC data, infer pooled GRNs, and compare them with ChIP-seq reference networks | Available |
-| [Inferring cell-specific GRNs in heterogeneous cell populations](docs/cell_specific_grns.ipynb) | Preprocess mouse pancreas data, generate cell-specific GRNs, inspect representative edges, and optionally stream results to CSV | Available |
-| [Validating regulatory edges with Perturb-seq](docs/perturbseq_edge_validation.ipynb) | Evaluate predicted regulatory relationships using perturbation evidence | Planned |
+| Tutorial | What it demonstrates |
+|---|---|
+| [Recovering ChIP-seq GRNs from homogeneous cell populations](docs/chipseq_grn_recovery.ipynb) | Preprocess hESC and mESC data, infer pooled GRNs, and compare them with ChIP-seq reference networks |
+| [Inferring cell-specific GRNs in heterogeneous cell populations](docs/cell_specific_grns.ipynb) | Preprocess mouse pancreas data, generate cell-specific GRNs, inspect representative edges |
+| [Validating regulatory edges with Perturb-seq](docs/perturbseq_edge_validation.ipynb) | Infer a pooled K562 GRN and summarize perturbation responses across the top 100 edges with a mean Wasserstein distance |
 
 The tutorials are intentionally concise and focus on biological use rather than training internals.
 
