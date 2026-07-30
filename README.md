@@ -57,7 +57,7 @@ hf download kaichenxu/scCAFM --local-dir assets
 
 The `assets/` directory is intentionally not tracked by Git. Its release manifest keeps the model weights, vocabularies, TF catalogues, and prior-knowledge resources in a consistent layout.
 
-## Explore the tutorials
+<!-- ## Explore the tutorials
 
 | Tutorial | What it demonstrates |
 |---|---|
@@ -65,7 +65,7 @@ The `assets/` directory is intentionally not tracked by Git. Its release manifes
 | [Inferring cell-specific GRNs in heterogeneous cell populations](docs/cell_specific_grns.ipynb) | Preprocess mouse pancreas data, generate cell-specific GRNs, inspect representative edges |
 | [Validating regulatory edges with Perturb-seq](docs/perturbseq_edge_validation.ipynb) | Infer a pooled K562 GRN and summarize perturbation responses across the top 100 edges with a mean Wasserstein distance |
 
-The tutorials are intentionally concise and focus on biological use rather than training internals.
+The tutorials are intentionally concise and focus on biological use rather than training internals. -->
 
 ## Choose an attention backend
 
