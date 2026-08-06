@@ -30,42 +30,100 @@
 
 The model is designed for research in gene regulation, cellular heterogeneity, perturbation response, developmental biology, and related single-cell applications.
 
-## Get started
+## Install scCAFM
 
-scCAFM supports Python 3.10–3.14; Python 3.12.9 is recommended. A CUDA-capable GPU is recommended for model inference and training.
+scCAFM supports Python 3.10–3.14. The reproducible environment described below uses Python 3.12 and includes the dependencies needed for the package and tutorials. The tutorials require one CUDA-capable NVIDIA GPU; GPU memory requirements vary with the number of genes and the inference batch size.
 
-Clone the repository and install the package:
+### Review the tested configuration
+
+The current release has been tested with the following configuration. Other operating systems and software combinations have not been formally tested.
+
+| Component | Tested version |
+|---|---|
+| Operating system | Ubuntu 24.04.4 LTS |
+| Python | 3.12.13 |
+| NVIDIA GPU | GeForce RTX 5090, 32 GB |
+| NVIDIA driver | 580.173.02 |
+| CUDA | 13.0 |
+| PyTorch | 2.11.0+cu130 |
+| FlashAttention | 2.8.3 |
+
+The pinned Python 3.12 environment uses these package versions:
+
+| Package | Version |
+|---|---:|
+| AnnData | 0.12.10 |
+| Hugging Face Hub | 1.24.0 |
+| Hatchling | 1.31.0 |
+| IPython | 9.12.0 |
+| ipykernel | 7.2.0 |
+| JupyterLab | 4.6.2 |
+| matplotlib | 3.9.1 |
+| NumPy | 2.4.3 |
+| pandas | 2.3.3 |
+| PyYAML | 6.0.3 |
+| safetensors | 0.7.0 |
+| Scanpy | 1.12 |
+| scikit-learn | 1.8.0 |
+| SciPy | 1.17.1 |
+| tqdm | 4.67.3 |
+
+PyTorch and FlashAttention are listed separately in the tested configuration because they depend on the CUDA platform.
+
+### Install the tested Python environment
+
+Create and activate a Python 3.12 environment:
+
+```bash
+conda create -n sccafm python=3.12.13
+conda activate sccafm
+```
+
+Clone the repository:
 
 ```bash
 git clone https://github.com/Catchxu/scCAFM.git
 cd scCAFM
-pip install .
 ```
 
-For the pinned Python 3.12 environment, use:
+Install the tested CUDA-enabled PyTorch build, followed by scCAFM and the remaining pinned dependencies:
 
 ```bash
-pip install ".[py312]"
+pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu130
+pip install hatchling==1.31.0
+pip install ".[py312]" --no-build-isolation
 ```
 
-Download the pretrained model and shared resources from [Hugging Face](https://huggingface.co/kaichenxu/scCAFM):
+Installing scCAFM itself with `pip install .` in an environment where its dependencies are already available typically takes less than five minutes. This estimate excludes CUDA, PyTorch and FlashAttention setup, as well as model and data downloads, which depend on the system and network connection.
+
+### Download the model and tutorial data
+
+Download the pretrained model and shared resources from the [scCAFM model repository](https://huggingface.co/kaichenxu/scCAFM):
 
 ```bash
 pip install -U huggingface_hub
 hf download kaichenxu/scCAFM --local-dir assets
 ```
 
-The `assets/` directory is intentionally not tracked by Git. Its release manifest keeps the model weights, vocabularies, TF catalogues, and prior-knowledge resources in a consistent layout.
+Download the prepared demonstration datasets from the [scCAFM tutorial-data repository](https://huggingface.co/datasets/kaichenxu/scCAFM-data):
 
-<!-- ## Explore the tutorials
+```bash
+hf download kaichenxu/scCAFM-data \
+  --repo-type dataset \
+  --local-dir tutorial_data
+```
+
+The complete tutorial-data collection is approximately 914 MB. Its directory layout already matches the paths used by the notebooks. The `assets/` and `tutorial_data/` directories are intentionally not tracked by Git.
+
+## Explore the tutorials
+
+We provide a series of tutorials to help users get started with scCAFM and apply it to common gene-regulatory-network tasks.
 
 | Tutorial | What it demonstrates |
 |---|---|
-| [Recovering ChIP-seq GRNs from homogeneous cell populations](docs/chipseq_grn_recovery.ipynb) | Preprocess hESC and mESC data, infer pooled GRNs, and compare them with ChIP-seq reference networks |
-| [Inferring cell-specific GRNs in heterogeneous cell populations](docs/cell_specific_grns.ipynb) | Preprocess mouse pancreas data, generate cell-specific GRNs, inspect representative edges |
-| [Validating regulatory edges with Perturb-seq](docs/perturbseq_edge_validation.ipynb) | Infer a pooled K562 GRN and summarize perturbation responses across the top 100 edges with a mean Wasserstein distance |
-
-The tutorials are intentionally concise and focus on biological use rather than training internals. -->
+| [Inferring pooled GRNs from homogeneous cell populations with ChIP-seq-based benchmarking](docs/chipseq_grn_recovery.ipynb) | Preprocess hESC and mESC data, infer pooled GRNs, and compare them with ChIP-seq reference networks |
+| [Inferring cell-specific GRNs from heterogeneous cell populations](docs/cell_specific_grns.ipynb) | Preprocess mouse-pancreas data, generate cell-specific GRNs, and inspect representative edges |
+| [Inferring pooled GRNs from homogeneous cell populations with Perturb-seq-based validation](docs/perturbseq_edge_validation.ipynb) | Infer a pooled K562 GRN and validate highly ranked edges with Perturb-seq |
 
 ## Choose an attention backend
 

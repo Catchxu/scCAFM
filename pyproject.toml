@@ -19,7 +19,7 @@ keywords = [
 
 dependencies = [
     "anndata>=0.12,<0.13",
-    "huggingface_hub>=0.30,<1.0",
+    "huggingface_hub>=0.30,<2.0",
     "numpy>=1.24,<3.0",
     "pandas>=2.0,<3.0",
     "safetensors>=0.4,<1.0",
@@ -41,16 +41,22 @@ dev = [
 
 py312 = [
     "anndata==0.12.10",
-    "huggingface_hub==0.36.2",
-    "numpy==2.2.6",
+    "flash-attn==2.8.3",
+    "hatchling==1.31.0",
+    "huggingface_hub==1.24.0",
+    "ipykernel==7.2.0",
+    "ipython==9.12.0",
+    "jupyterlab==4.6.2",
+    "matplotlib==3.9.1",
+    "numpy==2.4.3",
     "pandas==2.3.3",
     "PyYAML==6.0.3",
     "safetensors==0.7.0",
     "scanpy==1.12",
-    "scipy==1.14.1",
-    "torch==2.10.0+cu128",
+    "scikit-learn==1.8.0",
+    "scipy==1.17.1",
+    "torch==2.11.0",
     "tqdm==4.67.3",
-    "flash-attn==2.8.3",
 ]
 
 
@@ -80,5 +86,5 @@ include = [
 
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling==1.31.0"]
 build-backend = "hatchling.build"
