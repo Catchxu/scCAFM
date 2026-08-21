@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 import pandas as pd
@@ -25,7 +26,9 @@ class EFMOutput:
 
 def _gather_gene_dim(value: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
     if value.ndim < 2:
-        raise ValueError(f"Gene-aligned tensor must have at least 2 dims, got {tuple(value.shape)}.")
+        raise ValueError(
+            f"Gene-aligned tensor must have at least 2 dims, got {tuple(value.shape)}."
+        )
     if value.shape[:2] != positions.shape:
         raise ValueError(
             f"Gene-aligned tensor leading shape {tuple(value.shape[:2])} "
@@ -53,13 +56,17 @@ def reorder_gene_aligned_tokens(
     if not torch.is_tensor(positions):
         raise TypeError("`positions` must be a tensor or GeneOrderState.")
     if positions.ndim != 2:
-        raise ValueError(f"`positions` must have shape (C, G), got {tuple(positions.shape)}.")
+        raise ValueError(
+            f"`positions` must have shape (C, G), got {tuple(positions.shape)}."
+        )
 
     reordered: dict[str, torch.Tensor | None] = dict(tokens)
     for key in ("input_ids", "expression_values", "non_tf_mask", "padding_mask"):
         value = tokens.get(key)
         if torch.is_tensor(value):
-            reordered[key] = _gather_gene_dim(value, positions.to(device=value.device, dtype=torch.long))
+            reordered[key] = _gather_gene_dim(
+                value, positions.to(device=value.device, dtype=torch.long)
+            )
     return reordered
 
 
@@ -82,7 +89,9 @@ def build_efm_targets(
     if not torch.is_tensor(expression_values):
         raise TypeError("`tokens['expression_values']` must be a torch.Tensor.")
     if input_ids.ndim != 2:
-        raise ValueError(f"`input_ids` must have shape (C, G), got {tuple(input_ids.shape)}.")
+        raise ValueError(
+            f"`input_ids` must have shape (C, G), got {tuple(input_ids.shape)}."
+        )
     if expression_values.shape != input_ids.shape:
         raise ValueError(
             "`expression_values` must match `input_ids` shape, "
@@ -114,7 +123,9 @@ def build_efm_targets(
         device=expression_values.device,
         dtype=expression_values.dtype,
     )
-    valid_mask = torch.zeros((batch_size, seq_len), device=input_ids.device, dtype=torch.bool)
+    valid_mask = torch.zeros(
+        (batch_size, seq_len), device=input_ids.device, dtype=torch.bool
+    )
 
     target_ids[:, :gene_len] = input_ids.to(dtype=torch.long)
     target_expr[:, :gene_len] = expression_values
@@ -235,6 +246,65 @@ class EFM(nn.Module):
         )
         self.apply(init_module_xavier)
 
+    @classmethod
+    def from_pretrained(
+        cls,
+        model_source: str | Path,
+        *,
+        device: str | torch.device = "cuda",
+        attention_backend: str | None = None,
+    ) -> EFM:
+        """Load a bare pretrained EFM from a local or Hugging Face model package."""
+        from ..assets import (
+            load_efm_config,
+            load_model_state_dict,
+            load_table_json,
+            load_vocab_json,
+            resolve_model_assets,
+        )
+
+        resolved_device = torch.device(device)
+        if resolved_device.type == "cuda" and not torch.cuda.is_available():
+            raise RuntimeError("CUDA was requested but is not available.")
+
+        assets = resolve_model_assets(
+            model_source,
+            require_efm_config=True,
+            require_efm_weights=True,
+            require_cond_dict=True,
+            require_resources=False,
+        )
+        token_dict = load_vocab_json(assets.vocab)
+        cond_dict = load_table_json(assets.cond_dict)
+        if cond_dict.empty or "token_index" not in cond_dict.columns:
+            raise ValueError("Condition vocabulary must contain token indices.")
+        cond_vocab_size = int(cond_dict["token_index"].max()) + 1
+
+        config = load_efm_config(assets.efm_config)
+        efm_kwargs = dict(config["efm"])
+        configured_cond_vocab_size = efm_kwargs.pop("cond_vocab_size", None)
+        if configured_cond_vocab_size is not None and int(
+            configured_cond_vocab_size
+        ) != int(cond_vocab_size):
+            raise ValueError(
+                "Mismatched `efm.cond_vocab_size` between config "
+                f"({configured_cond_vocab_size}) and condition vocabulary ({cond_vocab_size})."
+            )
+        efm_kwargs.pop("gene_embedding_ckpt", None)
+        if attention_backend is not None:
+            efm_kwargs["attention_backend"] = attention_backend
+
+        model = cls(
+            token_dict=token_dict,
+            cond_vocab_size=cond_vocab_size,
+            gene_embedding_ckpt=str(assets.vocab_tensors),
+            **efm_kwargs,
+        )
+        model.load_state_dict(load_model_state_dict(assets.efm_model), strict=True)
+        model.to(resolved_device)
+        model.eval()
+        return model
+
     def forward(self, tokens: dict[str, torch.Tensor | None]) -> EFMOutput:
         input_ids = tokens.get("input_ids")
         expression_values = tokens.get("expression_values")
@@ -276,7 +346,9 @@ class EFM(nn.Module):
         self,
         tokens: dict[str, torch.Tensor | None],
         expression_values: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[
+        torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None
+    ]:
         input_ids = tokens.get("input_ids")
         condition_ids = tokens.get("condition_ids")
         non_tf_mask = tokens.get("non_tf_mask")
@@ -296,7 +368,9 @@ class EFM(nn.Module):
             padding_mask=padding_mask if torch.is_tensor(padding_mask) else None,
             non_tf_mask=non_tf_mask,
         )
-        cond_vocab_size = self.embedding.condition_embedding.cond_embedding.num_embeddings
+        cond_vocab_size = (
+            self.embedding.condition_embedding.cond_embedding.num_embeddings
+        )
         if condition_ids.max().item() >= cond_vocab_size:
             raise ValueError(
                 "Found `condition_ids` outside the configured `cond_vocab_size`. "
@@ -325,7 +399,9 @@ class EFM(nn.Module):
         ).unsqueeze(1)
         cell_token = prefix_token.to(batch_emb.dtype) + batch_emb
         cell_token = cell_token.to(self.embedding.prefix_type_embedding.dtype)
-        cell_token = cell_token + self.embedding.prefix_type_embedding.to(cell_token.dtype)
+        cell_token = cell_token + self.embedding.prefix_type_embedding.to(
+            cell_token.dtype
+        )
         cell_token = self.embedding.final_norm(cell_token)
         return self.embedding.dropout(cell_token)
 
@@ -351,16 +427,18 @@ class EFM(nn.Module):
         current_non_tf_mask = non_tf_mask[:, gene_position : gene_position + 1]
         current_padding_mask = None
         if torch.is_tensor(padding_mask):
-            current_padding_mask = padding_mask[:, gene_position : gene_position + 1].to(
-                torch.bool
-            )
+            current_padding_mask = padding_mask[
+                :, gene_position : gene_position + 1
+            ].to(torch.bool)
         if key_padding_mask is not None:
             if key_padding_mask.shape != current_input_ids.shape:
                 raise ValueError(
                     "`key_padding_mask` must match the single-token gene shape, "
                     f"got {tuple(key_padding_mask.shape)} vs {tuple(current_input_ids.shape)}."
                 )
-            key_padding_mask = key_padding_mask.to(device=input_ids.device, dtype=torch.bool)
+            key_padding_mask = key_padding_mask.to(
+                device=input_ids.device, dtype=torch.bool
+            )
             current_padding_mask = (
                 key_padding_mask
                 if current_padding_mask is None
@@ -415,7 +493,9 @@ class EFM(nn.Module):
             key_padding_mask=current_padding_mask,
         )
 
-    def predict_expression_from_hidden(self, hidden_state: torch.Tensor) -> torch.Tensor:
+    def predict_expression_from_hidden(
+        self, hidden_state: torch.Tensor
+    ) -> torch.Tensor:
         if hidden_state.ndim != 3 or hidden_state.shape[1] != 1:
             raise ValueError(
                 "`hidden_state` must have shape (batch, 1, dim), "

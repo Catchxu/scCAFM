@@ -55,11 +55,15 @@ from ..distributed import (
 )
 from ..experiment import ExperimentLogger, prepare_experiment_paths
 from ..losses import EFMLoss
-from ..models import EFM, build_efm_targets, reorder_gene_aligned_tokens
-from ..models.wrapper import ModelWrapper
+from ..models import (
+    EFM,
+    SFM,
+    GeneOrderState,
+    build_efm_targets,
+    reorder_gene_aligned_tokens,
+)
 from .builders import (
     _resolve_torch_dtype,
-    build_model,
     build_optimizer,
     build_scheduler,
     maybe_wrap_fsdp,
@@ -67,7 +71,9 @@ from .builders import (
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Pretrain EFM with frozen online SFM ordering.")
+    parser = argparse.ArgumentParser(
+        description="Pretrain EFM with frozen online SFM ordering."
+    )
     parser.add_argument(
         "--efm-pretrain-config",
         "--pretrain-config",
@@ -78,7 +84,9 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _release_data_bundle(data_bundle: PretrainingDataBundle | None, runtime: RuntimeContext) -> None:
+def _release_data_bundle(
+    data_bundle: PretrainingDataBundle | None, runtime: RuntimeContext
+) -> None:
     if data_bundle is None:
         return
 
@@ -106,18 +114,15 @@ def _autocast_context(runtime: RuntimeContext, runtime_cfg: dict[str, Any]):
         return contextlib.nullcontext()
     if autocast_dtype == "bf16":
         if not torch.cuda.is_bf16_supported():
-            raise ValueError("`runtime.precision.autocast_dtype=bf16` requires CUDA bf16 support.")
+            raise ValueError(
+                "`runtime.precision.autocast_dtype=bf16` requires CUDA bf16 support."
+            )
         return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
     if autocast_dtype == "fp16":
         return torch.autocast(device_type="cuda", dtype=torch.float16)
-    raise ValueError(f"Unsupported `runtime.precision.autocast_dtype`: {autocast_dtype}")
-
-
-def _unwrap_sfm(model: ModelWrapper) -> torch.nn.Module:
-    try:
-        return model.foundation_modules["sfm"]
-    except KeyError as exc:
-        raise KeyError("Frozen SFM wrapper must contain foundation module 'sfm'.") from exc
+    raise ValueError(
+        f"Unsupported `runtime.precision.autocast_dtype`: {autocast_dtype}"
+    )
 
 
 def _copy_compatible_module_state(
@@ -151,22 +156,24 @@ def _copy_compatible_module_state(
     return len(compatible), len(target_state)
 
 
-def _initialize_efm_from_sfm(efm: EFM, frozen_sfm: ModelWrapper, logger: ExperimentLogger) -> None:
-    sfm = _unwrap_sfm(frozen_sfm)
-    if getattr(efm, "embed_dim", None) != getattr(sfm, "embed_dim", None):
+def _initialize_efm_from_sfm(
+    efm: EFM, frozen_sfm: SFM, logger: ExperimentLogger
+) -> None:
+    if getattr(efm, "embed_dim", None) != getattr(frozen_sfm, "embed_dim", None):
         raise ValueError(
             "Initializing EFM from SFM requires matching embed_dim, "
-            f"got EFM={getattr(efm, 'embed_dim', None)} and SFM={getattr(sfm, 'embed_dim', None)}."
+            f"got EFM={getattr(efm, 'embed_dim', None)} and "
+            f"SFM={getattr(frozen_sfm, 'embed_dim', None)}."
         )
 
     embedding_copied, embedding_total = _copy_compatible_module_state(
         target=efm.embedding,
-        source=sfm.embedding,
+        source=frozen_sfm.embedding,
         module_name="embedding",
     )
     backbone_copied, backbone_total = _copy_compatible_module_state(
         target=efm.backbone,
-        source=sfm.backbone,
+        source=frozen_sfm.backbone,
         module_name="backbone",
     )
     logger.info(
@@ -186,7 +193,9 @@ def _save_initialized_efm_weights(
     logger: ExperimentLogger,
 ) -> None:
     if runtime.is_main:
-        model_path = save_model_state_dict(checkpoint_assets.efm_model, efm.state_dict())
+        model_path = save_model_state_dict(
+            checkpoint_assets.efm_model, efm.state_dict()
+        )
         logger.info("Initialized EFM weights saved to %s", model_path)
     barrier()
 
@@ -196,7 +205,9 @@ def _resolve_eos_token_id(token_dict) -> int:
     if not bool(mask.any()):
         mask = token_dict["gene_symbol"].astype(str).str.lower() == "<eos>"
     if not bool(mask.any()):
-        raise ValueError("`vocab.json` must contain an <eos> token for EFM pretraining.")
+        raise ValueError(
+            "`vocab.json` must contain an <eos> token for EFM pretraining."
+        )
     return int(token_dict.loc[mask, "token_index"].iloc[0])
 
 
@@ -210,7 +221,9 @@ def _build_efm(
         efm_kwargs["attention_backend"] = config["runtime"]["attention_backend"]
     efm_kwargs.pop("gene_embedding_ckpt", None)
     configured_cond_vocab_size = efm_kwargs.pop("cond_vocab_size", None)
-    if configured_cond_vocab_size is not None and int(configured_cond_vocab_size) != int(data_assets.cond_vocab_size):
+    if configured_cond_vocab_size is not None and int(
+        configured_cond_vocab_size
+    ) != int(data_assets.cond_vocab_size):
         raise ValueError(
             "Mismatched `efm.cond_vocab_size` between config "
             f"({configured_cond_vocab_size}) and data assets ({data_assets.cond_vocab_size})."
@@ -229,21 +242,35 @@ def _load_frozen_sfm(
     assets: ModelAssets,
     runtime: RuntimeContext,
     logger: ExperimentLogger,
-) -> ModelWrapper:
-    frozen_sfm = build_model(
-        sfm_config=config["model"],
-        data_bundle=PretrainingDataBundle(
-            train_loader=None,
-            train_sampler=None,
-            token_dict=data_assets.token_dict,
-            cond_vocab_size=data_assets.cond_vocab_size,
-            train_size=0,
-            path=data_assets.train_paths[0],
-        ),
-        assets=assets,
-        runtime_config=config.get("runtime", {}),
+) -> SFM:
+    sfm_kwargs = copy.deepcopy(config["model"]["sfm"])
+    configured_cond_vocab_size = sfm_kwargs.pop("cond_vocab_size", None)
+    if configured_cond_vocab_size is not None and int(
+        configured_cond_vocab_size
+    ) != int(data_assets.cond_vocab_size):
+        raise ValueError(
+            "Mismatched `sfm.cond_vocab_size` between config "
+            f"({configured_cond_vocab_size}) and data assets ({data_assets.cond_vocab_size})."
+        )
+    sfm_kwargs.pop("gene_embedding_ckpt", None)
+    if "attention_backend" in config.get("runtime", {}):
+        sfm_kwargs["attention_backend"] = config["runtime"]["attention_backend"]
+
+    frozen_sfm = SFM(
+        token_dict=data_assets.token_dict,
+        cond_vocab_size=data_assets.cond_vocab_size,
+        gene_embedding_ckpt=str(assets.vocab_tensors),
+        **sfm_kwargs,
     )
     state_dict = load_model_state_dict(assets.sfm_model)
+    wrapper_prefixes = ("foundation_modules.", "head_modules.")
+    wrapper_keys = [key for key in state_dict if key.startswith(wrapper_prefixes)]
+    if wrapper_keys:
+        raise ValueError(
+            "EFM pretraining requires a bare SFM checkpoint with keys such as "
+            "`embedding.*` and `backbone.*`; wrapper-prefixed checkpoints are not supported. "
+            f"Found {len(wrapper_keys)} wrapper-prefixed key(s), for example {wrapper_keys[0]!r}."
+        )
     frozen_sfm.load_state_dict(state_dict, strict=True)
 
     precision_cfg = config.get("runtime", {}).get("precision", {})
@@ -255,10 +282,27 @@ def _load_frozen_sfm(
     return frozen_sfm
 
 
+def _compute_sfm_gene_order(
+    frozen_sfm: SFM,
+    tokens: dict[str, torch.Tensor | None],
+) -> GeneOrderState:
+    _, gene_order = frozen_sfm(
+        tokens,
+        compute_order=True,
+        compute_grn=False,
+        return_factors=False,
+    )
+    if gene_order is None:
+        raise RuntimeError("Frozen SFM did not return `gene_order`.")
+    return gene_order
+
+
 def _normalize_checkpoint_frequency(config: dict[str, Any]) -> str:
-    frequency = str(
-        config.get("trainer", {}).get("checkpoint_frequency", "epoch")
-    ).strip().lower()
+    frequency = (
+        str(config.get("trainer", {}).get("checkpoint_frequency", "epoch"))
+        .strip()
+        .lower()
+    )
     frequency = {
         "file": "adata",
         "dataset": "adata",
@@ -383,7 +427,7 @@ class EFMPretrainingTrainer:
         self,
         *,
         model: torch.nn.Module,
-        frozen_sfm: ModelWrapper,
+        frozen_sfm: SFM,
         optimizer: torch.optim.Optimizer,
         scheduler: torch.optim.lr_scheduler.LRScheduler,
         loss_fn: EFMLoss,
@@ -426,7 +470,9 @@ class EFMPretrainingTrainer:
                 self.runtime,
             )
         else:
-            grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), float(max_norm))
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                self.model.parameters(), float(max_norm)
+            )
         if torch.is_tensor(grad_norm):
             return float(grad_norm.detach().item())
         return float(grad_norm)
@@ -458,7 +504,9 @@ class EFMPretrainingTrainer:
         start_file_index = int(self.train_state.get("file_index", 0))
         checkpoint_frequency = _normalize_checkpoint_frequency(self.config)
         final_state_saved = False
-        grad_accum_steps = int(self.config["data"].get("gradient_accumulation_steps", 1))
+        grad_accum_steps = int(
+            self.config["data"].get("gradient_accumulation_steps", 1)
+        )
         if grad_accum_steps <= 0:
             raise ValueError(
                 f"`data.gradient_accumulation_steps` must be positive, got {grad_accum_steps}."
@@ -468,7 +516,11 @@ class EFMPretrainingTrainer:
             start_file_index = 0
         if start_epoch >= epochs:
             if self.runtime.is_main:
-                self.logger.info("EFM pretraining already completed: epoch=%s/%s", start_epoch, epochs)
+                self.logger.info(
+                    "EFM pretraining already completed: epoch=%s/%s",
+                    start_epoch,
+                    epochs,
+                )
             return
 
         self.model.train()
@@ -479,9 +531,13 @@ class EFMPretrainingTrainer:
             file_start_index = start_file_index if epoch == start_epoch else 0
             if self.runtime.is_main:
                 self.logger.info("")
-                self.logger.info("[epoch %s/%s] Start EFM pretraining pass", epoch + 1, epochs)
+                self.logger.info(
+                    "[epoch %s/%s] Start EFM pretraining pass", epoch + 1, epochs
+                )
 
-            for file_offset, path in enumerate(train_paths[file_start_index:], start=file_start_index):
+            for file_offset, path in enumerate(
+                train_paths[file_start_index:], start=file_start_index
+            ):
                 file_index = file_offset + 1
                 if self.runtime.is_main:
                     self.logger.info(
@@ -521,27 +577,29 @@ class EFMPretrainingTrainer:
                         num_batches = len(data_bundle.train_loader)
                         for batch_idx, batch in enumerate(progress, start=1):
                             tokens = move_batch_to_device(batch, self.runtime.device)
-                            should_step = (batch_idx % grad_accum_steps == 0) or (batch_idx == num_batches)
+                            should_step = (batch_idx % grad_accum_steps == 0) or (
+                                batch_idx == num_batches
+                            )
 
                             with torch.no_grad():
-                                with _autocast_context(self.runtime, self.config["runtime"]):
-                                    sfm_output = self.frozen_sfm(
-                                        tokens,
-                                        compute_order={"sfm": True},
-                                        compute_grn=False,
-                                        return_factors=False,
+                                with _autocast_context(
+                                    self.runtime, self.config["runtime"]
+                                ):
+                                    gene_order = _compute_sfm_gene_order(
+                                        self.frozen_sfm, tokens
                                     )
-                                gene_order = sfm_output.foundations["sfm"].gene_order
-                                if gene_order is None:
-                                    raise RuntimeError("Frozen SFM did not return `gene_order`.")
-                                reordered_tokens = reorder_gene_aligned_tokens(tokens, gene_order)
+                                reordered_tokens = reorder_gene_aligned_tokens(
+                                    tokens, gene_order
+                                )
                                 target_ids, target_expr, valid_mask = build_efm_targets(
                                     reordered_tokens,
                                     eos_token_id=self.eos_token_id,
                                 )
 
                             with self._grad_sync_context(should_sync=should_step):
-                                with _autocast_context(self.runtime, self.config["runtime"]):
+                                with _autocast_context(
+                                    self.runtime, self.config["runtime"]
+                                ):
                                     output = self.model(reordered_tokens)
                                     loss_result = self.loss_fn(
                                         output=output,
@@ -554,7 +612,9 @@ class EFMPretrainingTrainer:
                             metrics = dict(loss_result.metrics)
                             epoch_steps += 1
                             for key, value in metrics.items():
-                                epoch_metric_sums[key] = epoch_metric_sums.get(key, 0.0) + float(value)
+                                epoch_metric_sums[key] = epoch_metric_sums.get(
+                                    key, 0.0
+                                ) + float(value)
 
                             if should_step:
                                 self._clip_grad_norm()
@@ -563,7 +623,15 @@ class EFMPretrainingTrainer:
                                 self.optimizer.zero_grad(set_to_none=True)
                                 self.train_state["global_step"] += 1
 
-                            del loss_result, output, tokens, reordered_tokens, target_ids, target_expr, valid_mask
+                            del (
+                                loss_result,
+                                output,
+                                tokens,
+                                reordered_tokens,
+                                target_ids,
+                                target_expr,
+                                valid_mask,
+                            )
 
                         epoch_metrics = {
                             key: value / max(epoch_steps, 1)
@@ -720,8 +788,12 @@ def main() -> None:
                 raise FileNotFoundError(
                     f"Full EFM resume requires model weights at {checkpoint_assets.efm_model}."
                 )
-            efm.load_state_dict(load_model_state_dict(checkpoint_assets.efm_model), strict=True)
-            logger.info("Loaded resume EFM weights from %s", checkpoint_assets.efm_model)
+            efm.load_state_dict(
+                load_model_state_dict(checkpoint_assets.efm_model), strict=True
+            )
+            logger.info(
+                "Loaded resume EFM weights from %s", checkpoint_assets.efm_model
+            )
         else:
             _initialize_efm_from_sfm(efm, frozen_sfm, logger)
             _save_initialized_efm_weights(
@@ -755,7 +827,9 @@ def main() -> None:
             scheduler=scheduler,
             logger=logger,
         )
-        loss_fn = EFMLoss(lambda_exp=float(config.get("loss", {}).get("lambda_exp", 1.0)))
+        loss_fn = EFMLoss(
+            lambda_exp=float(config.get("loss", {}).get("lambda_exp", 1.0))
+        )
 
         if runtime.is_main:
             logger.info("Output directory: %s", paths.root)
