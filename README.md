@@ -1,10 +1,6 @@
 <h1 align="center">Building a causality-aware single-cell RNA-seq foundation model via context-specific causal regulation modeling</h1>
 
 <p align="center">
-  <strong>A causality-aware foundation model for single-cell transcriptomics</strong>
-</p>
-
-<p align="center">
   <a href="https://huggingface.co/kaichenxu/scCAFM">
     <img alt="Hugging Face" src="https://img.shields.io/badge/🤗%20Hugging%20Face-Model-FFD21E">
   </a>
