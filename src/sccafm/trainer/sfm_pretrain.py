@@ -552,6 +552,8 @@ class PretrainingTrainer:
 
                 if save_after_data_release:
                     self._save_checkpoint()
+                if self.runtime.is_main:
+                    self.logger.info("")
 
             self.train_state["epoch"] = epoch + 1
             self.train_state["file_index"] = 0
