@@ -64,10 +64,10 @@ An installed `flash-attn` package is reused. Otherwise, pip installs it and may 
 Verify the default FA4 backend:
 
 ```bash
-python test/test_FA4.py
+python tests/test_FA4.py
 ```
 
-If using the FA2 fallback, set `attention_backend="fa2"` when loading the model and run `python test/test_FA2.py` instead.
+If using the FA2 fallback, set `attention_backend="fa2"` when loading the model and run `python tests/test_FA2.py` instead.
 
 ### Install the package
 
@@ -82,10 +82,10 @@ pip install .
 Download the [pretrained model and shared resources](https://huggingface.co/kaichenxu/scCAFM), which are required to run pretrained scCAFM on your own data or the tutorial datasets:
 
 ```bash
-hf download kaichenxu/scCAFM --local-dir /path/to/model
+hf download kaichenxu/scCAFM --local-dir assets
 ```
 
-Replace `/path/to/model` with your preferred directory and use that path when loading the model.
+By default, the model is downloaded to `assets/`. You can replace `assets` with another local path; use that path when loading the model.
 
 ## Explore the tutorials
 
@@ -137,7 +137,7 @@ The datasets total approximately 914 MB. The `tutorial_data/` directory matches 
 | `docs/` | Task-oriented notebooks for GRN inference and validation |
 | `configs/` | Model and training configurations |
 | `data/` | Data acquisition and preparation utilities |
-| `test/` and `tests/` | Backend checks and automated tests |
+| `tests/` | Backend checks and automated tests |
 | `assets/` | Ignored local directory for pretrained weights and shared resources |
 
 For dataset acquisition and vocabulary-aware preparation, see the [data pipeline guide](data/README.md). For checkpoint contents, intended use, and model limitations, see the [Hugging Face model card](https://huggingface.co/kaichenxu/scCAFM).
