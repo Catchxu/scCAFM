@@ -41,7 +41,8 @@ dev = [
 
 py312 = [
     "anndata==0.12.10",
-    "flash-attn==2.8.3",
+    "flash-attn>=2.8.3,<3",
+    "flash-attn-4",
     "hatchling==1.31.0",
     "huggingface_hub==1.24.0",
     "ipykernel==7.2.0",

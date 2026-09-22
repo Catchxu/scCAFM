@@ -10,7 +10,7 @@
   <img alt="Python" src="https://img.shields.io/badge/Python-3.10–3.14-3776AB?logo=python&logoColor=white">
 </p>
 
-**scCAFM** learns context-specific gene-regulatory structure together with transferable gene and cell representations from single-cell RNA sequencing data. It combines a **Structure Foundation Module (SFM)** for regulatory modeling with an **Embedding Foundation Module (EFM)** guided by the structure learned by SFM.
+**scCAFM** is a single-cell **Causality-Aware Foundation Model** pretrained on 49.7 million human and mouse cells to infer cell-specific gene regulatory networks (csGRNs) and learn transferable, contextual gene and cell embeddings. Its **Structure Foundation Module (SFM)** models causal regulatory relationships in a mixture-of-experts-mediated latent factor space, enabling scalable csGRN inference. Its **Embedding Foundation Module (EFM)** uses the inferred cell-specific causal gene orderings to learn causality-aware representations.
 
 <p align="center">
   <img src="docs/Fig1.png" width="85%" alt="Overview of the scCAFM framework">
@@ -18,120 +18,116 @@
 
 ## What scCAFM provides
 
-- **Cell-specific gene-regulatory networks:** infer a TF-to-target network for every cell while preserving cellular heterogeneity.
-- **Pooled gene-regulatory networks:** summarize cell-specific networks into one network for a population of cells.
-- **Structure-guided representations:** learn gene and cell embeddings informed by context-specific regulatory structure.
-- **Human and mouse support:** use shared vocabularies, transcription-factor catalogues, and cross-species resources.
-- **Memory-aware result generation:** stream cell-specific networks and optionally retain edges by score threshold or top-k selection.
+- **Cell-specific causal gene regulatory networks:** infer directed transcription-factor-to-target relationships for individual cells to characterize heterogeneous regulatory programs and developmental dynamics.
+- **Pooled gene regulatory networks:** aggregate cell-specific networks to characterize shared regulatory structure within a cell population.
+- **Causality-aware gene and cell embeddings:** learn contextual representations that encode the regulatory relationships and hierarchies of inferred csGRNs.
+- **Scalable regulatory inference:** perform causal discovery in a low-dimensional latent factor space to support csGRN inference at atlas scale.
+- **Transfer to new datasets:** apply pretrained scCAFM in a zero-shot or fine-tuned setting to generate networks and embeddings for human and mouse scRNA-seq data.
 
-The model is designed for research in gene regulation, cellular heterogeneity, perturbation response, developmental biology, and related single-cell applications.
+The inferred networks and learned embeddings support downstream analyses including gene perturbation prediction, cell type annotation, batch correction, cancer drug response prediction, and prediction of perturbation-induced cell fate transitions.
 
 ## Install scCAFM
 
-scCAFM supports Python 3.10–3.14. The reproducible environment described below uses Python 3.12 and includes the dependencies needed for the package and tutorials. The tutorials require one CUDA-capable NVIDIA GPU; GPU memory requirements vary with the number of genes and the inference batch size.
+Use Linux with a CUDA-capable NVIDIA GPU supported by FlashAttention. scCAFM supports Python 3.10–3.14. Use an environment with a compatible CUDA-enabled PyTorch installation. GPU memory requirements depend on the number of genes and the inference batch size.
 
-### Review the tested configuration
+### Set up the environment
 
-The current release has been tested with the following configuration. Other operating systems and software combinations have not been formally tested.
-
-| Component | Tested version |
-|---|---|
-| Operating system | Ubuntu 24.04.4 LTS |
-| Python | 3.12.13 |
-| NVIDIA GPU | GeForce RTX 5090, 32 GB |
-| NVIDIA driver | 580.173.02 |
-| CUDA | 13.0 |
-| PyTorch | 2.11.0+cu130 |
-| FlashAttention | 2.8.3 |
-
-The pinned Python 3.12 environment uses these package versions:
-
-| Package | Version |
-|---|---:|
-| AnnData | 0.12.10 |
-| Hugging Face Hub | 1.24.0 |
-| Hatchling | 1.31.0 |
-| IPython | 9.12.0 |
-| ipykernel | 7.2.0 |
-| JupyterLab | 4.6.2 |
-| matplotlib | 3.9.1 |
-| NumPy | 2.4.3 |
-| pandas | 2.3.3 |
-| PyYAML | 6.0.3 |
-| safetensors | 0.7.0 |
-| Scanpy | 1.12 |
-| scikit-learn | 1.8.0 |
-| SciPy | 1.17.1 |
-| tqdm | 4.67.3 |
-
-PyTorch and FlashAttention are listed separately in the tested configuration because they depend on the CUDA platform.
-
-### Install the tested Python environment
-
-Create and activate a Python 3.12 environment:
-
-```bash
-conda create -n sccafm python=3.12.13
-conda activate sccafm
-```
-
-Clone the repository:
+Activate your Python environment, then clone the repository:
 
 ```bash
 git clone https://github.com/Catchxu/scCAFM.git
 cd scCAFM
 ```
 
-Install the tested CUDA-enabled PyTorch build, followed by scCAFM and the remaining pinned dependencies:
+If PyTorch is not already installed, follow the [PyTorch installation instructions](https://pytorch.org/get-started/locally/) to select a build compatible with your system.
+
+### Install FlashAttention
+
+scCAFM uses **FlashAttention-4 (FA4)** by default (`attention_backend="fa4"`) on supported  Blackwell GPUs, such as B200 and RTX 6000 Pro. **FlashAttention-2 (FA2)** is also available as an alternative backend (`attention_backend="fa2"`). Install both packages when using FA4 because scCAFM also uses FA2's padding and rotary-embedding utilities. See the [FlashAttention documentation](https://github.com/Dao-AILab/flash-attention#flashattention-4-cutedsl) for hardware requirements.
+
+**Optional: install a prebuilt FA2 wheel.** If FA2 is not already installed, you can avoid local compilation by choosing a wheel from the community-maintained [flash-attention-prebuild-wheels project](https://github.com/mjun0812/flash-attention-prebuild-wheels). Select version 2.8.3 or a newer 3.x release matching your Python, PyTorch, CUDA, and platform, then run:
 
 ```bash
-pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu130
-pip install hatchling==1.31.0
-pip install ".[py312]" --no-build-isolation
+pip install /path/to/downloaded.whl
 ```
 
-Installing scCAFM itself with `pip install .` in an environment where its dependencies are already available typically takes less than five minutes. This estimate excludes CUDA, PyTorch and FlashAttention setup, as well as model and data downloads, which depend on the system and network connection.
-
-### Download the model and tutorial data
-
-Download the pretrained model and shared resources from the [scCAFM model repository](https://huggingface.co/kaichenxu/scCAFM):
+Install the FlashAttention packages:
 
 ```bash
-pip install -U huggingface_hub
-hf download kaichenxu/scCAFM --local-dir assets
+pip install packaging psutil ninja
+pip install flash-attn --no-build-isolation
+pip install flash-attn-4
 ```
 
-Download the prepared demonstration datasets from the [scCAFM tutorial-data repository](https://huggingface.co/datasets/kaichenxu/scCAFM-data):
+An installed `flash-attn` package is reused. Otherwise, pip installs it and may compile it from source, which requires a compatible CUDA toolkit. If using only the FA2 backend, you can skip installing `flash-attn-4`.
+
+Verify the default FA4 backend:
 
 ```bash
-hf download kaichenxu/scCAFM-data \
-  --repo-type dataset \
-  --local-dir tutorial_data
+python test/test_FA4.py
 ```
 
-The complete tutorial-data collection is approximately 914 MB. Its directory layout already matches the paths used by the notebooks. The `assets/` and `tutorial_data/` directories are intentionally not tracked by Git.
+If using the FA2 fallback, set `attention_backend="fa2"` when loading the model and run `python test/test_FA2.py` instead.
+
+### Install the package
+
+From the repository root, install scCAFM and its core dependencies:
+
+```bash
+pip install .
+```
+
+### Download the pretrained model
+
+Download the [pretrained model and shared resources](https://huggingface.co/kaichenxu/scCAFM), which are required to run pretrained scCAFM on your own data or the tutorial datasets:
+
+```bash
+hf download kaichenxu/scCAFM --local-dir /path/to/model
+```
+
+Replace `/path/to/model` with your preferred directory and use that path when loading the model.
 
 ## Explore the tutorials
 
 We provide a series of tutorials to help users get started with scCAFM and apply it to common gene-regulatory-network tasks.
+
+### Set up the tutorial environment
+
+To run the notebooks with the provided dependency versions, create a separate Python 3.12 environment. From the repository root, run:
+
+```bash
+conda create -n sccafm-tutorial python=3.12
+conda activate sccafm-tutorial
+pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu130
+pip install hatchling==1.31.0 packaging psutil ninja
+pip install ".[py312]" --no-build-isolation
+```
+
+This setup uses CUDA 13.0 and includes FA4, FA2, and the notebook dependencies. You can install a compatible prebuilt FA2 wheel before the final command as described above; the `py312` extra requires `flash-attn>=2.8.3`. The extra is only needed for the tutorial environment, not for general scCAFM use.
+
+The notebooks expect the model and shared resources in `assets/` under the repository root:
+
+```bash
+hf download kaichenxu/scCAFM --local-dir assets
+```
+
+If you already downloaded the model elsewhere, update the model path in the notebooks to use that directory.
+
+### Download tutorial data
+
+To follow the notebooks step by step with the provided examples, download the [tutorial datasets](https://huggingface.co/datasets/kaichenxu/scCAFM-data). You can skip this download when adapting the workflows to your own data.
+
+```bash
+hf download kaichenxu/scCAFM-data --repo-type dataset --local-dir tutorial_data
+```
+
+The datasets total approximately 914 MB. The `tutorial_data/` directory matches the data paths used in the notebooks.
 
 | Tutorial | What it demonstrates |
 |---|---|
 | [Inferring pooled GRNs from homogeneous cell populations with ChIP-seq-based benchmarking](docs/chipseq_grn_recovery.ipynb) | Preprocess hESC and mESC data, infer pooled GRNs, and compare them with ChIP-seq reference networks |
 | [Inferring cell-specific GRNs from heterogeneous cell populations](docs/cell_specific_grns.ipynb) | Preprocess mouse-pancreas data, generate cell-specific GRNs, and inspect representative edges |
 | [Inferring pooled GRNs from homogeneous cell populations with Perturb-seq-based validation](docs/perturbseq_edge_validation.ipynb) | Infer a pooled K562 GRN and validate highly ranked edges with Perturb-seq |
-
-## Choose an attention backend
-
-scCAFM supports FlashAttention-4 (FA4) and FlashAttention-2 (FA2). FA4 is intended for compatible Blackwell GPUs such as the B200; use FA2 when your hardware or software stack does not support FA4. Follow the [FlashAttention installation instructions](https://github.com/Dao-AILab/flash-attention) for your CUDA and PyTorch environment.
-
-Validate the selected backend before running a large job:
-
-```bash
-PYTHONPATH=. python test/test_FA4.py
-# Or, for FA2:
-PYTHONPATH=. python test/test_FA2.py
-```
 
 ## Find your way around the repository
 
