@@ -52,6 +52,52 @@ except ImportError as exc:
 FA4_MIN_CUDA_CAPABILITY = 90
 
 
+class _EmptyFA4AuxDataAdapter:
+    """Represent FA4's empty auxiliary container without runtime arguments."""
+
+    def __init__(self, aux_data) -> None:
+        if aux_data.tensors is not None or aux_data.scalars is not None:
+            raise NotImplementedError(
+                "The scCAFM FA4 compatibility adapter supports only empty AuxData."
+            )
+        self._aux_data = aux_data
+
+    def __get_mlir_types__(self) -> list:
+        return []
+
+    def __c_pointers__(self) -> list:
+        return []
+
+    def __extract_mlir_values__(self) -> list:
+        return []
+
+    def __new_from_mlir_values__(self, values: list):
+        if values:
+            raise ValueError("Empty AuxData must not contain runtime MLIR values.")
+        return self._aux_data
+
+
+def _register_empty_aux_data_adapter() -> None:
+    # FA4 b36 still passes a NamedTuple that CUTLASS 4.6.2 does not adapt.
+    # scCAFM never supplies auxiliary tensors/scalars. Keep their absence
+    # explicit instead of letting the JIT silently drop an unsupported object.
+    try:
+        from cutlass.base_dsl.runtime.jit_arg_adapters import JitArgAdapterRegistry
+        from flash_attn.cute.utils import AuxData
+    except ImportError:
+        return
+
+    # Prefer upstream support whenever the container or registry provides it.
+    if any(
+        hasattr(AuxData, name)
+        for name in ("__get_mlir_types__", "__c_pointers__", "__extract_mlir_values__")
+    ):
+        return
+    if JitArgAdapterRegistry.get_registered_adapter(AuxData()) is not None:
+        return
+    JitArgAdapterRegistry.register_jit_arg_adapter(AuxData)(_EmptyFA4AuxDataAdapter)
+
+
 class FlashMHAFA4(FlashAttentionBackend):
     """FA4 backend using CuTe `flash_attn_func` and `flash_attn_varlen_func`."""
 
@@ -85,6 +131,7 @@ class FlashMHAFA4(FlashAttentionBackend):
                 f"`attention_backend='fa4'` requires CUDA capability >= sm{FA4_MIN_CUDA_CAPABILITY}, "
                 f"got sm{cc}."
             )
+        _register_empty_aux_data_adapter()
 
     def _run_dense(
         self,

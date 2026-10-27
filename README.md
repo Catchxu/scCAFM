@@ -142,14 +142,6 @@ The datasets total approximately 914 MB. The `tutorial_data/` directory matches 
 
 For dataset acquisition and vocabulary-aware preparation, see the [data pipeline guide](data/README.md). For checkpoint contents, intended use, and model limitations, see the [Hugging Face model card](https://huggingface.co/kaichenxu/scCAFM).
 
-## Use scCAFM responsibly
-
-scCAFM is a research model and is not intended for clinical diagnosis or treatment decisions. Predicted regulatory relationships are computational hypotheses and should be validated with suitable experimental or independent evidence. Results may vary across tissues, technologies, species, preprocessing choices, and biological contexts.
-
 ## Get support
 
 Questions, bug reports, and feature requests are welcome through [GitHub Issues](https://github.com/Catchxu/scCAFM/issues).
-
-## License
-
-scCAFM is released under the [GNU General Public License v3.0](LICENSE).
