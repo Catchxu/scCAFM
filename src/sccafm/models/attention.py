@@ -51,6 +51,39 @@ class FlashAttentionBackend(nn.Module):
         raise NotImplementedError
 
 
+    def forward_global_cell(
+        self,
+        qkv: torch.Tensor,
+        key_padding_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Use a global first query and causal gene queries with this backend.
+
+        The cell token is always valid. Gene queries already attend to it under
+        the causal mask. A single extra query supplies its full-sequence readout.
+        """
+        causal_output = self(qkv, key_padding_mask=key_padding_mask, causal=True)
+        q, k, v = qkv.unbind(dim=2)
+        if key_padding_mask is None:
+            cell_output = self._run_dense(q[:, :1], k, v, causal=False)
+        else:
+            k_unpad, _, cu_seqlens_k, max_seqlen_k = self._unpad_tensor(
+                k, ~key_padding_mask
+            )
+            v_unpad, _, _, _ = self._unpad_tensor(v, ~key_padding_mask)
+            cu_seqlens_q = torch.arange(
+                q.shape[0] + 1, device=q.device, dtype=torch.int32
+            )
+            cell_output = self._run_varlen(
+                q[:, 0], k_unpad, v_unpad,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_k=cu_seqlens_k,
+                max_seqlen_q=1,
+                max_seqlen_k=max_seqlen_k,
+                causal=False,
+            ).unsqueeze(1)
+        return torch.cat([cell_output, causal_output[:, 1:]], dim=1)
+
+
 def build_flash_attention_backend(
     attention_backend: str,
     *,
@@ -256,12 +289,14 @@ class FlashMHA(nn.Module):
         x: torch.Tensor,
         key_padding_mask: torch.Tensor | None = None,
         causal: bool = False,
+        global_cell_token: bool = False,
     ) -> torch.Tensor:
         """
         Args:
             x: (B, L, D)
             key_padding_mask: (B, L) bool, where True means padded position
             causal: whether to use causal masking
+            global_cell_token: global first query with causal gene queries
 
         Returns:
             out: (B, L, D)
@@ -282,11 +317,14 @@ class FlashMHA(nn.Module):
         )
 
         qkv = self._project_qkv(x)
-        out = self.attention(
-            qkv,
-            key_padding_mask=key_padding_mask,
-            causal=causal,
-        )
+        if global_cell_token:
+            out = self.attention.forward_global_cell(qkv, key_padding_mask)
+        else:
+            out = self.attention(
+                qkv,
+                key_padding_mask=key_padding_mask,
+                causal=causal,
+            )
 
         out = out.reshape(batch_size, seq_len, self.embed_dim)
         out = self.out_proj(out)

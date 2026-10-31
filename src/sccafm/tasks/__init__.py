@@ -1,3 +1,9 @@
+from .annotation import (
+    CellTypeAnnotator,
+    CellTypeEvaluation,
+    CellTypePredictions,
+    evaluate_cell_type_annotation,
+)
 from .chipseq import (
     ChIPSeqEvaluation,
     ChIPSeqReference,
@@ -9,6 +15,10 @@ from .grn_io import write_cell_specific_grns_csv, write_pooled_grn_csv
 from .perturbseq import PerturbSeqEvaluation, evaluate_perturbseq_grn
 
 __all__ = [
+    "CellTypeAnnotator",
+    "CellTypeEvaluation",
+    "CellTypePredictions",
+    "evaluate_cell_type_annotation",
     "ChIPSeqEvaluation",
     "ChIPSeqReference",
     "CellSpecificGRNs",

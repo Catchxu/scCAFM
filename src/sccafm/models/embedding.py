@@ -526,6 +526,21 @@ class ScEmbedding(nn.Module):
 
         self.gene_embedding.weight.register_hook(_mask_loaded_rows)
 
+    def encode_cell_state(
+        self,
+        expression_values: torch.Tensor,
+        condition_ids: torch.LongTensor,
+        padding_mask: Optional[torch.BoolTensor] = None,
+    ) -> torch.Tensor:
+        """Encode the existing prefix state without constructing gene embeddings."""
+        dtype = self.gene_embedding.weight.dtype
+        prefix = self.condition_embedding(condition_ids).to(dtype)
+        batch_state = self.batch_embedding(
+            expression_values, padding_mask=padding_mask
+        ).unsqueeze(1).to(dtype)
+        cell_state = prefix + batch_state + self.prefix_type_embedding.to(dtype)
+        return self.dropout(self.final_norm(cell_state))
+
     def forward(
         self,
         input_ids: torch.LongTensor,

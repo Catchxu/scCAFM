@@ -305,6 +305,42 @@ class EFM(nn.Module):
         model.eval()
         return model
 
+    def encode_cell_state(
+        self,
+        tokens: dict[str, torch.Tensor | None],
+        *,
+        attention_mode: str = "causal",
+    ) -> torch.Tensor:
+        """Encode the first-token cell state without expression-prediction heads.
+
+        'causal' reproduces the pretrained prefix readout. 'cell_global'
+        lets that token attend to all valid tokens at every layer, while gene
+        queries use a triangular mask. The global mode is for observed-cell
+        representation tasks, not autoregressive training or cached generation.
+        """
+        if attention_mode == "causal":
+            cell_state = self.embedding.encode_cell_state(
+                expression_values=tokens["expression_values"],
+                condition_ids=tokens["condition_ids"],
+                padding_mask=tokens.get("padding_mask"),
+            )
+            return self.backbone(cell_state, causal=True)[:, 0, :]
+        if attention_mode != "cell_global":
+            raise ValueError("attention_mode must be 'causal' or 'cell_global'.")
+        embedded = self.embedding(
+            input_ids=tokens["input_ids"],
+            expression_values=tokens["expression_values"],
+            condition_ids=tokens["condition_ids"],
+            padding_mask=tokens.get("padding_mask"),
+            non_tf_mask=tokens["non_tf_mask"],
+        )
+        return self.backbone(
+            embedded.embeddings,
+            key_padding_mask=embedded.key_padding_mask,
+            causal=True,
+            global_cell_token=True,
+        )[:, 0, :]
+
     def forward(self, tokens: dict[str, torch.Tensor | None]) -> EFMOutput:
         input_ids = tokens.get("input_ids")
         expression_values = tokens.get("expression_values")

@@ -13,6 +13,10 @@ except PackageNotFoundError:
 
 
 __all__ = [
+    "CellTypeAnnotator",
+    "CellTypeEvaluation",
+    "CellTypePredictions",
+    "evaluate_cell_type_annotation",
     "ChIPSeqEvaluation",
     "ChIPSeqReference",
     "CellSpecificGRNs",
@@ -39,6 +43,10 @@ def __getattr__(name: str):
     if name == "load_yaml_config":
         return getattr(import_module(".config", __name__), name)
     if name in {
+        "CellTypeAnnotator",
+        "CellTypeEvaluation",
+        "CellTypePredictions",
+        "evaluate_cell_type_annotation",
         "ChIPSeqEvaluation",
         "ChIPSeqReference",
         "CellSpecificGRNs",

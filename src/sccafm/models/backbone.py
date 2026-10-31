@@ -84,11 +84,13 @@ class TransformerBlock(nn.Module):
         x: torch.Tensor,
         key_padding_mask: torch.Tensor | None = None,
         causal: bool = False,
+        global_cell_token: bool = False,
     ) -> torch.Tensor:
         x = x + self.attn(
             self.attn_norm(x),
             key_padding_mask=key_padding_mask,
             causal=causal,
+            global_cell_token=global_cell_token,
         )
         x = x + self.mlp(self.mlp_norm(x))
 
@@ -177,6 +179,7 @@ class TransformerBackbone(nn.Module):
         x: torch.Tensor,
         key_padding_mask: torch.Tensor | None = None,
         causal: bool = False,
+        global_cell_token: bool = False,
     ) -> torch.Tensor:
         if x.ndim != 3:
             raise ValueError(f"`x` must have shape (B, L, D), got {tuple(x.shape)}.")
@@ -186,7 +189,10 @@ class TransformerBackbone(nn.Module):
             )
 
         for layer in self.layers:
-            x = layer(x, key_padding_mask=key_padding_mask, causal=causal)
+            x = layer(
+                x, key_padding_mask=key_padding_mask, causal=causal,
+                global_cell_token=global_cell_token,
+            )
 
         x = self.final_norm(x)
 
