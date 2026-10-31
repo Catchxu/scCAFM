@@ -1,4 +1,4 @@
-"""Cell-type annotation by supervised fine-tuning of EFM cell states."""
+"""Cell-type annotation with configurable EFM layer freezing."""
 
 from __future__ import annotations
 
@@ -246,6 +246,30 @@ class CellTypeAnnotator:
             nn.Linear(self.classifier_config["hidden_dim"], len(self.class_names_)),
         ).to(self.device)
 
+    def _configure_training(self, freeze_layers: int) -> None:
+        """Freeze a prefix of EFM blocks, including the complete-encoder endpoint."""
+        num_layers = self.model.backbone.num_layers
+        if not 0 <= freeze_layers <= num_layers:
+            raise ValueError(f"freeze_layers must be between 0 and {num_layers}.")
+        self.freeze_layers_ = freeze_layers
+        self.model.zero_grad(set_to_none=True)
+        self.model.requires_grad_(False)
+        self.model.embedding.requires_grad_(freeze_layers == 0)
+        for layer in self.model.backbone.layers[freeze_layers:]:
+            layer.requires_grad_(True)
+        self.model.backbone.final_norm.requires_grad_(freeze_layers < num_layers)
+
+    def _set_training_mode(self) -> None:
+        """Keep frozen embeddings and blocks deterministic during training."""
+        self.model.train()
+        if self.freeze_layers_ > 0:
+            self.model.embedding.eval()
+        for layer in self.model.backbone.layers[:self.freeze_layers_]:
+            layer.eval()
+        if self.freeze_layers_ == self.model.backbone.num_layers:
+            self.model.eval()
+        self.classifier.train()
+
     def _autocast_context(self):
         if self.device.type != "cuda" or self.autocast_dtype is None:
             return nullcontext()
@@ -371,6 +395,7 @@ class CellTypeAnnotator:
         label_key: str = "cell_type",
         gene_key: str | None = None,
         epochs: int = 20,
+        freeze_layers: int = 0,
         batch_size: int = 64,
         ordering_batch_size: int = 64,
         learning_rate: float = 1e-3,
@@ -384,10 +409,16 @@ class CellTypeAnnotator:
     ) -> CellTypeAnnotator:
         """Supervise the EFM encoder and classifier for a fixed number of epochs.
 
-        SFT updates the complete EFM embedding module, transformer backbone and
-        classifier. SFM supplies pretrained gene orders in evaluation mode.
-        EFM expression-prediction heads are unused by this task. SFM inference
-        uses ordering_batch_size independently of the SFT batch_size.
+        freeze_layers is the number of leading EFM transformer blocks to freeze.
+        Zero performs full fine-tuning, including the input embeddings. A positive
+        value also freezes the input embeddings; the remaining blocks, final
+        normalization and classifier train. Freezing every block freezes the
+        complete EFM, including final normalization, and trains only the classifier
+        on cached deterministic cell-state embeddings. Frozen modules use eval mode.
+
+        SFM always supplies pretrained gene orders in evaluation mode. EFM
+        expression-prediction heads are unused. SFM inference uses
+        ordering_batch_size independently of the SFT batch_size.
 
         training_checkpoint saves the latest completed epoch, optimizer, cached
         gene order and RNG states. resume_from continues that state with the same
@@ -414,9 +445,7 @@ class CellTypeAnnotator:
             else train_adata.var[gene_key].astype(str)
         )
         self.classifier = self._new_classifier()
-        self.model.requires_grad_(False)
-        self.model.embedding.requires_grad_(True)
-        self.model.backbone.requires_grad_(True)
+        self._configure_training(freeze_layers)
 
         progress_path = Path(training_checkpoint) if training_checkpoint is not None else None
         resume_state = None
@@ -445,6 +474,7 @@ class CellTypeAnnotator:
                 "classifier_config": self.classifier_config,
                 "vocabulary_signature": self.vocabulary_signature,
                 "batch_size": batch_size, "ordering_batch_size": ordering_batch_size,
+                "freeze_layers": freeze_layers,
                 "learning_rate": learning_rate,
                 "backbone_learning_rate": backbone_learning_rate,
                 "weight_decay": weight_decay, "class_weight": class_weight,
@@ -452,6 +482,9 @@ class CellTypeAnnotator:
             }
             if resume_from is not None:
                 resume_state = torch.load(resume_from, map_location="cpu", weights_only=True)
+                # Recovery files predating layer freezing always used full fine-tuning.
+                if "freeze_layers" not in resume_state["training_spec"]:
+                    resume_state["training_spec"]["freeze_layers"] = 0
                 if resume_state["training_spec"] != training_spec:
                     raise ValueError("Resume requires the same training inputs and settings.")
                 if resume_state["epoch"] > epochs:
@@ -484,8 +517,10 @@ class CellTypeAnnotator:
             {"params": self.classifier.parameters(), "lr": learning_rate},
             {
                 "params": [
-                    *self.model.embedding.parameters(),
-                    *self.model.backbone.parameters(),
+                    parameter
+                    for module in (self.model.embedding, self.model.backbone)
+                    for parameter in module.parameters()
+                    if parameter.requires_grad
                 ],
                 "lr": backbone_learning_rate,
             },
@@ -518,17 +553,24 @@ class CellTypeAnnotator:
             if verbose:
                 print(f"Resuming after epoch {resume_state['epoch']}.", flush=True)
             del resume_state
+        classifier_only = freeze_layers == self.model.backbone.num_layers
+        if classifier_only:
+            if verbose:
+                print("Encoding fixed EFM cell-state embeddings for classifier training.")
+            training_features = self._encode(train_tokens, batch_size, verbose=verbose)
         for epoch in range(first_epoch, epochs + 1):
-            self.model.train()
-            self.classifier.train()
+            self._set_training_mode()
             total_loss = 0.0
             for batch_number, indices in enumerate(loader, start=1):
                 optimizer.zero_grad(set_to_none=True)
                 with self._autocast_context():
-                    state = self.model.encode_cell_state(
-                        self._token_batch(train_tokens, indices),
-                        attention_mode=self.attention_mode,
-                    )
+                    if classifier_only:
+                        state = training_features[indices].to(self.device)
+                    else:
+                        state = self.model.encode_cell_state(
+                            self._token_batch(train_tokens, indices),
+                            attention_mode=self.attention_mode,
+                        )
                     logits = self.classifier(state)
                     loss = criterion(logits, train_y[indices].to(self.device))
                 scaler.scale(loss).backward()
@@ -619,7 +661,8 @@ class CellTypeAnnotator:
         # Exclusive creation protects existing results unless explicitly overridden.
         with path.open("wb" if overwrite else "xb") as handle:
             torch.save({
-                "format_version": 4,
+                "format_version": 5,
+                "freeze_layers": self.freeze_layers_,
                 "attention_mode": self.attention_mode,
                 "tokenizer_config": self.tokenizer_config,
                 "vocabulary_signature": self.vocabulary_signature,
@@ -645,7 +688,7 @@ class CellTypeAnnotator:
     ) -> CellTypeAnnotator:
         """Restore an annotator using its original pretrained SFM and resources."""
         payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
-        if payload["format_version"] != 4:
+        if payload["format_version"] not in (4, 5):
             raise ValueError("Unsupported cell-type annotation checkpoint version.")
         if payload["attention_mode"] != "cell_global":
             raise ValueError("The checkpoint must use global-cell annotation attention.")
@@ -667,6 +710,10 @@ class CellTypeAnnotator:
         annotator.history_ = pd.DataFrame(payload["history"])
         annotator.classifier = annotator._new_classifier()
         annotator._restore_state(payload["state"])
+        # Version 4 checkpoints contain the original full fine-tuning setting.
+        annotator._configure_training(
+            0 if payload["format_version"] == 4 else payload["freeze_layers"]
+        )
         annotator.model.eval()
         annotator.classifier.eval()
         return annotator

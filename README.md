@@ -128,9 +128,7 @@ The local tutorial-data collection totals approximately 1.3 GB, including the co
 | [Inferring pooled GRNs from homogeneous cell populations with ChIP-seq-based benchmarking](docs/chipseq_grn_recovery.ipynb) | Preprocess hESC and mESC data, infer pooled GRNs, and compare them with ChIP-seq reference networks |
 | [Inferring cell-specific GRNs from heterogeneous cell populations](docs/cell_specific_grns.ipynb) | Preprocess mouse-pancreas data, generate cell-specific GRNs, and evaluate cell-type structure |
 | [Inferring pooled GRNs from homogeneous cell populations with Perturb-seq-based validation](docs/perturbseq_edge_validation.ipynb) | Infer a pooled K562 GRN and validate highly ranked edges with Perturb-seq |
-| [Annotating cell types with supervised fine-tuning](docs/cell_type_annotation.ipynb) | Fine-tune EFM cell-state embeddings to annotate held-out PBMC cells |
-
-The annotation task uses pretrained SFM gene ordering and a global first-token EFM readout of the observed expression sequence. The `CellTypeAnnotator` interface performs supervised fine-tuning (SFT) of the EFM embedding module, backbone and classifier. Annotation SFT uses a fixed epoch count and the final model, with no validation-set checkpoint selection. Long runs can save epoch-boundary recovery state with `training_checkpoint` and continue it with `resume_from`. The original causal EFM training and generation paths retain their attention behavior.
+| [Annotating cell types with supervised fine-tuning](docs/cell_type_annotation.ipynb) | Annotate held-out PBMC cells using EFM cell-state embeddings |
 
 ## Find your way around the repository
 
