@@ -129,6 +129,7 @@ The local tutorial-data collection totals approximately 1.3 GB, including the co
 | [Inferring cell-specific GRNs from heterogeneous cell populations](docs/cell_specific_grns.ipynb) | Preprocess mouse-pancreas data, generate cell-specific GRNs, and evaluate cell-type structure |
 | [Inferring pooled GRNs from homogeneous cell populations with Perturb-seq-based validation](docs/perturbseq_edge_validation.ipynb) | Infer a pooled K562 GRN and validate highly ranked edges with Perturb-seq |
 | [Annotating cell types with supervised fine-tuning](docs/cell_type_annotation.ipynb) | Annotate held-out PBMC cells using EFM cell-state embeddings |
+| [Predicting gene expression after genetic perturbation](docs/gene_perturbation_prediction.ipynb) | Predict held-out Norman perturbation responses using contextual EFM gene embeddings |
 
 ## Find your way around the repository
 

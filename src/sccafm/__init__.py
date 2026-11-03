@@ -13,6 +13,16 @@ except PackageNotFoundError:
 
 
 __all__ = [
+    "GenePerturbationPredictor",
+    "GenePerturbationPredictions",
+    "GenePerturbationEvaluation",
+    "evaluate_gene_perturbation",
+    "rank_perturbation_response_genes",
+    "PerturbationGraphs",
+    "build_perturbation_graphs",
+    "prepare_gene_perturbation_data",
+    "canonicalize_perturbation",
+
     "CellTypeAnnotator",
     "CellTypeEvaluation",
     "CellTypePredictions",
@@ -43,6 +53,15 @@ def __getattr__(name: str):
     if name == "load_yaml_config":
         return getattr(import_module(".config", __name__), name)
     if name in {
+        "GenePerturbationPredictor",
+        "GenePerturbationPredictions",
+        "GenePerturbationEvaluation",
+        "evaluate_gene_perturbation",
+        "rank_perturbation_response_genes",
+        "PerturbationGraphs",
+        "build_perturbation_graphs",
+        "prepare_gene_perturbation_data",
+        "canonicalize_perturbation",
         "CellTypeAnnotator",
         "CellTypeEvaluation",
         "CellTypePredictions",

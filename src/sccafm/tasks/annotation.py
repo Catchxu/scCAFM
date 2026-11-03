@@ -25,6 +25,7 @@ from ..data.tokenizer import ScTokenizerOutput
 from ..models.efm import EFM, reorder_gene_aligned_tokens
 from ..models.sfm import SFM
 from .grn import GRNInferencer
+from ._efm import configure_efm_freezing, set_efm_training_mode
 
 
 def _cell_labels(adata: AnnData, label_key: str) -> np.ndarray:
@@ -247,27 +248,11 @@ class CellTypeAnnotator:
         ).to(self.device)
 
     def _configure_training(self, freeze_layers: int) -> None:
-        """Freeze a prefix of EFM blocks, including the complete-encoder endpoint."""
-        num_layers = self.model.backbone.num_layers
-        if not 0 <= freeze_layers <= num_layers:
-            raise ValueError(f"freeze_layers must be between 0 and {num_layers}.")
+        configure_efm_freezing(self.model, freeze_layers)
         self.freeze_layers_ = freeze_layers
-        self.model.zero_grad(set_to_none=True)
-        self.model.requires_grad_(False)
-        self.model.embedding.requires_grad_(freeze_layers == 0)
-        for layer in self.model.backbone.layers[freeze_layers:]:
-            layer.requires_grad_(True)
-        self.model.backbone.final_norm.requires_grad_(freeze_layers < num_layers)
 
     def _set_training_mode(self) -> None:
-        """Keep frozen embeddings and blocks deterministic during training."""
-        self.model.train()
-        if self.freeze_layers_ > 0:
-            self.model.embedding.eval()
-        for layer in self.model.backbone.layers[:self.freeze_layers_]:
-            layer.eval()
-        if self.freeze_layers_ == self.model.backbone.num_layers:
-            self.model.eval()
+        set_efm_training_mode(self.model, self.freeze_layers_)
         self.classifier.train()
 
     def _autocast_context(self):

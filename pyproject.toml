@@ -33,6 +33,11 @@ dependencies = [
 
 
 [project.optional-dependencies]
+perturbation = [
+    "torch-geometric>=2.7,<3",
+    "networkx>=3,<4",
+]
+
 dev = [
     "pytest",
     "black",

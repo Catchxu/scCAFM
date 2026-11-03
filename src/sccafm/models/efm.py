@@ -341,6 +341,35 @@ class EFM(nn.Module):
             global_cell_token=True,
         )[:, 0, :]
 
+    def encode_gene_context(
+        self,
+        tokens: dict[str, torch.Tensor | None],
+        *,
+        attention_mode: str = "causal",
+    ) -> torch.Tensor:
+        """Return gene-aligned contextual states without pretraining heads.
+
+        Output positions follow the supplied gene-token order. The causal mode
+        matches forward().gene_embeddings; cell_global uses the observed-cell
+        attention rule shared with supervised cell-type annotation.
+        """
+        if attention_mode not in ("causal", "cell_global"):
+            raise ValueError("attention_mode must be 'causal' or 'cell_global'.")
+        embedded = self.embedding(
+            input_ids=tokens["input_ids"],
+            expression_values=tokens["expression_values"],
+            condition_ids=tokens["condition_ids"],
+            padding_mask=tokens["padding_mask"],
+            non_tf_mask=tokens["non_tf_mask"],
+        )
+        states = self.backbone(
+            embedded.embeddings,
+            key_padding_mask=embedded.key_padding_mask,
+            causal=True,
+            global_cell_token=attention_mode == "cell_global",
+        )
+        return states[:, 1:, :]
+
     def forward(self, tokens: dict[str, torch.Tensor | None]) -> EFMOutput:
         input_ids = tokens.get("input_ids")
         expression_values = tokens.get("expression_values")
