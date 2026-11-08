@@ -102,13 +102,6 @@ def prepare_gene_perturbation_data(
     split.update({p: "val" for p in validation})
     split.update({p: "test" for p in test})
     obs["split"] = obs[condition_key].astype(str).map(split)
-    groups = {p: "train" for p in train}
-    groups[control_label] = "control"
-    for group, perts in test_groups.items():
-        groups.update({p: group for p in perts})
-    for group, perts in validation_groups.items():
-        groups.update({p: group for p in perts})
-    obs["evaluation_group"] = obs[condition_key].astype(str).map(groups)
 
     controls = np.flatnonzero(obs[condition_key].astype(str).eq(control_label).to_numpy())
     generator = np.random.RandomState(random_state)

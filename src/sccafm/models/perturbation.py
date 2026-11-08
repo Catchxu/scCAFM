@@ -1,4 +1,4 @@
-"""GEARS expression decoder for contextual EFM gene states.
+"""GEARS expression decoder with fixed EFM gene embeddings.
 
 Adapted from https://github.com/snap-stanford/GEARS.
 
@@ -47,33 +47,31 @@ class _MLP(nn.Module):
 
 
 class GEARSPerturbationHead(nn.Module):
-    """Decode per-cell gene states with the reference GEARS forward logic.
+    """Decode gene expression with the reference GEARS forward logic.
 
-    The co-expression branch is inactive for this task. Projected external
-    gene vectors are L2-normalized, and control rows are excluded from the
-    perturbation-fusion BatchNorm. Contextual EFM states preserve their cell axis;
-    supplying repeated gene vectors recovers the reference fixed-vector case.
+    As in GEARS, every cell shares one vector per gene. gene_states holds fixed
+    EFM gene embeddings, one row per gene, in place of the reference learned
+    gene embedding; a trained linear projection maps them to the hidden size
+    and the projected vectors are L2-normalized. The co-expression branch is
+    inactive for this task, and control rows are excluded from the
+    perturbation-fusion BatchNorm.
     """
 
     def __init__(
-        self, *, num_genes: int, num_perturbations: int,
-        context_dim: int, hidden_size: int,
+        self, *, gene_states: torch.Tensor, num_perturbations: int, hidden_size: int,
         ontology_edges: torch.Tensor, ontology_weights: torch.Tensor,
-        use_gene_context: bool,
     ) -> None:
         super().__init__()
         from torch_geometric.nn import SGConv
 
+        num_genes = len(gene_states)
         self.num_genes = num_genes
         self.num_perturbations = num_perturbations
         self.hidden_size = hidden_size
-        self.use_gene_context = use_gene_context
         self.register_buffer("ontology_edges", ontology_edges.long())
         self.register_buffer("ontology_weights", ontology_weights.float())
-        if use_gene_context:
-            self.context_projection = nn.Linear(context_dim, hidden_size)
-        else:
-            self.gene_embedding = nn.Embedding(num_genes, hidden_size, max_norm=1.0)
+        self.register_buffer("gene_states", gene_states.float())
+        self.context_projection = nn.Linear(gene_states.shape[1], hidden_size)
         self.perturbation_embedding = nn.Embedding(
             num_perturbations, hidden_size, max_norm=1.0
         )
@@ -94,16 +92,11 @@ class GEARSPerturbationHead(nn.Module):
         nn.init.xavier_normal_(self.output_bias)
 
     def forward(
-        self, control_expression: torch.Tensor,
-        perturbation_mask: torch.Tensor,
-        gene_context: torch.Tensor | None,
+        self, control_expression: torch.Tensor, perturbation_mask: torch.Tensor,
     ) -> torch.Tensor:
         batch_size = len(control_expression)
-        gene_ids = torch.arange(self.num_genes, device=control_expression.device)
-        if self.use_gene_context:
-            base = F.normalize(self.context_projection(gene_context), p=2, dim=-1)
-        else:
-            base = self.gene_embedding(gene_ids).unsqueeze(0).expand(batch_size, -1, -1)
+        genes = F.normalize(self.context_projection(self.gene_states), p=2, dim=-1)
+        base = genes.unsqueeze(0).expand(batch_size, -1, -1)
         base = self.base_norm(base.reshape(-1, self.hidden_size)).relu()
         base = self.base_transform(base)
         base = base.reshape(batch_size, self.num_genes, self.hidden_size)

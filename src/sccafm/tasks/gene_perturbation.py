@@ -19,7 +19,6 @@ from ..data import ScTokenizer
 from ..models.efm import EFM, reorder_gene_aligned_tokens
 from ..models.perturbation import GEARSPerturbationHead
 from ..models.sfm import SFM
-from ._efm import configure_efm_freezing, set_efm_training_mode
 from .grn import GRNInferencer
 from .perturbation_data import PerturbationGraphs
 
@@ -44,21 +43,16 @@ class GenePerturbationEvaluation:
     def to_condition_table(self) -> pd.DataFrame:
         return self.conditions.copy()
 
-    def to_group_table(self) -> pd.DataFrame:
+    def to_summary_table(self) -> pd.DataFrame:
+        """Average every metric over conditions, weighting conditions equally."""
         metrics = ["mse", "mse_de20", "pearson_delta", "pearson_delta_de20"]
-        groups = self.conditions.groupby("evaluation_group", observed=True)
-        summary = groups[metrics].mean()
-        summary.insert(0, "n_conditions", groups.size())
-        summary.insert(1, "n_cells", groups["n_cells"].sum())
-        summary["n_pearson_defined"] = groups["pearson_delta"].count()
-        summary["n_pearson_de20_defined"] = groups["pearson_delta_de20"].count()
-        overall = self.conditions[metrics].mean().to_frame().T
-        overall.index = pd.Index(["overall"], name="evaluation_group")
-        overall.insert(0, "n_conditions", len(self.conditions))
-        overall.insert(1, "n_cells", self.conditions["n_cells"].sum())
-        overall["n_pearson_defined"] = self.conditions["pearson_delta"].count()
-        overall["n_pearson_de20_defined"] = self.conditions["pearson_delta_de20"].count()
-        return pd.concat([overall, summary])
+        summary = self.conditions[metrics].mean().to_frame().T
+        summary.index = pd.Index(["overall"])
+        summary.insert(0, "n_conditions", len(self.conditions))
+        summary.insert(1, "n_cells", self.conditions["n_cells"].sum())
+        summary["n_pearson_defined"] = self.conditions["pearson_delta"].count()
+        summary["n_pearson_de20_defined"] = self.conditions["pearson_delta_de20"].count()
+        return summary
 
 
 def rank_perturbation_response_genes(
@@ -120,7 +114,6 @@ def evaluate_gene_perturbation(
         predicted_delta = estimate - control_mean
         rows.append({
             "condition": condition,
-            "evaluation_group": cells.obs["evaluation_group"].iloc[0],
             "n_cells": cells.n_obs,
             "mse": float(np.mean((estimate - target) ** 2)),
             "mse_de20": float(np.mean((estimate[de] - target[de]) ** 2)),
@@ -131,22 +124,25 @@ def evaluate_gene_perturbation(
 
 
 class GenePerturbationPredictor:
-    """Train a GEARS expression decoder on cell-specific EFM gene states.
+    """Train a GEARS expression decoder on frozen EFM gene embeddings.
 
-    fit() receives separate training and validation cells. predict() receives unperturbed cells and
-    intervention identities, with no perturbed outcome expression. The SFM stays
-    frozen. freeze_layers controls the leading EFM blocks, exactly as in the cell
-    type annotation API. use_gene_context=False supplies a GEARS baseline using
-    learned gene embeddings on the same panel, graphs, split and training loss.
+    fit() receives separate training and validation cells. The frozen SFM orders
+    the genes of every training control and the frozen EFM encodes them; each
+    gene's state is averaged over these controls into one embedding shared by
+    all cells, in place of GEARS's learned gene embedding. predict() receives
+    unperturbed cells and intervention identities, with no perturbed outcome
+    expression.
     """
 
     def __init__(
         self, *, model: EFM, ordering_model: SFM, tokenizer: ScTokenizer,
         tokenizer_config: dict, vocabulary_signature: str,
         device: str | torch.device, autocast_dtype: torch.dtype | None,
-        hidden_size: int, use_gene_context: bool,
+        hidden_size: int,
     ) -> None:
         self.model = model
+        self.model.requires_grad_(False)
+        self.model.eval()
         self.ordering_model = ordering_model
         self.ordering_model.requires_grad_(False)
         self.ordering_model.eval()
@@ -156,7 +152,6 @@ class GenePerturbationPredictor:
         self.device = torch.device(device)
         self.autocast_dtype = autocast_dtype
         self.hidden_size = hidden_size
-        self.use_gene_context = use_gene_context
         self.attention_mode = "cell_global"
         self.head = None
 
@@ -168,7 +163,6 @@ class GenePerturbationPredictor:
         max_length: int = 2048,
         autocast_dtype: torch.dtype | None = torch.bfloat16,
         hidden_size: int = 64,
-        use_gene_context: bool = True,
         platform_key: str | None = None,
         species_key: str | None = "species",
         tissue_key: str | None = None,
@@ -195,7 +189,7 @@ class GenePerturbationPredictor:
                 assets.vocab.read_bytes() + assets.cond_dict.read_bytes()
             ).hexdigest(),
             device=device, autocast_dtype=autocast_dtype,
-            hidden_size=hidden_size, use_gene_context=use_gene_context,
+            hidden_size=hidden_size,
         )
 
     def _autocast(self):
@@ -203,18 +197,25 @@ class GenePerturbationPredictor:
             return torch.autocast("cuda", dtype=self.autocast_dtype)
         return nullcontext()
 
-    def _new_head(self) -> GEARSPerturbationHead:
+    def _new_head(self, gene_states: torch.Tensor) -> GEARSPerturbationHead:
         return GEARSPerturbationHead(
-            num_genes=len(self.gene_names_),
+            gene_states=gene_states,
             num_perturbations=len(self.perturbation_genes_),
-            context_dim=self.model.embed_dim,
             hidden_size=self.hidden_size,
             ontology_edges=self.graphs_.ontology_edges,
             ontology_weights=self.graphs_.ontology_weights,
-            use_gene_context=self.use_gene_context,
         ).to(self.device)
 
-    def _prepare_controls(self, controls: AnnData, batch_size: int, *, verbose: bool = False):
+    def _token_batch(self, values, indices):
+        return {
+            key: None if value is None else value[indices].to(self.device)
+            for key, value in values.items()
+        }
+
+    def _control_gene_states(
+        self, controls: AnnData, batch_size: int, *, verbose: bool,
+    ) -> torch.Tensor:
+        """Average gene-aligned EFM states over control cells, one row per gene."""
         tokens = self.tokenizer(controls, gene_key=None)
         values = {
             "input_ids": tokens.input_ids,
@@ -223,95 +224,35 @@ class GenePerturbationPredictor:
             "padding_mask": tokens.padding_mask,
             "non_tf_mask": tokens.non_tf_mask,
         }
+        loader = DataLoader(range(controls.n_obs), batch_size=batch_size)
         positions = []
         with torch.no_grad():
-            loader = DataLoader(range(controls.n_obs), batch_size=batch_size)
             for step, indices in enumerate(loader, 1):
-                batch = self._token_batch(values, indices)
                 with self._autocast():
                     _, order = self.ordering_model(
-                        batch, return_factors=False, compute_grn=False, compute_order=True
+                        self._token_batch(values, indices),
+                        return_factors=False, compute_grn=False, compute_order=True,
                     )
                 positions.append(order.positions.cpu())
                 if verbose and step % 20 == 0:
                     print(f"SFM ordering controls: batch {step}/{len(loader)}", flush=True)
-        positions = torch.cat(positions)
-        return reorder_gene_aligned_tokens(values, positions), positions.argsort(1)
-
-    def _token_batch(self, values, indices):
-        return {
-            key: None if value is None else value[indices].to(self.device)
-            for key, value in values.items()
-        }
-
-    def _cache_frozen_prefix(self, tokens, batch_size: int, *, verbose: bool):
-        # Only deterministic, frozen modules enter this CPU cache. Its full
-        # precision matches the residual stream; trainable layers are never cached.
-        self.model.eval()
-        n_controls, n_tokens = tokens["input_ids"].shape
-        cached = torch.empty(
-            n_controls, n_tokens + 1, self.model.embed_dim,
-            dtype=self.model.embedding.gene_embedding.weight.dtype,
-        )
-        loader = DataLoader(range(n_controls), batch_size=batch_size)
-        with torch.no_grad():
+            positions = torch.cat(positions)
+            ordered = reorder_gene_aligned_tokens(values, positions)
+            inverse = positions.argsort(1)
+            total = torch.zeros(len(self.gene_names_), self.model.embed_dim, dtype=torch.float64)
             for step, indices in enumerate(loader, 1):
-                batch = self._token_batch(tokens, indices)
                 with self._autocast():
-                    embedded = self.model.embedding(**batch)
-                    states = embedded.embeddings
-                    for layer in self.model.backbone.layers[:self.freeze_layers_]:
-                        states = layer(
-                            states, key_padding_mask=embedded.key_padding_mask,
-                            causal=True, global_cell_token=True,
-                        )
-                cached[indices] = states.cpu()
-                if verbose and step % 50 == 0:
-                    print(f"Frozen EFM prefix: batch {step}/{len(loader)}", flush=True)
-        return cached
-
-    def _contexts(self, tokens, inverse, indices, frozen_prefix=None):
-        if frozen_prefix is None:
-            states = self.model.encode_gene_context(
-                self._token_batch(tokens, indices), attention_mode=self.attention_mode
-            )
-        else:
-            states = frozen_prefix[indices].to(self.device)
-            padding = tokens["padding_mask"]
-            if padding is not None:
-                padding = torch.cat([
-                    torch.zeros(len(indices), 1, dtype=torch.bool, device=self.device),
-                    padding[indices].to(self.device),
-                ], dim=1)
-            for layer in self.model.backbone.layers[self.freeze_layers_:]:
-                states = layer(
-                    states, key_padding_mask=padding, causal=True, global_cell_token=True
+                    states = self.model.encode_gene_context(
+                        self._token_batch(ordered, indices), attention_mode=self.attention_mode
+                    )
+                # Restore the expression gene order before averaging over cells.
+                restored = states.gather(
+                    1, inverse[indices].to(self.device).unsqueeze(-1).expand_as(states)
                 )
-            states = self.model.backbone.final_norm(states)
-            if padding is not None:
-                states = states.masked_fill(padding.unsqueeze(-1), 0.0)
-            states = states[:, 1:]
-        restored = states.gather(
-            1, inverse[indices].to(self.device).unsqueeze(-1).expand_as(states)
-        )
-        return restored[:, :len(self.gene_names_)]
-
-    def _cache_control_contexts(self, tokens, inverse, batch_size: int, *, verbose: bool):
-        """Cache canonical gene states per control cell, never a pooled gene table."""
-        self.model.eval()
-        n_controls = len(tokens["input_ids"])
-        features = torch.empty(
-            n_controls, len(self.gene_names_), self.model.embed_dim, dtype=torch.float32
-        )
-        loader = DataLoader(range(n_controls), batch_size=batch_size)
-        with torch.no_grad():
-            for step, indices in enumerate(loader, 1):
-                with self._autocast():
-                    states = self._contexts(tokens, inverse, indices)
-                features[indices] = states.float().cpu()
+                total += restored[:, :len(self.gene_names_)].double().sum(0).cpu()
                 if verbose and step % 50 == 0:
-                    print(f"Cell-specific gene contexts: batch {step}/{len(loader)}", flush=True)
-        return features
+                    print(f"EFM gene states: batch {step}/{len(loader)}", flush=True)
+        return (total / controls.n_obs).float()
 
     def _perturbation_masks(self, conditions):
         lookup = {g: i for i, g in enumerate(self.perturbation_genes_)}
@@ -324,27 +265,19 @@ class GenePerturbationPredictor:
         return masks
 
     def _capture_state(self):
-        modules = {"head": self.head}
-        if self.use_gene_context:
-            modules.update(embedding=self.model.embedding, backbone=self.model.backbone)
-        return {
-            name: {key: value.detach().cpu().clone() for key, value in module.state_dict().items()}
-            for name, module in modules.items()
-        }
+        return {"head": {
+            key: value.detach().cpu().clone() for key, value in self.head.state_dict().items()
+        }}
 
     def _restore_state(self, state):
         self.head.load_state_dict(state["head"], strict=True)
-        if self.use_gene_context:
-            self.model.embedding.load_state_dict(state["embedding"], strict=True)
-            self.model.backbone.load_state_dict(state["backbone"], strict=True)
 
     def _metadata(self):
         return {
-            "format": "sccafm-gene-perturbation-v2",
+            "format": "sccafm-gene-perturbation-v3",
             "tokenizer_config": self.tokenizer_config,
             "vocabulary_signature": self.vocabulary_signature,
             "hidden_size": self.hidden_size,
-            "use_gene_context": self.use_gene_context,
             "attention_mode": self.attention_mode,
             "gene_names": self.gene_names_,
             "perturbation_genes": self.perturbation_genes_,
@@ -352,7 +285,6 @@ class GenePerturbationPredictor:
             "control_label": self.control_label_,
             "condition_key": self.condition_key_,
             "control_mean": self.control_mean_,
-            "freeze_layers": self.freeze_layers_,
             "history": self.history_,
             "best_epoch": self.best_epoch_,
             "best_validation_mse_de": self.best_validation_mse_de_,
@@ -360,7 +292,7 @@ class GenePerturbationPredictor:
         }
 
     def save_checkpoint(self, path: str | Path, *, overwrite: bool = False) -> None:
-        """Save task weights and their gene/graph axes, without altering assets."""
+        """Save the decoder, its EFM gene embeddings and gene/graph axes."""
         path = Path(path)
         if path.exists() and not overwrite:
             raise FileExistsError(path)
@@ -375,12 +307,12 @@ class GenePerturbationPredictor:
         autocast_dtype: torch.dtype | None = torch.bfloat16,
     ) -> GenePerturbationPredictor:
         saved = torch.load(path, map_location="cpu", weights_only=True)
-        if saved["format"] != "sccafm-gene-perturbation-v2":
+        if saved["format"] != "sccafm-gene-perturbation-v3":
             raise ValueError("Not a scCAFM gene-perturbation checkpoint.")
         predictor = cls.from_pretrained(
             model_source, device=device, attention_backend=attention_backend,
             autocast_dtype=autocast_dtype, hidden_size=saved["hidden_size"],
-            use_gene_context=saved["use_gene_context"], **saved["tokenizer_config"],
+            **saved["tokenizer_config"],
         )
         if predictor.vocabulary_signature != saved["vocabulary_signature"]:
             raise ValueError("Checkpoint and pretrained vocabulary do not match.")
@@ -390,15 +322,12 @@ class GenePerturbationPredictor:
         predictor.control_label_ = saved["control_label"]
         predictor.condition_key_ = saved["condition_key"]
         predictor.control_mean_ = saved["control_mean"]
-        predictor.freeze_layers_ = saved["freeze_layers"]
         predictor.history_ = saved["history"]
         predictor.best_epoch_ = saved["best_epoch"]
         predictor.best_validation_mse_de_ = saved["best_validation_mse_de"]
         predictor.attention_mode = saved["attention_mode"]
-        predictor.head = predictor._new_head()
+        predictor.head = predictor._new_head(saved["state"]["head"]["gene_states"])
         predictor._restore_state(saved["state"])
-        configure_efm_freezing(predictor.model, predictor.freeze_layers_)
-        predictor.model.eval()
         predictor.head.eval()
         return predictor
 
@@ -407,30 +336,29 @@ class GenePerturbationPredictor:
         graphs: PerturbationGraphs,
         condition_key: str = "condition", control_label: str = "ctrl",
         control_id_key: str = "control_cell_id",
-        freeze_layers: int = 12,
         epochs: int = 20, batch_size: int = 32,
-        evaluation_batch_size: int = 128, ordering_batch_size: int = 32,
-        learning_rate: float = 1e-3, backbone_learning_rate: float = 1e-5,
+        evaluation_batch_size: int = 128, encoding_batch_size: int = 32,
+        learning_rate: float = 1e-3,
         weight_decay: float = 5e-4, direction_weight: float = 0.1,
         lr_step_size: int = 1, lr_gamma: float = 0.5,
         early_stopping_patience: int | None = None,
         random_state: int = 0, verbose: bool = True,
-        cache_frozen_prefix: bool = False,
         training_checkpoint: str | Path | None = None,
         resume_from: str | Path | None = None,
     ) -> GenePerturbationPredictor:
         """Train with the reference GEARS loss, Adam and validation selection.
 
+        The frozen SFM and EFM encode every training control once, in
+        encoding_batch_size cells per batch, and the resulting per-gene states
+        are averaged over controls. These gene embeddings stay fixed; the
+        projection and GEARS decoder train. EFM inference uses the configured
+        autocast precision; the decoder runs in float32, including its
+        BatchNorm statistics.
+
         Controls and targets use the fixed control_cell_id pairs prepared once
         before fitting. StepLR uses lr_step_size and lr_gamma; its defaults halve
         Adam's learning rate each epoch. Gradient values are clipped to [-1, 1].
         Training drops its incomplete final batch.
-        The head runs in float32, including its BatchNorm statistics.
-
-        freeze_layers counts frozen leading EFM blocks as in cell annotation.
-        Freezing every block caches deterministic, cell-specific per-gene states
-        in CPU memory. Partial/full fine-tuning keeps the trainable EFM path live.
-        SFM stays frozen. EFM inference uses the configured autocast precision.
 
         Validation uses the preprocessing DE ranking on the fitted gene panel.
         The returned model is the epoch with the lowest condition-mean DE20 MSE.
@@ -446,8 +374,6 @@ class GenePerturbationPredictor:
         }
         if condition_key in condition_fields:
             raise ValueError("Intervention labels must not be EFM condition metadata.")
-        if not self.use_gene_context and freeze_layers != self.model.backbone.num_layers:
-            raise ValueError("The learned-embedding GEARS baseline freezes every EFM block.")
         self.condition_key_ = condition_key
         self.control_label_ = control_label
         self.gene_names_ = tuple(train_adata.var_names)
@@ -459,11 +385,15 @@ class GenePerturbationPredictor:
             raise ValueError("Training and validation perturbation conditions must be disjoint.")
         self.perturbation_genes_ = tuple(graphs.perturbation_genes)
         self.graphs_ = graphs
-        self.freeze_layers_ = freeze_layers
-        configure_efm_freezing(self.model, freeze_layers)
-        torch.manual_seed(random_state)
-        self.head = self._new_head()
         controls = train_adata[train_adata.obs[condition_key].eq(control_label)]
+        # Encoding must not alter the decoder-initialization or training RNG.
+        devices = [self.device] if self.device.type == "cuda" else []
+        with torch.random.fork_rng(devices=devices):
+            gene_states = self._control_gene_states(
+                controls, encoding_batch_size, verbose=verbose
+            )
+        torch.manual_seed(random_state)
+        self.head = self._new_head(gene_states)
         control_x = torch.tensor(controls.X.toarray(), dtype=torch.float32)
         self.control_mean_ = control_x.mean(0)
         ctrl_mean = self.control_mean_.to(self.device)
@@ -495,13 +425,9 @@ class GenePerturbationPredictor:
             else torch.ones(len(self.gene_names_), dtype=torch.bool)
             for i, name in enumerate(train["names"])
         ]).to(self.device)
-        groups = [{"params": self.head.parameters(), "lr": learning_rate}]
-        if self.use_gene_context and freeze_layers < self.model.backbone.num_layers:
-            groups.append({
-                "params": [p for p in self.model.parameters() if p.requires_grad],
-                "lr": backbone_learning_rate,
-            })
-        optimizer = torch.optim.Adam(groups, weight_decay=weight_decay)
+        optimizer = torch.optim.Adam(
+            self.head.parameters(), lr=learning_rate, weight_decay=weight_decay
+        )
         scheduler = torch.optim.lr_scheduler.StepLR(
             optimizer, step_size=lr_step_size, gamma=lr_gamma
         )
@@ -521,17 +447,17 @@ class GenePerturbationPredictor:
         for value in (graphs.ontology_edges, graphs.ontology_weights):
             signature.update(value.numpy().tobytes())
         spec = {
-            "protocol": "reference-gears-v2",
+            "protocol": "reference-gears-v3",
             "input_sha256": signature.hexdigest(),
             "gene_names": self.gene_names_,
             "perturbation_genes": self.perturbation_genes_,
             "vocabulary_signature": self.vocabulary_signature,
             "tokenizer_config": self.tokenizer_config,
-            "hidden_size": self.hidden_size, "use_gene_context": self.use_gene_context,
-            "freeze_layers": freeze_layers, "batch_size": batch_size,
+            "hidden_size": self.hidden_size,
+            "batch_size": batch_size,
             "evaluation_batch_size": evaluation_batch_size,
-            "ordering_batch_size": ordering_batch_size,
-            "learning_rate": learning_rate, "backbone_learning_rate": backbone_learning_rate,
+            "encoding_batch_size": encoding_batch_size,
+            "learning_rate": learning_rate,
             "weight_decay": weight_decay, "direction_weight": direction_weight,
             "lr_step_size": lr_step_size, "lr_gamma": lr_gamma,
             "early_stopping_patience": early_stopping_patience,
@@ -547,7 +473,6 @@ class GenePerturbationPredictor:
         self.best_validation_mse_de_ = float("inf")
         first_epoch = 0
         best_state = None
-        tokens, inverse = None, None
         if resume_from is not None:
             saved = torch.load(resume_from, map_location="cpu", weights_only=True)
             if saved["training_spec"] != spec:
@@ -555,7 +480,6 @@ class GenePerturbationPredictor:
             self._restore_state(saved["state"])
             optimizer.load_state_dict(saved["optimizer"])
             scheduler.load_state_dict(saved["scheduler"])
-            tokens, inverse = saved["ordered_tokens"], saved["inverse_order"]
             first_epoch = saved["completed_epochs"]
             self.history_ = saved["history"]
             self.best_epoch_ = saved["best_epoch"]
@@ -564,38 +488,13 @@ class GenePerturbationPredictor:
             torch.set_rng_state(saved["torch_rng"])
             if self.device.type == "cuda":
                 torch.cuda.set_rng_state(saved["cuda_rng"], self.device)
-        features, prefix = None, None
-        # Feature preparation must not alter the training sampler/dropout RNG.
-        devices = [self.device] if self.device.type == "cuda" else []
-        with torch.random.fork_rng(devices=devices):
-            if self.use_gene_context:
-                if tokens is None:
-                    tokens, inverse = self._prepare_controls(
-                        controls, ordering_batch_size, verbose=verbose
-                    )
-                if freeze_layers == self.model.backbone.num_layers:
-                    features = self._cache_control_contexts(tokens, inverse, batch_size, verbose=verbose)
-                elif cache_frozen_prefix:
-                    if freeze_layers == 0:
-                        raise ValueError("A trainable EFM prefix cannot be cached.")
-                    prefix = self._cache_frozen_prefix(tokens, batch_size, verbose=verbose)
 
         def predict_batch(dataset, indices):
-            paired = dataset["paired"][indices]
-            x = control_x[paired].to(self.device)
-            context = None
-            if self.use_gene_context:
-                if features is not None:
-                    context = features[paired].to(self.device)
-                else:
-                    with self._autocast():
-                        context = self._contexts(tokens, inverse, paired, prefix)
-                    context = context.float()
+            x = control_x[dataset["paired"][indices]].to(self.device)
             ids = dataset["ids"][indices].to(self.device)
-            return self.head(x, dataset["masks"][ids], context), ids
+            return self.head(x, dataset["masks"][ids]), ids
 
         def metrics(loader, dataset):
-            self.model.eval()
             self.head.eval()
             predictions, targets, condition_ids = [], [], []
             with torch.no_grad():
@@ -631,11 +530,10 @@ class GenePerturbationPredictor:
                     print(f"Early stopping after {epoch} epochs; best epoch={self.best_epoch_}.", flush=True)
                 break
             started = time.monotonic()
-            set_efm_training_mode(self.model, freeze_layers)
             self.head.train()
             running = torch.zeros((), device=self.device)
             used = 0
-            learning_rates = [group["lr"] for group in optimizer.param_groups]
+            current_learning_rate = optimizer.param_groups[0]["lr"]
             for step, indices in enumerate(train_loader, 1):
                 optimizer.zero_grad(set_to_none=True)
                 prediction, ids = predict_batch(train, indices)
@@ -652,9 +550,7 @@ class GenePerturbationPredictor:
                 grouped.index_add_(0, group, per_cell)
                 loss = (grouped / count).mean()
                 loss.backward()
-                torch.nn.utils.clip_grad_value_(
-                    [p for group_ in optimizer.param_groups for p in group_["params"]], 1.0
-                )
+                torch.nn.utils.clip_grad_value_(self.head.parameters(), 1.0)
                 optimizer.step()
                 running += loss.detach() * len(indices)
                 used += len(indices)
@@ -667,7 +563,7 @@ class GenePerturbationPredictor:
                 "epoch": epoch + 1, "loss": float(running / used),
                 "train_mse": train_mse, "train_mse_de20": train_de,
                 "validation_mse": val_mse, "validation_mse_de20": val_de,
-                "learning_rate": learning_rates[0],
+                "learning_rate": current_learning_rate,
                 "seconds": time.monotonic() - started,
             }
             if not np.isfinite(row["loss"]) or not np.isfinite(val_de):
@@ -688,7 +584,6 @@ class GenePerturbationPredictor:
                     **self._metadata(), "state": self._capture_state(),
                     "best_state": best_state, "optimizer": optimizer.state_dict(),
                     "scheduler": scheduler.state_dict(), "training_spec": spec,
-                    "ordered_tokens": tokens, "inverse_order": inverse,
                     "completed_epochs": epoch + 1,
                     "torch_rng": torch.get_rng_state(),
                     "cuda_rng": torch.cuda.get_rng_state(self.device) if self.device.type == "cuda" else None,
@@ -697,23 +592,23 @@ class GenePerturbationPredictor:
                 torch.save(recovery, temporary)
                 temporary.replace(path)
         self._restore_state(best_state)
-        self.model.eval()
         self.head.eval()
         return self
 
     def predict(
         self, control_adata: AnnData, *,
         perturbations: list[str] | list[list[str]],
-        batch_size: int = 300, ordering_batch_size: int = 32,
-        n_control_samples: int = 300, random_state: int = 1,
+        batch_size: int = 300, n_control_samples: int = 300, random_state: int = 1,
         verbose: bool = False,
     ) -> GenePerturbationPredictions:
         """Average 300 sampled control predictions per intervention by default.
 
         Sampling is with replacement from the supplied control pool, matching
-        GEARS.predict(). Raw condition strings retain their labels in the output;
-        lists of gene names produce a '+'-joined query label. No response cells
-        are accepted as prediction inputs.
+        GEARS.predict(). Gene embeddings were fixed during fit(), so prediction
+        runs only the GEARS decoder; sampled controls differ only in the
+        expression that the predicted response is added to. Raw condition
+        strings retain their labels in the output; lists of gene names produce a
+        '+'-joined query label. No response cells are accepted as prediction inputs.
         """
         if not control_adata.obs[self.condition_key_].eq(self.control_label_).all():
             raise ValueError("predict() requires unperturbed control cells only.")
@@ -726,23 +621,15 @@ class GenePerturbationPredictor:
         samples = generator.randint(0, controls.n_obs, size=(len(conditions), n_control_samples))
         used, inverse_sample = np.unique(samples, return_inverse=True)
         sample_rows = torch.tensor(inverse_sample.reshape(samples.shape))
-        selected = controls[used]
-        control_x = torch.tensor(selected.X.toarray(), dtype=torch.float32)
-        features = None
-        self.model.eval()
+        control_x = torch.tensor(controls[used].X.toarray(), dtype=torch.float32)
         self.head.eval()
-        if self.use_gene_context:
-            tokens, inverse = self._prepare_controls(selected, ordering_batch_size, verbose=verbose)
-            features = self._cache_control_contexts(tokens, inverse, 32, verbose=verbose)
         results = []
         with torch.no_grad():
             for i, condition in enumerate(conditions):
                 outputs = []
                 for indices in sample_rows[i].split(batch_size):
-                    context = features[indices].to(self.device) if self.use_gene_context else None
                     prediction = self.head(
-                        control_x[indices].to(self.device),
-                        masks[i].expand(len(indices), -1), context,
+                        control_x[indices].to(self.device), masks[i].expand(len(indices), -1),
                     )
                     outputs.append(prediction.cpu().numpy())
                 results.append(np.concatenate(outputs).mean(axis=0))
